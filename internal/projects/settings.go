@@ -174,6 +174,10 @@ func (s *Store) UpdateSettings(ref string, req SettingsRequest) (*SettingsResult
 		default:
 			err = invalidf("scopes: project, object, part, layer_range, plate", "unknown scope %q", scope)
 		}
+		if err == nil && !res.effective() {
+			// Nothing changes: the project is not saved and its revision stays.
+			h.changed, h.allPlates, h.plates = false, false, nil
+		}
 		return err
 	})
 	if err != nil {
@@ -339,8 +343,11 @@ func (h *handle) updateProject(req SettingsRequest, res *SettingsResult) error {
 			res.Changed = append(res.Changed, ch)
 			continue
 		}
-		if valEqual(old, nv) {
-			ch.Note = "unchanged"
+		if sameValue(pl.o, old, nv) {
+			ch.Note = "unchanged" // an equivalent value: the stored text stays as it is
+			ch.New = ch.Old
+			res.Changed = append(res.Changed, ch)
+			continue
 		}
 		cfg.Set(key, nv)
 		res.Changed = append(res.Changed, ch)
@@ -552,6 +559,9 @@ func (h *handle) updateObject(req SettingsRequest, res *SettingsResult) error {
 			continue
 		}
 		nv := objectValue(opt, req.Values[key])
+		if old != "" && sameValue(opt, textVal(opt, old), anyToVal(opt, req.Values[key])) {
+			nv = old // an equivalent value: the stored text stays as it is
+		}
 		if err := h.p.SetObjectOverride(o.ID, key, nv); err != nil {
 			return errf(CodeInternal, "", "%v", err)
 		}
@@ -595,6 +605,9 @@ func (h *handle) updatePart(req SettingsRequest, res *SettingsResult) error {
 			continue
 		}
 		nv := objectValue(opt, req.Values[key])
+		if old != "" && sameValue(opt, textVal(opt, old), anyToVal(opt, req.Values[key])) {
+			nv = old // an equivalent value: the stored text stays as it is
+		}
 		if err := h.p.SetPartOverride(o.ID, part.ID, key, nv); err != nil {
 			return errf(CodeInternal, "", "%v", err)
 		}
@@ -642,6 +655,9 @@ func (h *handle) updateRange(req SettingsRequest, res *SettingsResult) error {
 			continue
 		}
 		nv := objectValue(opt, req.Values[key])
+		if old != "" && sameValue(opt, textVal(opt, old), anyToVal(opt, req.Values[key])) {
+			nv = old // an equivalent value: the stored text stays as it is
+		}
 		r.Options.Set(key, nv)
 		res.Changed = append(res.Changed, Change{Key: key, Label: label(opt), Scope: ScopeLayerRange, Target: req.Target, Old: old, New: nv})
 	}
@@ -703,6 +719,9 @@ func (h *handle) updatePlate(req SettingsRequest, res *SettingsResult) error {
 			continue
 		}
 		nv := plateValue(opts[key], req.Values[key])
+		if old != "" && opts[key] != nil && sameValue(opts[key], textVal(opts[key], old), anyToVal(opts[key], req.Values[key])) {
+			nv = old
+		}
 		if err := h.p.SetPlateKey(pl.Index, name, nv); err != nil {
 			return errf(CodeInternal, "", "%v", err)
 		}
@@ -732,4 +751,80 @@ func plateValue(o *catalog.Option, v any) string {
 		return strings.Join(vv.List, " ")
 	}
 	return vv.Str
+}
+
+// effective reports whether a result changed anything: a value set to what it
+// already was, or an override removed that did not exist, is not a change. It
+// marks those changes "unchanged".
+func (r *SettingsResult) effective() bool {
+	any := len(r.Forced) > 0
+	for i := range r.Changed {
+		c := &r.Changed[i]
+		noop := (!c.Removed && c.Old == c.New) || (c.Removed && c.Old == "" && c.Scope != ScopeProject)
+		if c.Note == "unchanged" {
+			noop = true
+		}
+		if noop {
+			c.Note = "unchanged"
+			continue
+		}
+		any = true
+	}
+	return any
+}
+
+// textVal reads the stored text of an object, part or range override as a value
+// of its option (vectors are comma separated there).
+func textVal(o *catalog.Option, s string) val {
+	if o != nil && o.IsVector {
+		return lval(strings.Split(s, ",")...)
+	}
+	return sval(s)
+}
+
+// normElem brings one element to a comparable form: numbers without trailing
+// zeros, a percent key without its "%", booleans as 1 and 0.
+func normElem(o *catalog.Option, s string) string {
+	s = strings.Trim(strings.TrimSpace(s), `"`)
+	if o == nil {
+		return s
+	}
+	switch o.ValueType {
+	case "bool":
+		switch strings.ToLower(s) {
+		case "true", "yes", "on":
+			return "1"
+		case "false", "no", "off":
+			return "0"
+		}
+	}
+	// Numbers without trailing zeros; a percent key has no sign to compare, the
+	// others keep theirs (15 mm and 15 % differ for a float or percent setting).
+	num, pct := s, false
+	if strings.HasSuffix(s, "%") {
+		num, pct = strings.TrimSuffix(s, "%"), true
+	}
+	if f, err := strconv.ParseFloat(num, 64); err == nil {
+		if pct && o.ValueType != "percent" {
+			return formatNumber(f) + "%"
+		}
+		return formatNumber(f)
+	}
+	return s
+}
+
+// sameValue reports whether two values of an option are the same setting: the
+// catalog decides what equal means (15 and 15% for a percent, 0.2 and 0.20,
+// true and 1, vectors element by element).
+func sameValue(o *catalog.Option, a, b val) bool {
+	ea, eb := valElems(a), valElems(b)
+	if len(ea) != len(eb) || a.IsList != b.IsList && len(ea) != 1 {
+		return false
+	}
+	for i := range ea {
+		if normElem(o, ea[i]) != normElem(o, eb[i]) {
+			return false
+		}
+	}
+	return true
 }

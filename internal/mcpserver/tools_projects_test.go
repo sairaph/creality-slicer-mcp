@@ -683,3 +683,24 @@ func TestAddModelObjectsAndModifierRotationAreWired(t *testing.T) {
 		t.Error("a rotation with one angle was accepted")
 	}
 }
+
+// v0.1.2: replies say what the tools added or moved.
+func TestRepliesNoteAddedLayerHeightAndMovedObjects(t *testing.T) {
+	pf := newProjFixture(t)
+	id := pf.create(t, "Notes")
+	x1, x2 := 100.0, 105.0
+	for i, x := range []float64{x1, x2} {
+		pf.ok(t, "add_model", map[string]any{"project": id, "path": pf.stl, "name": "part" + strconv.Itoa(i), "position": []float64{x, 100}, "include_screenshot": false})
+	}
+	out := pf.ok(t, "set_height_ranges", map[string]any{"project": id, "object": "part0", "ranges": []map[string]any{
+		{"from_z": 2, "to_z": 6, "values": map[string]any{"wall_loops": 5}}}, "include_screenshot": false})
+	contains(t, "range note", bodyOf(out), "layer_height", "added", "crashes")
+	// update_settings that changes nothing keeps the revision.
+	before := frontOf(t, pf.ok(t, "get_project", map[string]any{"project": id}))["revision"]
+	same := pf.ok(t, "update_settings", map[string]any{"project": id, "values": map[string]any{"wall_loops": 3}})
+	if got := frontOf(t, same)["revision"]; got != before {
+		t.Errorf("revision %v -> %v for a call that changes nothing", before, got)
+	}
+	slice := pf.ok(t, "slice_project", map[string]any{"project": id, "arrange": true})
+	contains(t, "moved", bodyOf(slice), "Objects moved by arrange or orient", "part")
+}

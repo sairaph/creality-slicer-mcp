@@ -323,9 +323,17 @@ func (s *Store) ExplainSettings(ref string, used map[string]string) ([]SettingDi
 				continue
 			}
 			d := SettingDiff{Key: key, Preset: want, Used: got}
+			filamentName := ""
+			if l := cfg.List("filament_settings_id"); len(l) > 0 {
+				filamentName = l[0]
+			}
 			switch {
+			case appRuleWhy(key, used, cat, filamentName) != "":
+				d.Origin, d.Why = "app", appRuleWhy(key, used, cat, filamentName)
 			case changed[key]:
 				d.Origin, d.Why = "project", "changed in this project"
+			case filamentOwnedWhy(key, cat, filamentName) != "":
+				d.Origin, d.Why = "app", filamentOwnedWhy(key, cat, filamentName)
 			default:
 				d.Origin, d.Why = "other", "the slicer used this value and neither the preset nor a change in the project explains it (the preset may differ from the one the app merged, or the slicer normalises the value)"
 				if o, ok := cat.Get(key); ok {
@@ -368,4 +376,54 @@ func showAny(v any) string {
 		return strings.Join(x, ",")
 	}
 	return fmt.Sprint(v)
+}
+
+// appRuleWhy names the automatic switches of the slicer itself that make the
+// settings of a slice differ from the process preset, from the source of
+// Creality Print (checked in v7.2.1 and v7.3.0):
+//
+//   - enable_prime_tower goes off when the plate uses one filament or is
+//     printed by object with more than one object, unless the timelapse is
+//     smooth; independent_support_layer_height then goes off when the tower
+//     stays on. DynamicPrintConfig::normalize_fdm_2 (v7.2.1 PrintConfig.cpp
+//     7837-7860, v7.3.0 8508-8532; the older single step normalize_fdm, 7717 and
+//     8388, turns the tower off for any by object plate).
+//   - spiral (vase) mode sets wall_loops 1, alternate_extra_wall off,
+//     top_shell_layers 0, sparse_infill_density 0 and retract_when_changing_layer
+//     off: DynamicPrintConfig::normalize_fdm_1 (v7.2.1 7790, v7.3.0 8461).
+//   - material_flow_temp_graph and the nozzle temperatures are in both the print
+//     and the filament option lists (Preset.cpp s_Preset_print_options and
+//     s_Preset_filament_options: v7.3.0 962 and 1066, v7.2.1 851 and 950), so the
+//     process preset can carry a copy; the slice uses the filament of the slot.
+func appRuleWhy(key string, used map[string]string, cat *catalog.Catalog, filament string) string {
+	switch key {
+	case "enable_prime_tower":
+		if used[key] == "0" || used[key] == "false" {
+			if used["print_sequence"] == "by object" {
+				return "the slicer turns the prime tower off when a plate with several objects is printed by object (one object after another has no tower); it also does so for one filament"
+			}
+			return "the slicer turns the prime tower off when the plate uses only one filament"
+		}
+	case "independent_support_layer_height":
+		if used["enable_prime_tower"] == "1" && (used[key] == "0" || used[key] == "false") {
+			return "the slicer turns this off when the prime tower is on (support and object layers must line up)"
+		}
+	case "wall_loops", "alternate_extra_wall", "top_shell_layers", "sparse_infill_density", "retract_when_changing_layer":
+		if used["spiral_mode"] == "1" {
+			return "vase (spiral) mode: the slicer sets one wall, no extra wall, no top layers, no infill and no retraction at layer change"
+		}
+	}
+	return ""
+}
+
+// filamentOwnedWhy explains a difference in a setting that belongs to the filament preset.
+func filamentOwnedWhy(key string, cat *catalog.Catalog, filament string) string {
+	if o, ok := cat.Get(key); ok && hasType(o, "filament") {
+		src := "the filament preset"
+		if filament != "" {
+			src = "the filament preset `" + filament + "`"
+		}
+		return "a filament setting: the slice takes it from " + src + ", not from the process preset"
+	}
+	return ""
 }

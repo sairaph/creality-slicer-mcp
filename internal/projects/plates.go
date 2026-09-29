@@ -174,6 +174,24 @@ type RangeSpec struct {
 // SetHeightRanges replaces the height ranges of an object (an empty list
 // removes them all).
 func (s *Store) SetHeightRanges(ref, object string, ranges []RangeSpec) (*Info, error) {
+	res, err := s.SetHeightRangesDetailed(ref, object, ranges)
+	if err != nil {
+		return nil, err
+	}
+	return res.Info, nil
+}
+
+// HeightRangesResult is the reply of SetHeightRangesDetailed.
+type HeightRangesResult struct {
+	Info *Info
+	// Notes say what the tools added to the ranges: a layer_height where the
+	// caller gave none.
+	Notes []string
+}
+
+// SetHeightRangesDetailed is SetHeightRanges with the notes on what was added.
+func (s *Store) SetHeightRangesDetailed(ref, object string, ranges []RangeSpec) (*HeightRangesResult, error) {
+	var notes []string
 	err := s.write(ref, func(h *handle) error {
 		o, err := h.objectByRef(object)
 		if err != nil {
@@ -209,7 +227,9 @@ func (s *Store) SetHeightRanges(ref, object string, ranges []RangeSpec) (*Info, 
 			// that only sets a region setting like wall_loops. The app always writes
 			// it: it is the object's own value unless the range sets another.
 			if lr.Options.Value("layer_height") == "" {
-				lr.Options.Set("layer_height", h.baseLayerHeight(o))
+				v := h.baseLayerHeight(o)
+				lr.Options.Set("layer_height", v)
+				notes = append(notes, fmt.Sprintf("range %d [%s, %s) got layer_height %s added (the slicer crashes on a range without it; it is the object's own layer height, so the range keeps its layers)", i+1, formatNumber(r.From), formatNumber(r.To), v))
 			}
 			out = append(out, lr)
 		}
@@ -225,7 +245,11 @@ func (s *Store) SetHeightRanges(ref, object string, ranges []RangeSpec) (*Info, 
 	if err != nil {
 		return nil, err
 	}
-	return s.info(ref)
+	info, err := s.info(ref)
+	if err != nil {
+		return nil, err
+	}
+	return &HeightRangesResult{Info: info, Notes: notes}, nil
 }
 
 func (s *Store) info(ref string) (*Info, error) {

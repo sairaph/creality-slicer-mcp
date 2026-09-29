@@ -36,7 +36,7 @@ One line per term, grouped; every line starts with the term in bold. Facts are f
 - **Flush** - filament pushed out at a colour change to clear the old colour; also called purge.
 - **Flush matrix** - flush volume from each filament to each other; dark to light needs the most.
 - **Flush multiplier** - one factor scaling the whole matrix.
-- **Prime tower** - a printed column that catches purge and primes the nozzle; also called wipe tower.
+- **Prime tower** - a printed column that catches purge and primes the nozzle; also called wipe tower. Not built for a one-filament print or a by-object plate.
 - **Flush into support** - spend the purge inside supports (or infill, or objects) to save filament.
 - **Colour change** - a layer action that switches to another filament at a height.
 - **Colour painting** - assigning colours to model areas in the app.

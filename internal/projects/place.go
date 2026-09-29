@@ -120,24 +120,55 @@ func (s *Store) AutoPlace(ref string, plate int, orient, arrange bool) (*Info, e
 	if !orient && !arrange {
 		return nil, invalidf("choose orient, arrange or both", "nothing to do")
 	}
-	err := s.write(ref, func(h *handle) error { return h.autoPlaceScope(plate, orient, arrange) })
+	err := s.write(ref, func(h *handle) error { _, err := h.autoPlaceScope(plate, orient, arrange); return err })
 	if err != nil {
 		return nil, err
 	}
 	return s.info(ref)
 }
 
-func (h *handle) autoPlaceScope(plate int, orient, arrange bool) error {
+// ObjectMove is one object the tools' own placement moved: where it was and
+// where it is now, as positions on its plate (the centre of its bounding box),
+// and whether orient turned it.
+type ObjectMove struct {
+	ObjectID int
+	Name     string
+	Plate    int
+	From, To [2]float64
+	Rotated  bool
+}
+
+func (h *handle) autoPlaceScope(plate int, orient, arrange bool) ([]ObjectMove, error) {
 	if plate != 0 && h.p.Plate(plate) == nil {
-		return notFoundf("call get_project to see the plates", "project %s has no plate %d", h.id, plate)
+		return nil, notFoundf("call get_project to see the plates", "project %s has no plate %d", h.id, plate)
 	}
+	var moves []ObjectMove
 	for _, pl := range h.p.Plates {
 		if (plate != 0 && pl.Index != plate) || len(pl.Instances) == 0 {
 			continue
 		}
+		before := h.plateInstances(pl.Index)
 		if err := h.autoPlace(pl.Index, orient, arrange); err != nil {
-			return err
+			return nil, err
+		}
+		for _, b := range before {
+			ob, ok1 := bboxOf(b.m, b.transform)
+			now := h.itemT(b.objectID, b.instanceID)
+			nb, ok2 := bboxOf(b.m, now)
+			if !ok1 || !ok2 {
+				continue
+			}
+			oc, nc := center3(ob), center3(nb)
+			mv := ObjectMove{ObjectID: b.objectID, Name: b.name, Plate: pl.Index, From: [2]float64{round6(oc[0]), round6(oc[1])}, To: [2]float64{round6(nc[0]), round6(nc[1])}}
+			for i := 0; i < 9; i++ {
+				if math.Abs(b.transform[i]-now[i]) > 1e-9 {
+					mv.Rotated = true
+				}
+			}
+			if math.Abs(mv.From[0]-mv.To[0]) > 0.05 || math.Abs(mv.From[1]-mv.To[1]) > 0.05 || mv.Rotated {
+				moves = append(moves, mv)
+			}
 		}
 	}
-	return nil
+	return moves, nil
 }

@@ -183,8 +183,8 @@ func invalidArguments(next mcp.MethodHandler) mcp.MethodHandler {
 		fresh := render.ErrorResult(render.Error{
 			Code:    render.CodeInvalidInput,
 			Message: shortMessage("Invalid arguments: " + argumentProblem(res.GetError())),
-			Hint: fmt.Sprintf("Call %s again with arguments that match its input schema: every required "+
-				"argument, each of the listed type, and only listed values and argument names.", tool),
+			Hint: strings.TrimSpace(fmt.Sprintf("Call %s again with arguments that match its input schema: every required "+
+				"argument, each of the listed type, and only listed values and argument names. %s", tool, argumentsOf(tool))),
 		})
 		// Change the result in place instead of returning a new one: the SDK
 		// has already marked this one complete (resultType), which a client on

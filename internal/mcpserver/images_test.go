@@ -183,3 +183,44 @@ func TestGetViewListsSkippedLabelsAndRangeBands(t *testing.T) {
 		t.Errorf("default get_view %dx%d", w, h)
 	}
 }
+
+// A change to a part is framed on its object, so the modifier is not a dot; the
+// outline of the object is still drawn. Other changes keep the whole plate.
+func TestPartScreenshotsAreFramedOnTheObject(t *testing.T) {
+	pf := newProjFixture(t)
+	id := pf.withModel(t, "Framed")
+	pink := func(c color.NRGBA) bool { return c.R > 230 && c.G < 100 && c.B > 90 && c.B < 200 }
+	yellow := func(c color.NRGBA) bool { return c.R > 165 && c.G > 130 && c.B < 110 && int(c.R) > int(c.B)+90 }
+	light := func(c color.NRGBA) bool { return c.R > 190 && c.G > 190 && c.B > 190 }
+
+	whole := pngOf(t, call(t, pf.cs, "update_object", map[string]any{"project": id, "object": "cube", "position": []float64{120, 120}}))
+	mod := call(t, pf.cs, "add_modifier", map[string]any{"project": id, "object": "cube", "kind": "modifier", "shape": "box", "size": []float64{8, 8, 8},
+		"values": map[string]any{"wall_loops": 6}})
+	shot := pngOf(t, mod)
+	if a, b := count(shot, light), count(whole, light); a < b*4 {
+		t.Errorf("the object fills %d light pixels framed against %d on the whole plate", a, b)
+	}
+	if count(shot, yellow) < 150 || count(shot, pink) < 60 {
+		t.Errorf("modifier %d yellow pixels, %d highlight pixels", count(shot, yellow), count(shot, pink))
+	}
+	if w, h := sizeOf(t, images(mod)[0]); w != 512 || h != 384 {
+		t.Errorf("size %dx%d", w, h)
+	}
+	// remove_part is framed the same way.
+	info, err := pf.store.GetProject(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := ""
+	for _, o := range info.Objects {
+		for _, p := range o.Parts {
+			if p.Subtype == "modifier_part" {
+				part = p.Name
+			}
+		}
+	}
+	rm := pngOf(t, call(t, pf.cs, "remove_part", map[string]any{"project": id, "object": "cube", "part": part}))
+	if count(rm, light) < count(whole, light)*4 {
+		t.Error("remove_part screenshot is not framed on the object")
+	}
+}

@@ -73,6 +73,7 @@ type handoffFront struct {
 type sliceFront struct {
 	baseFront `yaml:",inline"`
 	ElapsedS  float64           `yaml:"elapsed_s,omitempty"`
+	Moved     []string          `yaml:"moved,omitempty"`
 	JobID     string            `yaml:"job_id,omitempty"`
 	State     string            `yaml:"state"`
 	Stale     bool              `yaml:"stale,omitempty"`
@@ -239,6 +240,18 @@ func sliceReply(info *projects.Info, last *projects.LastSlice, warnings []string
 	}
 	if tools.Len() > 0 {
 		b.WriteString("\nTools (plate | tool | filament index, 0-based | preset | type | colour):\n" + tools.String())
+	}
+	if len(last.Moved) > 0 {
+		var mv strings.Builder
+		for _, m := range last.Moved {
+			line := fmt.Sprintf("%s (plate %d): (%s, %s) -> (%s, %s) mm", m.Name, m.Plate, num(m.From[0]), num(m.From[1]), num(m.To[0]), num(m.To[1]))
+			if m.Rotated {
+				line += ", turned onto its flat face"
+			}
+			front.Moved = append(front.Moved, line)
+			mv.WriteString("- " + line + "\n")
+		}
+		b.WriteString("\nObjects moved by arrange or orient (saved in the project; positions are the centre of each object on its plate):\n" + mv.String())
 	}
 	if actions.Len() > 0 {
 		b.WriteString("\nLayer actions (plate | action | result in the G-code):\n" + actions.String())
@@ -783,7 +796,7 @@ func (s *Server) settingsDigest(ctx context.Context, be ProjectBackend, info *pr
 	}
 	groups := []struct{ origin, title string }{
 		{"project", "Changed in this project (update_settings or the process changes of the file)"},
-		{"app", "Switched by rules of Creality Print, not by you"},
+		{"app", "Switched by a rule of the app (the slicer does this on its own)"},
 		{"other", "Differences no change of this project explains (a preset of another version, or a value the slicer normalises)"},
 	}
 	var b strings.Builder

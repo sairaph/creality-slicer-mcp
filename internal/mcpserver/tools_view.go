@@ -133,14 +133,29 @@ func (s *Server) getView(ctx context.Context, _ *mcp.CallToolRequest, in viewInp
 // environment setting CREALITY_SLICER_MCP_ONLY_TEXT_FEEDBACK and the tool's
 // include_screenshot false both turn it off.
 func (s *Server) withScreenshot(be ProjectBackend, res *toolResult, include *bool, project string, plate int, focus []string, ranges bool) *toolResult {
+	return s.screenshot(be, res, include, project, plate, focus, false, ranges)
+}
+
+// withPartScreenshot is withScreenshot for a change to a part of an object: a
+// modifier is a few millimetres on a 260 mm plate, so the picture is framed on
+// the object with its parts, which is still outlined.
+func (s *Server) withPartScreenshot(be ProjectBackend, res *toolResult, include *bool, project string, plate int, object string) *toolResult {
+	return s.screenshot(be, res, include, project, plate, []string{object}, true, false)
+}
+
+func (s *Server) screenshot(be ProjectBackend, res *toolResult, include *bool, project string, plate int, focus []string, frame, ranges bool) *toolResult {
 	if s.config.Settings.OnlyTextFeedback || !boolOr(include, true) {
 		return res
+	}
+	var framed []string
+	if frame {
+		framed = focus
 	}
 	if plate < 1 {
 		plate = 1
 	}
 	v, err := be.Store.View(project, projects.ViewRequest{
-		Plate: plate, View: string(render.Isometric), Highlight: focus, ShowParts: true, ShowLabels: true, ShowRanges: ranges, LongEdge: 512,
+		Plate: plate, View: string(render.Isometric), Focus: framed, Highlight: focus, ShowParts: true, ShowLabels: true, ShowRanges: ranges, LongEdge: 512,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "creality-slicer-mcp: the screenshot of %s was left out: %v\n", project, err)

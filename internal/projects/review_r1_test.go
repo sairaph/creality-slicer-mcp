@@ -1043,3 +1043,205 @@ func TestByObjectExclusionArea(t *testing.T) {
 		t.Fatalf("warnings %+v", res.Info.Warnings)
 	}
 }
+
+// D10: the slicer's own automatic switches are named with their reason.
+func TestExplainSettingsNamesTheSlicersOwnSwitches(t *testing.T) {
+	e := newEnv(t)
+	cat := e.cat
+	cases := []struct {
+		key      string
+		used     map[string]string
+		wantPart string
+	}{
+		{"enable_prime_tower", map[string]string{"enable_prime_tower": "0", "print_sequence": "by object"}, "printed by object"},
+		{"enable_prime_tower", map[string]string{"enable_prime_tower": "0", "print_sequence": "by layer"}, "only one filament"},
+		{"independent_support_layer_height", map[string]string{"independent_support_layer_height": "0", "enable_prime_tower": "1"}, "prime tower is on"},
+		{"wall_loops", map[string]string{"wall_loops": "1", "spiral_mode": "1"}, "vase"},
+		{"material_flow_temp_graph", map[string]string{}, "filament preset"},
+	}
+	for _, c := range cases {
+		got := appRuleWhy(c.key, c.used, cat, "TP-PETG")
+		if got == "" {
+			got = filamentOwnedWhy(c.key, cat, "TP-PETG")
+		}
+		if !strings.Contains(got, c.wantPart) {
+			t.Errorf("%s %v: %q lacks %q", c.key, c.used, got, c.wantPart)
+		}
+	}
+	if appRuleWhy("wall_loops", map[string]string{"wall_loops": "5"}, cat, "") != "" {
+		t.Error("a plain change is not an app rule")
+	}
+}
+
+// N1: a settings call that changes nothing does not bump the revision or save.
+func TestNoEffectiveChangeKeepsTheRevisionAndTheFile(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Noop")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	file := filepath.Join(e.dir, "projects", info.ID, "project.3mf")
+	before, _ := e.st.GetProject(info.ID)
+	stat1, _ := os.Stat(file)
+	for name, req := range map[string]SettingsRequest{
+		"project same value":       {Values: map[string]any{"wall_loops": 3}},
+		"object nothing to remove": {Scope: ScopeObject, Target: "cube", Values: map[string]any{"wall_loops": nil}},
+	} {
+		res, err := e.st.UpdateSettings(info.ID, req)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if res.Info.Revision != before.Revision {
+			t.Errorf("%s: revision %d -> %d", name, before.Revision, res.Info.Revision)
+		}
+		for _, c := range res.Changed {
+			if c.Note != "unchanged" {
+				t.Errorf("%s: change not marked unchanged: %+v", name, c)
+			}
+		}
+	}
+	if s, _ := os.Stat(file); !s.ModTime().Equal(stat1.ModTime()) {
+		t.Fatal("the project file was rewritten by calls that changed nothing")
+	}
+	// A real change, then the same value again: the second call changes nothing.
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: ScopeObject, Target: "cube", Values: map[string]any{"wall_loops": 6}}); err != nil {
+		t.Fatal(err)
+	}
+	mid, _ := e.st.GetProject(info.ID)
+	if mid.Revision != before.Revision+1 {
+		t.Fatalf("revision %d", mid.Revision)
+	}
+	stat2, _ := os.Stat(file)
+	res, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: ScopeObject, Target: "cube", Values: map[string]any{"wall_loops": 6}})
+	if err != nil || res.Info.Revision != mid.Revision {
+		t.Fatalf("repeat: %v revision %d", err, res.Info.Revision)
+	}
+	stat3, _ := os.Stat(file)
+	if !stat2.ModTime().Equal(stat3.ModTime()) {
+		t.Fatal("the project file was rewritten by a call that changed nothing")
+	}
+}
+
+// A range that gets a layer_height says so.
+func TestHeightRangesReplyNotesTheAddedLayerHeight(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Notes")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	res, err := e.st.SetHeightRangesDetailed(info.ID, "cube", []RangeSpec{
+		{From: 4, To: 8, Settings: map[string]any{"wall_loops": 4}},
+		{From: 10, To: 12, Settings: map[string]any{"layer_height": 0.1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Notes) != 1 || !strings.Contains(res.Notes[0], "range 1 [4, 8)") || !strings.Contains(res.Notes[0], "layer_height 0.2 added") || !strings.Contains(res.Notes[0], "crashes") {
+		t.Fatalf("notes %v", res.Notes)
+	}
+	res, _ = e.st.SetHeightRangesDetailed(info.ID, "cube", []RangeSpec{{From: 1, To: 2, Settings: map[string]any{"layer_height": 0.1}}})
+	if len(res.Notes) != 0 {
+		t.Fatalf("notes %v", res.Notes)
+	}
+}
+
+// N4: arrange and orient report the objects they moved, plate relative.
+func TestSliceReportsTheObjectsArrangeMoved(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Moved")
+	x1, x2, y := 100.0, 105.0, 100.0
+	if _, err := e.st.AddModel(info.ID, AddModelRequest{Path: writeSTL(t, "c", 20, 30, 10), Name: "a", X: &x1, Y: &y}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.AddModel(info.ID, AddModelRequest{Path: writeSTL(t, "c", 20, 30, 10), Name: "b", X: &x2, Y: &y}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := e.st.Slice(info.ID, SliceOptions{Arrange: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := out.Last.Moved
+	if len(moved) == 0 {
+		t.Fatal("nothing reported as moved")
+	}
+	got, _ := e.st.GetProject(info.ID)
+	for _, m := range moved {
+		if m.Plate != 1 || (math.Abs(m.From[0]-m.To[0]) < 0.05 && math.Abs(m.From[1]-m.To[1]) < 0.05) {
+			t.Fatalf("move %+v", m)
+		}
+		var now [3]float64
+		for _, o := range got.Objects {
+			if o.Name == m.Name {
+				now = o.Position
+			}
+		}
+		if math.Abs(now[0]-m.To[0]) > 1e-3 || math.Abs(now[1]-m.To[1]) > 1e-3 {
+			t.Fatalf("%s reported at %v, is at %v", m.Name, m.To, now)
+		}
+		if m.Name == "a" && (m.From[0] != 100 || m.From[1] != 100) {
+			t.Fatalf("from %v", m.From)
+		}
+	}
+	// It is part of the record and a slice without arrange has none.
+	st, _ := e.st.SliceStatus(info.ID)
+	if st.Last == nil || len(st.Last.Moved) != len(moved) {
+		t.Fatalf("record %+v", st.Last)
+	}
+	out, _ = e.st.Slice(info.ID, SliceOptions{})
+	if len(out.Last.Moved) != 0 {
+		t.Fatalf("a plain slice reported moves: %+v", out.Last.Moved)
+	}
+}
+
+// V1: an equivalent value is no change: same revision, same stored text.
+func TestEquivalentValuesAreNoChange(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Equal")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	// A percent, a float and a bool set once, in the formats the tools store.
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Values: map[string]any{"sparse_infill_density": "15%", "line_width": 0.4, "enable_support": true}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: ScopeObject, Target: "cube", Values: map[string]any{"sparse_infill_density": "20%", "wall_loops": 4}}); err != nil {
+		t.Fatal(err)
+	}
+	stored := func() (string, string, string, string) {
+		p := openSaved(t, e, info.ID)
+		return p.Settings.String("sparse_infill_density"), p.Settings.String("line_width"), p.Settings.String("enable_support"), p.Objects[0].Config.Value("sparse_infill_density")
+	}
+	d0, l0, s0, o0 := stored()
+	rev := func() int { g, _ := e.st.GetProject(info.ID); return g.Revision }
+	before := rev()
+	for name, req := range map[string]SettingsRequest{
+		"percent without the sign": {Values: map[string]any{"sparse_infill_density": "15"}},
+		"percent as number":        {Values: map[string]any{"sparse_infill_density": 15}},
+		"float with a zero":        {Values: map[string]any{"line_width": "0.40"}},
+		"float as text":            {Values: map[string]any{"line_width": "0.4"}},
+		"bool as text":             {Values: map[string]any{"enable_support": "true"}},
+		"bool as number":           {Values: map[string]any{"enable_support": 1}},
+		"object percent":           {Scope: ScopeObject, Target: "cube", Values: map[string]any{"sparse_infill_density": "20"}},
+		"object int as text":       {Scope: ScopeObject, Target: "cube", Values: map[string]any{"wall_loops": "4"}},
+	} {
+		res, err := e.st.UpdateSettings(info.ID, req)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if res.Info.Revision != before {
+			t.Errorf("%s: revision %d -> %d", name, before, res.Info.Revision)
+		}
+		for _, c := range res.Changed {
+			if c.Note != "unchanged" {
+				t.Errorf("%s: %+v", name, c)
+			}
+		}
+	}
+	d1, l1, s1, o1 := stored()
+	if d0 != d1 || l0 != l1 || s0 != s1 || o0 != o1 {
+		t.Fatalf("the stored text changed: %q %q %q %q -> %q %q %q %q", d0, l0, s0, o0, d1, l1, s1, o1)
+	}
+	// A real change is still a change.
+	res, err := e.st.UpdateSettings(info.ID, SettingsRequest{Values: map[string]any{"sparse_infill_density": "25"}})
+	if err != nil || res.Info.Revision != before+1 {
+		t.Fatalf("real change: %v revision %d", err, res.Info.Revision)
+	}
+	// Vectors compare element by element.
+	if !sameValue(nil, lval("1", "2"), lval("1", "2")) || sameValue(nil, lval("1", "2"), lval("1", "3")) || sameValue(nil, lval("1"), lval("1", "1")) {
+		t.Error("vector comparison")
+	}
+}

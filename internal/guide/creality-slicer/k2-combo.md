@@ -16,7 +16,7 @@ Process presets for the 0.4 nozzle, named `<height>mm Standard @Creality K2 0.4 
 
 Filament presets end in `@Creality K2 0.4 nozzle`. The default is `Hyper PLA`. Others include the CR-PLA and CR-PETG lines and Generic PLA, PETG, ABS, TPU and more. list_presets with `type` `filament` and `filament_type` lists them, each with its type, vendor and nozzle temperature. get_preset shows every value, or compares two presets with `compare_to`.
 
-What the default `0.20mm Standard` process sets, worth knowing before you change anything: layer height 0.2, prime tower on (width 40, volume 45), flush into supports on, print sequence by layer, object exclusion on, supports off, brim automatic.
+What the default `0.20mm Standard` process sets, worth knowing before you change anything: layer height 0.2, prime tower on in the preset (width 40, volume 45; the slicer only builds it when two or more filaments are used and the plate prints by layer, see multicolor-cfs), flush into supports on, print sequence by layer, object exclusion on, supports off, brim automatic.
 
 ## Filament type is an exact string
 

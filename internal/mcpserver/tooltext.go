@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -408,6 +409,7 @@ func addTool[In any](srv *mcp.Server, name string, schema *jsonschema.Schema,
 		panic(fmt.Sprintf("tool %q has no text", name))
 	}
 	describeSchema(name, schema, text.Params)
+	rememberArguments(name, schema)
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        name,
 		Title:       toolTitle(name),
@@ -425,4 +427,37 @@ func toolTextNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// toolArguments maps a tool to the sentence that lists its arguments, for the
+// hint of an argument error.
+var toolArguments sync.Map
+
+// rememberArguments records a tool's argument names, required ones marked.
+func rememberArguments(name string, schema *jsonschema.Schema) {
+	required := map[string]bool{}
+	for _, r := range schema.Required {
+		required[r] = true
+	}
+	var names []string
+	for prop := range schema.Properties {
+		if required[prop] {
+			prop += " (required)"
+		}
+		names = append(names, prop)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		toolArguments.Store(name, "It takes no arguments.")
+		return
+	}
+	toolArguments.Store(name, "Its arguments are: "+strings.Join(names, ", ")+".")
+}
+
+// argumentsOf is the sentence listing the arguments of a tool, or "".
+func argumentsOf(name string) string {
+	if v, ok := toolArguments.Load(name); ok {
+		return v.(string)
+	}
+	return ""
 }

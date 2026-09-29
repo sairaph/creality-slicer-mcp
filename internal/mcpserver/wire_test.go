@@ -77,8 +77,28 @@ func wireText(res map[string]any) string {
 func TestUnknownArgumentOnEveryToolIsAWellFormedInvalidInput(t *testing.T) {
 	pf := newProjFixture(t)
 	call := wireCaller(t, pf.srv)
+	tools := listAllTools(t)
 	for _, name := range toolTextNames() {
 		res := call(name, map[string]any{"zz_unknown_argument": 1})
+		// N3: the hint lists the tool's valid argument names.
+		if info := tools[name]; info != nil {
+			hint := wireText(res)
+			if len(info.schema.Properties) == 0 {
+				if !strings.Contains(hint, "takes no arguments") {
+					t.Errorf("%s: no argument list in the hint", name)
+				}
+			}
+			for prop := range info.schema.Properties {
+				if !strings.Contains(hint, prop) {
+					t.Errorf("%s: the hint does not name the argument %q:\n%s", name, prop, hint)
+				}
+			}
+			for _, req := range info.schema.Required {
+				if !strings.Contains(hint, req+" (required)") {
+					t.Errorf("%s: %q is not marked required in the hint", name, req)
+				}
+			}
+		}
 		if res["resultType"] != "complete" {
 			t.Errorf("%s: resultType = %v", name, res["resultType"])
 		}

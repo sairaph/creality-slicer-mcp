@@ -91,6 +91,7 @@ type ProjectStore interface {
 	SetPresets(ref string, req projects.PresetsRequest) (*projects.PresetsResult, error)
 	AddModifier(ref string, req projects.ModifierRequest) (*projects.ModifierResult, error)
 	SetHeightRanges(ref, object string, ranges []projects.RangeSpec) (*projects.Info, error)
+	SetHeightRangesDetailed(ref, object string, ranges []projects.RangeSpec) (*projects.HeightRangesResult, error)
 	SetLayerActions(ref string, plate int, actions []projects.LayerAction) (*projects.Info, error)
 	ManagePlates(ref string, req projects.PlatesRequest) (*projects.PlatesResult, error)
 	Export(ref, path string, overwrite bool) (*projects.ExportResult, error)

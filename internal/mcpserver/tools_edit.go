@@ -456,7 +456,7 @@ func (s *Server) addModifier(ctx context.Context, _ *mcp.CallToolRequest, in add
 		}
 	}
 	out := successResult(addModifierFront{baseFront: base(res.Info), Part: res.PartID, Kind: in.Kind}, nextLine(body, "get_view with the object as focus and the Front or Right view to check it, or slice_project."))
-	return s.withScreenshot(be, out, in.IncludeScreenshot, in.Project, plateOfObject(res.Info, in.Object, 1), []string{in.Object}, false), nil, nil
+	return s.withPartScreenshot(be, out, in.IncludeScreenshot, in.Project, plateOfObject(res.Info, in.Object, 1), in.Object), nil, nil
 }
 
 // --- set_height_ranges ---
@@ -489,10 +489,11 @@ func (s *Server) setHeightRanges(ctx context.Context, _ *mcp.CallToolRequest, in
 	for i, r := range in.Ranges {
 		specs[i] = projects.RangeSpec{From: r.FromZ, To: r.ToZ, Settings: r.Values}
 	}
-	info, err := be.Store.SetHeightRanges(in.Project, in.Object, specs)
+	hr, err := be.Store.SetHeightRangesDetailed(in.Project, in.Object, specs)
 	if err != nil {
 		return projFailure(err), nil, nil
 	}
+	info := hr.Info
 	var b strings.Builder
 	for _, o := range info.Objects {
 		if strconv.Itoa(o.ID) != in.Object && o.Name != in.Object {
@@ -514,6 +515,9 @@ func (s *Server) setHeightRanges(ctx context.Context, _ *mcp.CallToolRequest, in
 	}
 	if b.Len() == 0 {
 		b.WriteString("Height ranges updated.")
+	}
+	for _, n := range hr.Notes {
+		b.WriteString("\nNote: " + n + ".")
 	}
 	out := successResult(heightRangesFront{baseFront: base(info), Object: in.Object, Ranges: len(in.Ranges)}, nextLine(strings.TrimRight(b.String(), "\n"), "get_view with show_ranges true to check the bands, or slice_project."))
 	return s.withScreenshot(be, out, in.IncludeScreenshot, in.Project, plateOfObject(info, in.Object, 1), []string{in.Object}, true), nil, nil
@@ -720,5 +724,5 @@ func (s *Server) removePart(ctx context.Context, _ *mcp.CallToolRequest, in remo
 	kind := strings.ReplaceAll(res.Part.Subtype, "_", " ")
 	out := successResult(removePartFront{baseFront: base(res.Info), Object: res.Object, Removed: res.Removed, Kind: res.Part.Subtype, Parts: parts},
 		nextLine(fmt.Sprintf("Removed the %s `%s` from object `%s`. The object has %d part(s) left.", kind, res.Removed, res.Object, parts), "get_project to see the parts, add_modifier to add another, or slice_project."))
-	return s.withScreenshot(be, out, in.IncludeScreenshot, in.Project, plateOfObject(res.Info, in.Object, 1), []string{in.Object}, false), nil, nil
+	return s.withPartScreenshot(be, out, in.IncludeScreenshot, in.Project, plateOfObject(res.Info, in.Object, 1), in.Object), nil, nil
 }

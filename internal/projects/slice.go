@@ -80,6 +80,9 @@ type LastSlice struct {
 	Oriented bool
 	// ElapsedS is how long the slicer ran, in seconds.
 	ElapsedS float64
+	// Moved lists the objects arrange or orient moved before this slice (old and
+	// new position on the plate).
+	Moved []ObjectMove
 }
 
 // SliceOptions is slice_project.
@@ -270,8 +273,13 @@ func (s *Store) Slice(ref string, opts SliceOptions) (*SliceOutcome, error) {
 
 	// The tools' own orient and arrange come first and become part of the
 	// project, so the slicer only ever sees a placed project.
+	var moved []ObjectMove
 	if opts.Arrange || opts.Orient {
-		if err := s.write(id, func(h *handle) error { return h.autoPlaceScope(opts.Plate, opts.Orient, opts.Arrange) }); err != nil {
+		if err := s.write(id, func(h *handle) error {
+			var perr error
+			moved, perr = h.autoPlaceScope(opts.Plate, opts.Orient, opts.Arrange)
+			return perr
+		}); err != nil {
 			release()
 			return nil, err
 		}
@@ -367,7 +375,7 @@ func (s *Store) Slice(ref string, opts SliceOptions) (*SliceOutcome, error) {
 		if retried {
 			notes = append(notes, "the file was saved by a newer or other application version; it was sliced with the newer-file check switched off")
 		}
-		last, ferr := s.postProcess(id, name, req, res, startRev, opts, platesOut, notes)
+		last, ferr := s.postProcess(id, name, req, res, startRev, opts, platesOut, notes, moved)
 		if ferr != nil {
 			return nil, ferr
 		}
@@ -507,7 +515,7 @@ var excludeNameRE = regexp.MustCompile(`^(.*)_id_(\d+)_copy_(\d+)$`)
 
 // postProcess reads the G-code of every sliced plate, embeds the thumbnails,
 // writes the arrangement back when it applies and records the slice.
-func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res slicer.Result, startRev int, opts SliceOptions, wanted []int, notes []string) (*LastSlice, *Error) {
+func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res slicer.Result, startRev int, opts SliceOptions, wanted []int, notes []string, moved []ObjectMove) (*LastSlice, *Error) {
 	snapPath := req.Inputs[0]
 	sp, err := threemf.Open(snapPath)
 	if err != nil {
@@ -516,7 +524,7 @@ func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res
 	defer sp.Close()
 	snap := &handle{s: s, id: id, dir: filepath.Dir(filepath.Dir(snapPath)), meta: &meta{Name: projectName}, p: sp}
 
-	last := &LastSlice{Time: s.now(), Revision: startRev, Arranged: opts.Arrange, Oriented: opts.Orient, Warnings: notes, ElapsedS: res.Duration.Seconds()}
+	last := &LastSlice{Time: s.now(), Revision: startRev, Arranged: opts.Arrange, Oriented: opts.Orient, Warnings: notes, ElapsedS: res.Duration.Seconds(), Moved: moved}
 	sizes, sizeErr := render.ParseThumbnailSizes(sp.Settings.String("thumbnails"))
 	if sizeErr != nil {
 		last.Warnings = append(last.Warnings, "the printer's thumbnail sizes are not readable, so the G-code has no thumbnails: "+sizeErr.Error())

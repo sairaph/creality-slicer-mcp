@@ -44,7 +44,7 @@ const (
 
 // lockTimeout bounds the wait for another process that holds a project (an
 // anti-hang guard).
-const lockTimeout = 60 * time.Second
+var lockTimeout = 60 * time.Second
 
 // Config wires a Store to its dependencies.
 type Config struct {
@@ -87,7 +87,9 @@ func New(cfg Config) (*Store, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Store{cfg: cfg, locks: map[string]*sync.RWMutex{}, running: map[string]string{}}, nil
+	s := &Store{cfg: cfg, locks: map[string]*sync.RWMutex{}, running: map[string]string{}}
+	s.sweepTrash()
+	return s, nil
 }
 
 // NewDefault is New with the store folder of the current user.
@@ -191,7 +193,7 @@ func (s *Store) resolve(ref string) (string, error) {
 	if ref == "" {
 		return "", invalidf("call list_projects to see the projects", "no project given")
 	}
-	if strings.ContainsAny(ref, `/\`) || ref == "." || ref == ".." {
+	if strings.ContainsAny(ref, `/\`) || ref == "." || ref == ".." || strings.HasPrefix(ref, trashPrefix) {
 		return "", invalidf("give the project id or name from list_projects", "%q is not a project id or name", ref)
 	}
 	if info, err := os.Stat(filepath.Join(s.dir(ref), metaFile)); err == nil && !info.IsDir() {
@@ -288,7 +290,7 @@ func (s *Store) List() ([]ListItem, error) {
 	}
 	var out []ListItem
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), trashPrefix) {
 			continue
 		}
 		m, err := s.readMeta(e.Name())
@@ -495,29 +497,59 @@ func (s *Store) Delete(ref, confirm string) (id string, err error) {
 		}
 		unlockSlice() // released at once: its lock file must not be open while the folder goes
 	}
-	unlock, err := s.lock(id)
-	if err != nil {
-		return "", err
+	// Delete is all or nothing. The folder is first renamed to a hidden trash
+	// name: on Windows that fails while any file inside is open (a Creality Print
+	// window showing a view copy), and then nothing has changed. Only after the
+	// rename works is the trash removed; a removal that fails leaves it hidden for
+	// the next sweep. The in-process lock is held; the lock file is opened only
+	// to see that no other process holds it, then closed (it would block the rename).
+	mu := s.projLock(id)
+	mu.Lock()
+	fl := flock.New(filepath.Join(s.dir(id), lockFile))
+	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+	ok, lerr := fl.TryLockContext(ctx, 25*time.Millisecond)
+	cancel()
+	if lerr != nil || !ok {
+		mu.Unlock()
+		return "", conflictf("another process is changing the project; try again in a moment", "the project %s is locked", id)
 	}
-	// The lock file is open while the lock is held (Windows cannot delete it):
-	// remove everything else first, release, then remove the folder.
-	entries, _ := os.ReadDir(s.dir(id))
-	for _, e := range entries {
-		if e.Name() != lockFile {
-			if err := removeAll(filepath.Join(s.dir(id), e.Name())); err != nil {
-				unlock()
-				return "", errf(CodeInternal, "", "could not delete project %s: %v", id, err)
-			}
+	_ = fl.Unlock()
+	trash := filepath.Join(s.cfg.Root, fmt.Sprintf("%s%s-%x", trashPrefix, id, time.Now().UnixNano()))
+	var rerr error
+	for attempt := 0; attempt < 10; attempt++ {
+		if rerr = os.Rename(s.dir(id), trash); rerr == nil {
+			break
 		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	unlock()
+	mu.Unlock()
+	if rerr != nil {
+		return "", conflictf("close the program that holds the file, then call delete_project again",
+			"a file of this project is open in another program (for example a Creality Print window opened by open_in_app): close it, then call delete_project again (%v)", rerr)
+	}
 	s.mu.Lock()
 	delete(s.locks, id) // the lock table does not grow with deleted projects
 	s.mu.Unlock()
-	if err := removeAll(s.dir(id)); err != nil {
-		return "", errf(CodeInternal, "", "could not delete project %s: %v", id, err)
-	}
+	_ = os.RemoveAll(trash) // best effort: what stays is hidden and swept later
+	s.sweepTrash()
 	return id, nil
+}
+
+// trashPrefix marks the folders of deleted projects that are being removed;
+// they are never listed or opened.
+const trashPrefix = ".deleting-"
+
+// sweepTrash removes what earlier deletes left in the trash, best effort.
+func (s *Store) sweepTrash() {
+	entries, err := os.ReadDir(s.cfg.Root)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), trashPrefix) {
+			_ = os.RemoveAll(filepath.Join(s.cfg.Root, e.Name()))
+		}
+	}
 }
 
 // removeAll deletes a folder tree, retrying briefly (Windows, scanners, the

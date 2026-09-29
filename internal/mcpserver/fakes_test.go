@@ -24,13 +24,20 @@ type fakeInstall struct {
 	after     *slicer.Install // returned once Refresh has been called
 	gets      int
 	refreshes int
+	// afterGet, when set, runs after Get has read the install and before it
+	// returns it: a test holds a load between the read and the use of it.
+	afterGet func(read slicer.Install)
 }
 
 func (f *fakeInstall) Get(context.Context) (slicer.Install, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.gets++
-	return f.install, nil
+	in, hook := f.install, f.afterGet
+	f.mu.Unlock()
+	if hook != nil {
+		hook(in)
+	}
+	return in, nil
 }
 
 func (f *fakeInstall) Refresh(context.Context) (slicer.Install, error) {

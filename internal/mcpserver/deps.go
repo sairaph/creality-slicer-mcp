@@ -206,7 +206,11 @@ func (e errNoInstall) Error() string {
 type env struct {
 	deps Deps
 
-	mu        sync.Mutex
+	mu sync.Mutex
+	// gen counts refreshes. A lazy loader reads it before it reads the install
+	// and stores what it loaded only if it is unchanged: a load that started on
+	// the old install must not repopulate a cache the refresh has emptied.
+	gen       uint64
 	baseCat   *catalog.Catalog // loaded once, without texts
 	baseErr   error
 	baseDone  bool
@@ -230,6 +234,7 @@ func (e *env) install(ctx context.Context, refresh bool) (slicer.Install, error)
 		// call in between would otherwise cache the old install's data again.
 		in, err := e.deps.Install.Refresh(ctx)
 		e.mu.Lock()
+		e.gen++
 		e.cat, e.catDone, e.textsErr, e.store, e.defaults, e.defaultsD = nil, false, nil, nil, nil, false
 		// The catalog family follows the install: choose it again.
 		e.baseCat, e.baseErr, e.baseDone = nil, nil, false
@@ -249,17 +254,45 @@ func (e *env) install(ctx context.Context, refresh bool) (slicer.Install, error)
 	return e.deps.Install.Get(ctx)
 }
 
+// snapshot returns the install together with the generation it belongs to. The
+// generation is read first: if a refresh completes after that, the caller sees
+// the generation has moved and starts again, so nothing it loaded from an
+// install read before the refresh is kept.
+func (e *env) snapshot(ctx context.Context) (slicer.Install, uint64, error) {
+	e.mu.Lock()
+	gen := e.gen
+	e.mu.Unlock()
+	in, err := e.install(ctx, false)
+	return in, gen, err
+}
+
+// current says whether no refresh has completed since gen was read. Callers
+// hold e.mu.
+func (e *env) current(gen uint64) bool { return e.gen == gen }
+
 // catalog returns the settings catalog. Once Creality Print is found, its
 // descriptions are attached (loaded once); without them the catalog still
 // works and texts report as missing. The second result is the reason texts are
 // missing, "" when they are attached.
 func (e *env) catalog(ctx context.Context) (*catalog.Catalog, string, error) {
-	in, err := e.install(ctx, false)
-	if err != nil {
-		return nil, "", err
+	for {
+		in, gen, err := e.snapshot(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		e.mu.Lock()
+		if !e.current(gen) {
+			e.mu.Unlock()
+			continue // a refresh completed while the install was read
+		}
+		cat, reason, err := e.catalogLocked(in)
+		e.mu.Unlock()
+		return cat, reason, err
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
+}
+
+// catalogLocked loads the catalog for in; e.mu is held.
+func (e *env) catalogLocked(in slicer.Install) (*catalog.Catalog, string, error) {
 	if !e.baseDone {
 		e.baseCat, e.baseErr = e.deps.Catalog()
 		e.baseDone = true
@@ -291,55 +324,73 @@ func (e *env) catalog(ctx context.Context) (*catalog.Catalog, string, error) {
 
 // profileStore opens the preset bundles of the installed Creality Print.
 func (e *env) profileStore(ctx context.Context) (ProfileStore, error) {
-	in, err := e.install(ctx, false)
-	if err != nil {
-		return nil, err
+	for {
+		in, gen, err := e.snapshot(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if !in.Found {
+			return nil, errNoInstall{reason: in.Reason}
+		}
+		e.mu.Lock()
+		if !e.current(gen) {
+			e.mu.Unlock()
+			continue
+		}
+		if e.store != nil {
+			st := e.store
+			e.mu.Unlock()
+			return st, nil
+		}
+		st, err := e.deps.Profiles(in)
+		if err != nil {
+			e.mu.Unlock()
+			return nil, fmt.Errorf("the preset bundle cannot be read: %w", err)
+		}
+		e.store = st
+		e.mu.Unlock()
+		return st, nil
 	}
-	if !in.Found {
-		return nil, errNoInstall{reason: in.Reason}
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.store != nil {
-		return e.store, nil
-	}
-	st, err := e.deps.Profiles(in)
-	if err != nil {
-		return nil, fmt.Errorf("the preset bundle cannot be read: %w", err)
-	}
-	e.store = st
-	return st, nil
 }
 
 // projectBackend returns the projects layer, built on first use from the
 // installed Creality Print's presets and the catalog.
 func (e *env) projectBackend(ctx context.Context) (ProjectBackend, error) {
-	in, err := e.install(ctx, false)
-	if err != nil {
-		return ProjectBackend{}, err
+	for {
+		in, gen, err := e.snapshot(ctx)
+		if err != nil {
+			return ProjectBackend{}, err
+		}
+		if !in.Found {
+			return ProjectBackend{}, errNoInstall{reason: in.Reason}
+		}
+		ps, err := e.profileStore(ctx)
+		if err != nil {
+			return ProjectBackend{}, err
+		}
+		cat, _, err := e.catalog(ctx)
+		if err != nil {
+			return ProjectBackend{}, err
+		}
+		e.mu.Lock()
+		if !e.current(gen) {
+			e.mu.Unlock()
+			continue // the install changed while the parts were loaded
+		}
+		if e.backend != nil {
+			be := *e.backend
+			e.mu.Unlock()
+			return be, nil
+		}
+		be, err := e.deps.NewProjects(in, ps, cat)
+		if err != nil {
+			e.mu.Unlock()
+			return ProjectBackend{}, fmt.Errorf("the projects layer cannot start: %w", err)
+		}
+		e.backend = &be
+		e.mu.Unlock()
+		return be, nil
 	}
-	if !in.Found {
-		return ProjectBackend{}, errNoInstall{reason: in.Reason}
-	}
-	ps, err := e.profileStore(ctx)
-	if err != nil {
-		return ProjectBackend{}, err
-	}
-	cat, _, err := e.catalog(ctx)
-	if err != nil {
-		return ProjectBackend{}, err
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.backend != nil {
-		return *e.backend, nil
-	}
-	be, err := e.deps.NewProjects(in, ps, cat)
-	if err != nil {
-		return ProjectBackend{}, fmt.Errorf("the projects layer cannot start: %w", err)
-	}
-	e.backend = &be
-	return be, nil
 }
 
 // jobBackends returns the backends whose jobs can be asked about: the current
@@ -398,10 +449,15 @@ func (e *env) k2(ctx context.Context) *k2Defaults {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.defaultsD {
+	// The store was read before the lock: after a refresh it may be an old one,
+	// whose defaults must not be cached for the new install.
+	current := e.store == st
+	if current && e.defaultsD {
 		return e.defaults
 	}
-	e.defaultsD = true
+	if current {
+		e.defaultsD = true
+	}
 	d := &k2Defaults{}
 	get := func(t profiles.Type, name string) *profiles.Preset {
 		p, err := st.Get(t, name)
@@ -414,7 +470,9 @@ func (e *env) k2(ctx context.Context) *k2Defaults {
 	if d.printer == nil && d.process == nil && d.filament == nil {
 		return nil
 	}
-	e.defaults = d
+	if current {
+		e.defaults = d
+	}
 	return d
 }
 

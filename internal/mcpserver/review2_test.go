@@ -1,7 +1,10 @@
 package mcpserver
 
 import (
+	"context"
 	"encoding/json"
+	"github.com/sairaph/creality-slicer-mcp/internal/profiles"
+	"github.com/sairaph/creality-slicer-mcp/internal/slicer"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,9 +30,10 @@ func TestCompareHeaderSaysWhatTheLevelHides(t *testing.T) {
 	}
 }
 
-// MC3: a tool call in parallel with a refresh never leaves the presets of the
-// old install cached after the refresh.
-func TestRefreshWithParallelCallsKeepsTheNewInstall(t *testing.T) {
+// newInstallWithExtraPreset is a second install whose filament list has one
+// more preset than the fixture's default.
+func newInstallWithExtraPreset(t *testing.T) (in slicer.Install, extra string) {
+	t.Helper()
 	newInstall := testInstall(t)
 	idxPath := filepath.Join(newInstall.ProfileRoot, "Creality.json")
 	raw, err := os.ReadFile(idxPath)
@@ -40,13 +44,88 @@ func TestRefreshWithParallelCallsKeepsTheNewInstall(t *testing.T) {
 	if err := json.Unmarshal(raw, &idx); err != nil {
 		t.Fatal(err)
 	}
-	const extra = "Extra PLA @Creality K2 0.4 nozzle"
+	extra = "Extra PLA @Creality K2 0.4 nozzle"
 	writeJSON(t, filepath.Join(newInstall.ProfileRoot, "Creality", "filament", extra+".json"), preset{
 		"type": "filament", "name": extra, "from": "system", "instantiation": "true", "inherits": "fdm_filament_common", "filament_id": "09999",
 		"filament_type": []string{"PLA"}, "compatible_printers": []string{k2Printer}})
 	idx["filament_list"] = append(idx["filament_list"].([]any), map[string]any{"name": extra, "sub_path": "filament/" + extra + ".json"})
 	writeJSON(t, idxPath, idx)
+	return newInstall, extra
+}
 
+// MC3: a load that read the install before a refresh must not fill the cache
+// the refresh emptied with what it built from the old install. The interleaving
+// is forced on the loaders themselves: a load reads the old install and is held
+// there while the refresh runs to the end, then it is let go. Each kind of lazy
+// value is tried: the preset store, and the projects backend built from it.
+func TestRefreshDuringALoadKeepsTheNewInstall(t *testing.T) {
+	newInstall, extra := newInstallWithExtraPreset(t)
+	for name, load := range map[string]func(e *env) (hasExtra bool){
+		"profile store": func(e *env) bool {
+			st, err := e.profileStore(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, gerr := st.Get(profiles.TypeFilament, extra)
+			return gerr == nil
+		},
+		"projects backend": func(e *env) bool {
+			be, err := e.projectBackend(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = be
+			st, err := e.profileStore(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, gerr := st.Get(profiles.TypeFilament, extra)
+			return gerr == nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newProjFixture(t)
+			f.install.mu.Lock()
+			f.install.after = &newInstall
+			f.install.mu.Unlock()
+			e := newEnv(f.cfg.Deps.withDefaults(f.cfg))
+
+			readOld := make(chan struct{})
+			release := make(chan struct{})
+			var once sync.Once
+			f.install.mu.Lock()
+			f.install.afterGet = func(read slicer.Install) {
+				if read.ProfileRoot == newInstall.ProfileRoot {
+					return // only a read of the old install is held
+				}
+				once.Do(func() {
+					close(readOld)
+					<-release
+				})
+			}
+			f.install.mu.Unlock()
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				load(e) // the held load: whatever it stores must not survive
+			}()
+			<-readOld // the load holds the old install in its hand
+			if _, err := e.install(context.Background(), true); err != nil {
+				t.Fatal(err)
+			}
+			close(release)
+			<-done
+			if !load(e) {
+				t.Errorf("after the refresh the %s still belongs to the old install", name)
+			}
+		})
+	}
+}
+
+// The refresh with calls in parallel, without forced timing, as a wide net.
+func TestRefreshWithParallelCallsKeepsTheNewInstall(t *testing.T) {
+	newInstall, extra := newInstallWithExtraPreset(t)
 	for round := 0; round < 5; round++ {
 		f := newFixture(t, func(fi *fakeInstall, _ *Deps) { fi.after = &newInstall })
 		var wg sync.WaitGroup

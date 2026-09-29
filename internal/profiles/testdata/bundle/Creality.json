@@ -1,0 +1,35 @@
+{
+    "name": "Creality",
+    "version": "2.0.0.1",
+    "force_update": "1",
+    "description": "Synthetic test bundle",
+    "machine_list": [
+        {"name": "fdm_machine_common", "sub_path": "machine/fdm_machine_common.json"},
+        {"name": "fdm_test_common", "sub_path": "machine/fdm_test_common.json"},
+        {"name": "Test Printer A 0.4 nozzle", "sub_path": "machine/Test Printer A 0.4 nozzle.json"},
+        {"name": "Test Printer A 0.6 nozzle", "sub_path": "machine/Test Printer A 0.6 nozzle.json"},
+        {"name": "Test Printer B 0.4 nozzle", "sub_path": "machine/Test Printer B 0.4 nozzle.json"},
+        {"name": "Ghost Printer", "sub_path": "machine/does-not-exist.json"}
+    ],
+    "process_list": [
+        {"name": "fdm_process_common", "sub_path": "process/fdm_process_common.json"},
+        {"name": "fdm_process_test_common", "sub_path": "process/fdm_process_test_common.json"},
+        {"name": "0.20mm Standard @Test A 0.4", "sub_path": "process/0.20mm Standard @Test A 0.4.json"},
+        {"name": "0.30mm Standard @Test A 0.6", "sub_path": "process/0.30mm Standard @Test A 0.6.json"},
+        {"name": "0.20mm Cond @Test", "sub_path": "process/0.20mm Cond @Test.json"},
+        {"name": "0.20mm BadCond @Test", "sub_path": "process/0.20mm BadCond @Test.json"},
+        {"name": "0.20mm Broken @Test", "sub_path": "process/0.20mm Broken @Test.json"},
+        {"name": "Loop A", "sub_path": "process/Loop A.json"},
+        {"name": "Loop B", "sub_path": "process/Loop B.json"}
+    ],
+    "filament_list": [
+        {"name": "fdm_filament_common", "sub_path": "filament/fdm_filament_common.json"},
+        {"name": "fdm_filament_pla", "sub_path": "filament/fdm_filament_pla.json"},
+        {"name": "fdm_filament_petg", "sub_path": "filament/fdm_filament_petg.json"},
+        {"name": "TP-PLA @Test A 0.4", "sub_path": "filament/TP-PLA @Test A 0.4.json"},
+        {"name": "TP-PLA @Test A 0.6", "sub_path": "filament/TP-PLA @Test A 0.6.json"},
+        {"name": "TP-PETG @Test A 0.4", "sub_path": "filament/TP-PETG @Test A 0.4.json"},
+        {"name": "Generic ABS", "sub_path": "filament/Generic ABS.json"},
+        {"name": "TP-PLA Special @Test A 0.4", "sub_path": "filament/TP-PLA Special @Test A 0.4.json"}
+    ]
+}

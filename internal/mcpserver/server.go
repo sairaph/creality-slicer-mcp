@@ -7,42 +7,72 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/sairaph/mcp-wizard/render"
+
+	"github.com/sairaph/creality-slicer-mcp/internal/domain"
 )
 
-// Server wraps the MCP server and domain logic.
+// Server wraps the MCP server.
 type Server struct {
 	mcpServer *mcp.Server
 	config    Config
+	env       *env
 }
 
 // New creates a new MCP server with the given config and registers its tools.
 func New(config Config) *Server {
+	return newServer(config)
+}
+
+// newServer is New's implementation, taking optional extra registration funcs
+// run after every real tool group. Tests use it (never New directly) to
+// register the sample tools of sample_tools_test.go, so they never ship.
+func newServer(config Config, extra ...func(*Server)) *Server {
+	config.Deps = config.Deps.withDefaults(config)
 	srv := &Server{
 		config: config,
+		env:    newEnv(config.Deps),
 		mcpServer: mcp.NewServer(
 			&mcp.Implementation{
-				Name:    "creality-slicer-mcp",
+				Name:    domain.ServerName,
+				Title:   "Creality Print slicer",
 				Version: config.Version,
 			},
 			&mcp.ServerOptions{
-				Capabilities: &mcp.ServerCapabilities{},
+				Instructions: serverInstructions,
+				// The tools capability is advertised while the tool list is
+				// still empty, so clients can always list tools.
+				Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}},
 			},
 		),
 	}
 
-	srv.registerGreet()
-	// Register your tools here, one register* method per tool.
+	srv.registerStatusTools()
+	srv.registerSettingsTools()
+	srv.registerPresetTools()
+	srv.registerProjectTools()
+	srv.registerEditTools()
+	srv.registerSliceTools()
+	srv.registerViewTools()
+
+	for _, register := range extra {
+		register(srv)
+	}
+	srv.mcpServer.AddReceivingMiddleware(invalidArguments)
+	srv.mcpServer.AddReceivingMiddleware(recoverPanics)
 
 	return srv
 }
 
+// MCPServer exposes the underlying server, for tests.
+func (s *Server) MCPServer() *mcp.Server { return s.mcpServer }
+
 // Run starts the server and blocks until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {
+	// Slice jobs end with the server, on either transport.
+	defer s.env.stopJobs()
 	switch s.config.Transport {
 	case "http":
 		return s.runHTTP(ctx)
@@ -69,12 +99,21 @@ func (s *Server) runHTTP(ctx context.Context) error {
 	)
 
 	httpServer := &http.Server{
-		Addr:    addr,
-		Handler: handler,
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	// done ends the shutdown goroutine when ListenAndServe returns on its own
+	// (the port is in use, say), so it never waits on ctx forever.
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case <-done:
+			return
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
@@ -87,44 +126,4 @@ func (s *Server) runHTTP(ctx context.Context) error {
 		return fmt.Errorf("serve http: %w", err)
 	}
 	return nil
-}
-
-// --- Example tool: greet ---
-//
-// Every tool follows this shape: a typed input struct whose jsonschema tags
-// become the tool's input schema, a typed frontmatter struct rendered as
-// YAML, and a Markdown body with guidance. Errors are returned as structured
-// results via render.ErrorResult so the model gets a code and a hint rather
-// than a bare failure. Delete this tool once you have your own.
-
-type greetInput struct {
-	Name string `json:"name" jsonschema:"the name to greet"`
-}
-
-type greetFront struct {
-	Greeting string `yaml:"greeting"`
-	Name     string `yaml:"name"`
-}
-
-func (s *Server) registerGreet() {
-	mcp.AddTool(s.mcpServer, &mcp.Tool{
-		Name: "greet",
-		Description: "Return a greeting for the given name. Use it to confirm the creality-slicer-mcp " +
-			"server is reachable and responding. The name must not be empty; the result carries the " +
-			"greeting in its frontmatter and a short message in the body.",
-	}, s.handleGreet)
-}
-
-func (s *Server) handleGreet(ctx context.Context, req *mcp.CallToolRequest, in greetInput) (*mcp.CallToolResult, any, error) {
-	name := strings.TrimSpace(in.Name)
-	if name == "" {
-		return render.ErrorResult(render.Error{
-			Code:    render.CodeInvalidInput,
-			Message: "name must not be empty",
-			Hint:    "Call greet with {\"name\": \"world\"}.",
-		}), nil, nil
-	}
-	front := greetFront{Greeting: "Hello, " + name + "!", Name: name}
-	body := fmt.Sprintf("Greeted %s from creality-slicer-mcp %s.", name, s.config.Version)
-	return render.SuccessResult(front, body), nil, nil
 }

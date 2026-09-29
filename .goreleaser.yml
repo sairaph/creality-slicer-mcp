@@ -20,6 +20,9 @@ checksum:
   name_template: SHA256SUMS.txt
 
 release:
+  # Tags like v0.1.1-rc.1 publish as pre-releases, which /releases/latest
+  # (the install scripts and `update`) never picks.
+  prerelease: auto
   extra_files:
     - glob: ./install.sh
     - glob: ./install.ps1

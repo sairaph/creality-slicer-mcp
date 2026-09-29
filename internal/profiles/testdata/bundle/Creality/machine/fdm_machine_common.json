@@ -1,0 +1,12 @@
+{
+    "type": "machine",
+    "name": "fdm_machine_common",
+    "from": "system",
+    "instantiation": "false",
+    "gcode_flavor": "marlin",
+    "nozzle_diameter": ["0.4"],
+    "printable_area": "0x0,200x0,200x200,0x200",
+    "machine_start_gcode": "M140 S0\nSTART_PRINT BED=[bed_temperature] IF {a < b && c > d}",
+    "retract_length": ["1"],
+    "printer_settings_id": ""
+}

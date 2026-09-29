@@ -1,14 +1,34 @@
-# creality-slicer-mcp
+# Creality Slicer MCP
 
-MCP server by sairaph.
+Slice for your Creality K2 or K2 Combo from Claude Desktop and other MCP
+clients, with the Creality Print you already have installed (7.3 preferred,
+7.2 works). The assistant builds real Creality Print projects with the right
+printer, process and filament presets, places your models, explains every
+setting in plain words before changing it, slices to G-code, and shows previews
+of the plate and of single layers. The projects are ordinary 3MF files you can
+open in Creality Print to paint or check, and the sliced result comes with
+everything the [creality-k2-mcp](https://github.com/sairaph/creality-k2-mcp)
+server needs to upload and print it. This server never talks to the printer.
+It is a single self-contained binary.
 
-## Install
+## What you can ask
 
-macOS / Linux:
+- "Slice C:\Models\bracket.stl for my K2 in PLA, strong enough to hold a shelf."
+- "What does `sparse_infill_density` do, and what is it set to in my project?"
+- "Make this a two colour print, white and black, and check my CFS spools first."
+- "Open my saved project `lamp.3mf`, use 4 walls, and slice it."
+- "Reinforce this hinge with denser infill around the pin hole only."
+- "Print the same part three times on a second plate and slice both plates."
+- "Show me the front view of the hinge with the modifier, then layer 40 coloured by speed."
+- "Slice it, then upload it to the printer and start the print."
 
-```sh
-curl -fsSL https://github.com/sairaph/creality-slicer-mcp/releases/latest/download/install.sh | sh
-```
+## Quick start
+
+You need [Creality Print](https://www.creality.com/pages/download-creality-print)
+on the computer that runs this server. Creality Slicer MCP is a single
+self-contained binary: it needs no Python, uv or pip on your machine.
+Slicing needs Creality Print on Windows. On macOS and Linux the server installs
+and answers, but reports that it cannot slice.
 
 Windows (PowerShell):
 
@@ -16,31 +36,53 @@ Windows (PowerShell):
 irm https://github.com/sairaph/creality-slicer-mcp/releases/latest/download/install.ps1 | iex
 ```
 
-The installer downloads the binary, adds it to PATH, and runs `creality-slicer-mcp configure`
-to register the server with the AI clients on your machine.
-
-## Usage
+macOS / Linux:
 
 ```sh
-creality-slicer-mcp            # interactive app (in a terminal) or MCP server (stdio)
-creality-slicer-mcp mcp        # MCP server over stdio
-creality-slicer-mcp install    # register with AI clients (--yes for unattended)
-creality-slicer-mcp add        # register in the current project's client configs
-creality-slicer-mcp login      # sign in
-creality-slicer-mcp doctor     # diagnose the installation
-creality-slicer-mcp update     # self-update from GitHub releases
+curl -fsSL https://github.com/sairaph/creality-slicer-mcp/releases/latest/download/install.sh | sh
 ```
 
-Set `TRANSPORT=http` and `ADDR=host:port` to serve over Streamable HTTP instead of stdio.
+The installer downloads `creality-slicer-mcp`, verifies its SHA256 checksum,
+puts it on your `PATH` and starts the setup wizard, which:
 
-## Develop
+1. finds the AI clients on your machine (Claude Desktop, Claude Code, Cursor,
+   VS Code, Windsurf, Zed and more) and lets you pick the ones to register with;
+2. registers the `creality-slicer-mcp` server with the selected clients, then
+   writes the `creality-slicer` guide skill into the skill folder each
+   selected client reads, such as `~/.claude/skills` for Claude Code or
+   `~/.agents/skills` for Codex and Gemini CLI. Claude Desktop takes skills
+   only as an upload, so it gets a note instead.
 
-```sh
-go vet ./... && go test ./...
-go run . mcp
-```
+Nothing is written until step 2, so cancelling earlier leaves your machine as
+it was. An entry you edited by hand, or one that runs another program, is kept
+unless you select that client, name it with `--clients` or pass `--all`.
 
-Releases are built by GoReleaser when a `v*` tag is pushed.
+Restart your AI client afterwards. Run `creality-slicer-mcp doctor` at any time
+to check the installation, and `creality-slicer-mcp update` to update to the
+latest release. `creality-slicer-mcp uninstall --all` removes the client
+entries, the guide skill, the cache and the program; your projects are kept.
+
+## Documentation
+
+| Guide | Contents |
+| --- | --- |
+| [Installation](docs/installation.md) | Installer, commands, unattended installs, troubleshooting |
+| [Configuration](docs/configuration.md) | Environment variables, per-user folders |
+| [Tools](docs/tools.md) | Every tool, its arguments and what its replies contain |
+| [Examples](docs/examples.md) | Five worked flows, from a first print to a multi-plate batch |
+
+## Requirements
+
+- Creality Print 7.3 or 7.2 on the computer that runs the server. Nothing else
+  is needed from you: the server drives the app's own command line.
+- Windows for slicing. On macOS and Linux the server installs and answers, but
+  reports that it cannot slice.
+- An AI client that speaks MCP. The setup wizard finds the common ones.
+- For printing, the creality-k2-mcp server; this one only prepares the G-code.
+
+## Third-party data
+
+The settings catalog embedded in the program (setting names, types, ranges, short labels and the rules that enable or force a setting) is derived from the Creality Print source code (AGPL-3.0, [github.com/CrealityOfficial/CrealityPrint](https://github.com/CrealityOfficial/CrealityPrint)) as facts about the settings. It contains no Creality descriptive text: the descriptions the tools show are read at run time from your own Creality Print installation. See [NOTICE](NOTICE).
 
 ## License
 

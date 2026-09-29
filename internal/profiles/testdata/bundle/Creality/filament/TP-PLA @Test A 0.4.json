@@ -1,0 +1,12 @@
+{
+    "type": "filament",
+    "name": "TP-PLA @Test A 0.4",
+    "from": "system",
+    "instantiation": "true",
+    "inherits": "fdm_filament_pla",
+    "filament_id": "04001",
+    "setting_id": "GFSA04",
+    "filament_vendor": ["Creality"],
+    "filament_flow_ratio": ["0.95"],
+    "compatible_printers": ["Test Printer A 0.4 nozzle"]
+}

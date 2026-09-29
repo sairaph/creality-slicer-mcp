@@ -1,0 +1,20 @@
+Creality Slicer MCP
+Copyright (c) 2026 Sairaph. Licensed under the MIT License (see LICENSE).
+
+Third-party data
+
+The files under internal/catalog/data (the embedded settings catalogs) are
+derived from the source code of Creality Print
+(https://github.com/CrealityOfficial/CrealityPrint), which is licensed under
+the GNU Affero General Public License v3.0.
+
+What is taken from it is facts about the settings: their keys, value types,
+ranges, choices, short labels, where the application shows them, and the
+conditions under which a setting is enabled or forced by another. The catalog
+contains no descriptive text written by Creality: the long descriptions the
+tools show are read at run time from the message catalogs of the user's own
+Creality Print installation and are never copied into this program or its
+repository. The tool that generates the catalogs is tools/catalog-gen.
+
+Creality and Creality Print are trademarks of their owners. This project is not
+affiliated with or endorsed by Creality.

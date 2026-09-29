@@ -1,0 +1,12 @@
+{
+    "type": "process",
+    "name": "fdm_process_common",
+    "from": "system",
+    "instantiation": "false",
+    "layer_height": "0.2",
+    "wall_loops": "2",
+    "sparse_infill_density": "15%",
+    "top_layers": 4,
+    "enable_prime_tower": "0",
+    "compatible_printers": []
+}

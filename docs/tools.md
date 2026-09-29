@@ -1,0 +1,317 @@
+# Tools
+
+[Back to README](../README.md) · [Installation](installation.md) · [Configuration](configuration.md)
+
+Creality Slicer MCP exposes 26 tools, grouped below by task: the first seven read the settings catalog, the guide and the installed Creality Print's presets and change nothing; the project tools change only this server's own projects store; the slicing tools run the installed Creality Print. Nothing here talks to a printer. Every tool carries a title and behaviour hints (read-only, changing, destructive) that clients use for approval prompts, and the server sends short instructions that name the rules shared by all tools: paths, the store, the printer handoff and never guessing a setting key. The `creality-slicer` guide skill (see [installation](installation.md#what-is-written-where)) holds the same pages `get_guide` serves.
+
+Conventions shared by the tools:
+
+- Tools that change a project (`add_model`, `update_object`, `remove_object`, `add_modifier`, `set_height_ranges`, `manage_plates` with add, remove or set, and `set_presets` with filaments) attach a small screenshot of the affected plate: Isometric, 512 pixels on the longest edge, parts and labels on, framed on what changed. `include_screenshot` false leaves it out; the environment setting `CREALITY_SLICER_MCP_ONLY_TEXT_FEEDBACK` (see [configuration](configuration.md)) turns it off for every call and wins. A picture that cannot be drawn or does not fit is left out and never fails the call.
+- Setting keys are Creality's own (`wall_loops`, `sparse_infill_density`). Find one with `search_settings`, read it with `describe_setting`; a wrong key never silently works.
+- Levels: `beginner` shows the app's simple mode (the default), `advanced` adds advanced settings, `all` adds developer settings.
+- Long lists are paged by size. The reply carries `page`, `total` and `total_pages` in its front matter and ends with `Next: page=N.` when there is another page; a page past the end is an empty page, not an error.
+- Presets are the flattened result: everything a preset inherits is applied, so a value is what the app would use.
+- Replies start with a YAML front matter block of named fields and continue with a Markdown body. A failure is an error reply with a `code` (`not_found`, `invalid_input`, `conflict`, `unavailable`, `slicer_error`, `internal_error`), a message and a hint that names the next call.
+- Paths are absolute paths on this computer.
+- Settings and presets come from the installed Creality Print (its bundled profiles and its setting descriptions). Without it the setting names and defaults of the shipped catalog (version 7.2.1) still work, but presets, K2 defaults and descriptions are unavailable, and the tools say so. With Creality Print 7.3 installed the 7.3.0 catalog is used instead.
+
+- [Status and guidance](#status-and-guidance)
+- [Settings](#settings)
+- [Presets](#presets)
+- [Projects](#projects)
+- [Slicing](#slicing)
+- [Command line](#command-line)
+
+## Status and guidance
+
+### `get_slicer_status`
+
+Report whether Creality Print is installed and usable. Call it first.
+
+- `refresh` (boolean, optional, default false): detect Creality Print again and reload presets and descriptions. Without it the result cached since the server started is used.
+
+The front matter has `installed`, `supported`, `version`, `build`, `dialect`, `exe`, `data_dir`, `profile_version`, `profile_source` (`install` or `data_dir`: which bundle the presets are read from), `gui_running`, `projects_dir`, `catalog_version`, `tooltip_coverage` (for example `561/568` settings have a description from the installed app), `catalog_drift` (how many settings the installed K2 presets set that the shipped catalog does not know; the body lists up to ten of them, and they are passed through untouched) and, when not usable, `reason`. The body gives a one-line verdict, what works and what does not (with an unsupported version, settings, presets and guides work but slicing does not), and the next call.
+
+### `get_guide`
+
+Read the guide: written workflows for slicing on a K2 or K2 Combo. With no arguments it lists the topics.
+
+- `topic` (string, optional): a topic from the index: `start`, `k2-combo`, `multicolor-cfs`, `supports`, `strength`, `surface-quality`, `speed-vs-quality`, `modifiers-and-ranges`, `multi-plate`, `calibration`, `troubleshooting`, `gui-handoff`, `glossary`. Case is ignored.
+- `term` (string, optional): look a word up in the glossary. Every entry whose term contains it is returned. Use it alone or with topic `glossary`; with another topic it is an `invalid_input` error.
+
+The front matter has `topic` (or `topics` on the index) and `term`; the body is the page. An unknown topic or a term with no match is a `not_found` error listing what exists.
+
+## Settings
+
+### `search_settings`
+
+Find settings by words in their key, label, area, choices or description. Results are ranked, then paged.
+
+- `query` (string, optional): the words to look for, such as `wall loops` or `support angle`. Without it every setting the other filters allow is listed in the app's order.
+- `area` (string, optional): a GUI path prefix to search under, such as `process/Quality` or `filament/Filament`. `browse_settings` shows the paths.
+- `level` (string, optional, `beginner` | `advanced` | `all`, default `beginner`).
+- `scope` (string, optional): `printer`, `process` or `filament` for settings of that preset type; `object`, `part`, `layer_range` or `plate` for settings that can be overridden there. Default: all.
+- `page` (integer, optional, from 1, default 1).
+
+The front matter has `query`, `count` (all matches), `catalog_version`, `defaults` and the page fields. `defaults` says where the K2 default column came from: `presets` (the value in the flattened `Creality K2 0.4 nozzle`, `0.20mm Standard @Creality K2 0.4 nozzle` and `CR-PLA @Creality K2 0.4 nozzle` presets), `catalog` (those presets could not be read, so the catalog's own defaults) or `mixed`. A setting those presets do not set shows the catalog default marked `(catalog)`. The body has one line per setting, `key | label | area | unit | K2 default | level`, with the first sentence of the installed app's description under it when there is one, and ends with the next-page hint and the next call, `describe_setting`.
+
+### `describe_setting`
+
+Explain one setting.
+
+- `key` (string, required): the setting key. An unknown key is a `not_found` error with up to five close keys.
+- `preset` (string, optional): a preset to read the current value from, as `type:name`, for example `process:0.20mm Standard @Creality K2 0.4 nozzle`.
+- `project` (string, optional): a project whose current project level value to show, with where it comes from (changed in the project, or from its presets).
+
+The front matter has `key`, `label`, `type` (`bool`, `int`, `float`, `percent`, `enum`, `string`, ...), `vector` (true for per-filament settings), `unit`, `default`, `min`, `max`, `enum` (`value: label` per choice), `level`, `area`, `scopes` (`project` and any of `object`, `part`, `layer_range`, `plate`), `locked` (`read_only` or `hidden` when Creality's own presets lock the setting; unlocking needs `allow_locked` in `update_settings`) and, with `preset` or `project`, `current` and `origin` (the preset in its inheritance chain that set the value, or where the project's value comes from; with both, the project's value). The body has the app's description (or "No description in this Creality Print build"), the dependencies in plain words (when the app shows or enables the setting, what it forces), related settings of the same group, and how to change it with `update_settings`, with an example.
+
+### `browse_settings`
+
+Walk the settings as the app lays them out: tabs (`process`, `filament`, `printer`, `plate`), pages, then groups.
+
+- `path` (string, optional): the area to open, such as `process`, `process/Strength` or `process/Strength/Infill`. Case and surrounding slashes are ignored. Default: the top.
+- `level` (string, optional, `beginner` | `advanced` | `all`, default `beginner`).
+
+The front matter has `path`, `kind` (`root`, `tab`, `page` or `group`), `children` and `settings` (counts at this level). At the top, tab and page level the body lists the children with their setting counts; a group (and a page's ungrouped settings) lists `label | key | unit | default`. An unknown path is a `not_found` error.
+
+## Presets
+
+Preset names are exact: `list_presets` shows them.
+
+### `list_presets`
+
+List presets of one type with their key facts. Results are paged.
+
+- `type` (string, required): `printer`, `process` or `filament`.
+- `printer` (string, optional, default `Creality K2 0.4 nozzle`): the printer preset the process and filament presets must fit. `any` lists every Creality preset, `all` the whole K2 family. For type `printer` the default lists the K2 family (every nozzle).
+- `filament_type` (string, optional): only filament presets of this material, such as `PLA` or `PETG`, case ignored.
+- `source` (string, optional, `system` | `user` | `all`, default `all`): shipped with the app, yours, or both.
+- `page` (integer, optional, from 1, default 1).
+
+The front matter has `type`, `printer`, `count`, `profile_version` and the page fields. The body is one line per preset: process `name | source | layer height | walls | infill`, filament `name | source | type | vendor | filament_id | nozzle temp`, printer `name | source | nozzle | bed`. A printer preset that does not exist is `not_found`; without a detected Creality Print the tool is `unavailable` and points at `get_slicer_status`.
+
+### `get_preset`
+
+Show one preset's values, grouped by where the app shows them (in the app's order), with the inheritance chain.
+
+- `type` (string, required): `printer`, `process` or `filament`.
+- `name` (string, required): the exact preset name.
+- `compare_to` (string, optional): another preset of the same type, or `parent` for the one this preset inherits from. Only the differing keys are shown, as `this -> other`.
+- `keys` (array of strings, optional): only these setting keys. A key the preset does not set (or, when comparing, that does not differ) is listed as not set.
+- `level` (string, optional, `beginner` | `advanced` | `all`, default `beginner`): which keys are shown when `keys` is empty. Keys the catalog does not know appear only at level `all`.
+
+The front matter has `type`, `name`, `source`, `inherits_chain` (the preset first, then its parents), `compatible_printers`, `values_shown`, and in compare mode `compare_to` and `differences`. The body groups values by area, `key (label) = value` (vectors show one entry per filament slot). A very long body is cut at a line with a note; pass `keys` or a lower level.
+
+## Projects
+
+A project is one Creality Print project (printer, process, filament slots, plates, objects, settings) kept in this server's own store, `projects_dir` in `get_slicer_status`. Every project has an id (its name plus a short suffix); a `project` argument takes the id or an exact name that is unique. Every edit is a new revision; the reply front matter carries `project`, `name` and `revision`. Source files are copied and never changed. Filament slots are numbered from 1 in these tools (slot 1 is tool T0 in the G-code); the slice handoff numbers them from 0, as the printer server does. Positions (objects, modifiers, the prime tower) are in mm relative to the corner of the plate they are on, the same on every plate.
+
+### `create_project`
+
+Create a project with a printer, a process and at least one filament.
+
+- `name` (string, required).
+- `printer` (string, optional, default `Creality K2 0.4 nozzle`), `process` (string, optional, default the printer's default process), `bed_type` (string, optional).
+- `filaments` (list, required, at least one): each `{preset, colour}`, colour `#RRGGBB`. One entry per colour of a multi-colour print.
+
+The front matter has the project fields, `printer`, `process`, `filaments` (`index`, `preset`, `type`, `colour`) and `plates`. An unknown or incompatible preset is an `invalid_input` error with the compatible names. The body says what to do next (`add_model`) and reminds you to match filament types to the loaded spools.
+
+### `open_project`
+
+Import a Creality Print or Bambu-family 3MF as a new project. The file is copied.
+
+- `path` (string, required): a `.3mf` project file. A file with no project settings is an `invalid_input` error (use `create_project` and `add_model`).
+- `name` (string, optional, default the file name).
+- `preview` (string, optional, `none` | `small`, default `none`): `small` attaches the thumbnail the app stored in the file, when it has one.
+
+The front matter has the project fields, `source_path`, `app_version`, `printer`, `process`, `filaments`, `plates`, `objects`, `painted` (objects with painted data: kept, but only the app can edit them) and `sliced_in_file`. The body summarises the project and warns about another printer than the K2 family, a file from a newer app version and presets missing on this machine.
+
+### `list_projects`
+
+List the projects, newest first, with printer, objects, plates and last slice.
+
+- `page` (integer, optional, from 1).
+
+The front matter has `count` and the page fields.
+
+### `get_project`
+
+Show one project as text: no pictures (for those see `get_view`).
+
+- `project` (string, required).
+
+The front matter has the project fields, `printer`, `process`, `filaments`, `plates` (`index`, `name`, `objects`, `bed_type`, `print_sequence`, `locked`), `overrides` (settings changed from the presets) and `last_slice`. The body lists filaments, plates, objects (name, id, plate, size in mm, position, rotation, filament, override count, parts, and the exclusion label once the project was sliced), the parts of each object (modifier, negative part, support enforcer or blocker) with kind, name, size and centre on the plate, the changed settings and warnings such as an object outside the bed. It ends with a `Next:` line that suggests `get_view`.
+
+### `get_view`
+
+Draw a plate from a named camera, to check placement, heights and modifier coverage. It reads the project and changes nothing.
+
+- `project` (string, required), `plate` (integer, optional, from 1, default 1).
+- `view_name` (string, optional, default `Isometric`): `Isometric` (azimuth 45 degrees from the front left, elevation 35.26), `Front` (camera at the front looking along +Y), `Top`, `Right` (camera at +X), `Back`, `Left` (camera at -X), `Bottom`, `Dimetric` (azimuth 45, elevation 20.7) or `Trimetric` (azimuth 60, elevation 30). Z is up and the projection is orthographic.
+- `focus` (list of object ids or names, optional): the picture is framed on these objects (with their parts) instead of the whole bed.
+- `hide` (list, optional): objects left out. `isolate` (list, optional): only these objects are drawn.
+- `show_parts` (boolean, optional, default true): modifiers (translucent yellow), negative parts (red), support enforcers (green) and support blockers (blue-grey), each with a solid outline. A part is drawn at full strength where it is in front of the model and only as a faint tint where the model hides it; its outline is always drawn.
+- `show_labels` (boolean, optional, default true): each object's id and short name at its top.
+- `show_ranges` (boolean, optional, default false): height ranges as tinted bands on their objects.
+- `width`, `height` (integers, optional, 1 to 2048): the image size. Without both, the longest edge is 1024 at the aspect of the framing; one given keeps that aspect.
+
+The picture shows the bed (260 mm square on the K2, printable area outline, 10 mm grid), the plate axes at the plate origin (X red, Y green), the wipe tower footprint, and the objects lit in their filament colours (tinted red outside the printable area). The front matter has the project fields, `plate`, `view`, `focus` (the names framed), `objects` and `parts` (counts drawn), `ranges` (bands drawn, only with `show_ranges`; 0 means no object in the picture has height ranges), `width` and `height`. The body says what is shown, gives a legend and ends with a `Next:` line; the image follows the text, scaled down when it would not fit in a reply (a picture that cannot be made to fit is an `invalid_input` error with a hint to ask for a smaller size).
+
+### `add_model`
+
+Add a model (`.stl`, `.obj` or `.3mf`) to a plate.
+
+- `project`, `path` (string, required).
+- `plate` (integer, optional, default 1), `position` (`[x, y]` or `[x, y, z]` mm from the corner of the object's own plate, optional: automatic placement without it), `rotation` (`[x, y, z]` degrees), `scale` (a number or `[x, y, z]`, above 0), `filament` (slot, default 1), `name`, `copies` (integer, default 1), `objects` (list of names: for a `.3mf`, take only these objects; default all).
+- `include_screenshot` (boolean, optional, default true): attach the screenshot described in the conventions above.
+
+The front matter has `added` (id, name, plate, size, position, rotation, filament). The body says where each copy went and warns when the size looks like the wrong unit. A model that does not fit is a `conflict` error with the free area and what to try. A `.3mf` adds all its objects, or only the ones named in `objects` (an unknown name is an `invalid_input` error that lists the names in the file).
+
+### `update_object`
+
+Change one object; only the given fields change.
+
+- `project`, `object` (string, required): an id or a unique name.
+- `position` (mm from the corner of the object's own plate; moving an object to another plate keeps it), `rotation`, `scale` (as in `add_model`), `filament` (slot), `plate` (move it), `name`, `lay_flat` (boolean: largest flat face down).
+- `include_screenshot` (boolean, optional, default true): attach the screenshot described in the conventions above.
+
+The front matter has `object` (its new state).
+
+### `remove_object`
+
+Remove an object with its parts, modifiers and height ranges.
+
+- `project`, `object` (string, required).
+- `include_screenshot` (boolean, optional, default true): attach the screenshot described in the conventions above.
+
+The front matter has `removed`.
+
+### `update_settings`
+
+Change settings at one scope.
+
+- `project` (string, required).
+- `scope` (string, optional, `project` | `object` | `part` | `layer_range` | `plate`, default `project`).
+- `target` (string): an object id or name; a part as `object/part`; a plate number. Not used for `project` scope.
+- `values` (object, required): setting key to value. Values are strings, numbers, booleans or lists (vector keys: a list is one value per filament slot, a single value applies to every slot); `null` removes the override.
+- `allow_locked` (boolean, optional, default false): allow keys Creality's system presets lock.
+
+Every key and value is checked against the settings catalog first (unknown key, type, choice, range, scope, vendor lock); nothing changes unless all pass, and each failing key is named with its reason. The front matter has `scope`, `changed` (`key: old -> new`) and `warnings`. The body explains each change, warns about settings that do nothing until another is on, and lists the side effects the app would also apply (they are applied).
+
+### `set_presets`
+
+Change the printer, process or filament presets, or the flush matrix.
+
+- `project` (string, required).
+- `printer`, `process` (string, optional).
+- `filaments` (list, optional): the full list in slot order, `{preset, colour}`. Shrinking is refused while objects use the removed slots.
+- `keep_changes` (boolean, optional, default true): keep this project's changed settings when re-basing on a new preset.
+- `flush_matrix` (list of integers, optional): N*N flush volumes in mm3, row by row, from filament to filament; omit for the automatic matrix. `flush_multiplier` (number, optional).
+- `include_screenshot` (boolean, optional, default true): attach the screenshot described in the conventions above.
+
+At least one of printer, process, filaments, flush_matrix or flush_multiplier is required. The front matter has `printer`, `process`, `filaments`, `flush_matrix` (`auto` or `manual`) and `flush_volumes`; the body lists what changed and which changed settings were dropped.
+
+### `add_modifier`
+
+Add a modifier, negative part, support enforcer or support blocker to an object.
+
+- `project`, `object`, `kind` (`modifier` | `negative_part` | `support_enforcer` | `support_blocker`), `shape` (`box` | `cylinder` | `sphere`), `size` (`[x, y, z]` mm): required.
+- `position` (`[x, y, z]` mm relative to the object's centre, default `[0, 0, 0]`), `rotation` (`[x, y, z]` degrees that turn the shape about its centre, applied about X, then Y, then Z of the bed, default none), `values` (settings for kind `modifier`, checked at part scope), `name`.
+- `include_screenshot` (boolean, optional, default true): attach the screenshot described in the conventions above.
+
+The front matter has `part` and `kind`. A support enforcer only works with `enable_support` on; the body says so.
+
+### `set_height_ranges`
+
+Replace the height ranges of an object: bands of layers with their own settings.
+
+- `project`, `object` (string, required).
+- `ranges` (list, required): each `{from_z, to_z, values}` in mm above the bed. The list replaces the current one; an empty list clears it. Ranges must not overlap; values are checked at layer range scope.
+- `include_screenshot` (boolean, optional, default true): attach the screenshot described in the conventions above.
+
+The front matter has `object` and `ranges` (the count).
+
+### `set_layer_actions`
+
+Replace the actions of a plate: a pause, a colour change or custom G-code at a height.
+
+- `project` (string, required), `plate` (integer, optional, default 1).
+- `actions` (list, required): each `{z or layer, type, filament, gcode}` with `type` `pause` | `color_change` | `custom`. A layer number (from 1) is converted to a height with the project's layer heights. `filament` is the slot to change to; `gcode` is for `custom`. The list replaces the current one.
+
+The front matter has `plate` and `actions` (the count).
+
+### `manage_plates`
+
+Add, remove, rename, lock or unlock a plate, or set plate settings.
+
+- `project`, `action` (`add` | `remove` | `rename` | `lock` | `unlock` | `set`): required.
+- `plate` (integer, from 1; not used for `add`), `name` (for `rename` or `add`), `values` (for `set`: `curr_bed_type`, `print_sequence`, `first_layer_print_sequence`, `other_layers_print_sequence`, `spiral_mode`).
+- `include_screenshot` (boolean, optional, default true): attach the screenshot described in the conventions above.
+
+Removing a plate with objects is refused. Locking sets the plate's lock flag, which the app honours when it arranges; the `arrange` option of `slice_project` ignores it. The front matter has `action` and `plates`.
+
+### `export_project`
+
+Write the project as a Creality Print 3MF, for painting or checks in the app.
+
+- `project`, `path` (string, required): an absolute `.3mf` path; missing folders are created.
+- `overwrite` (boolean, optional, default false).
+
+The front matter has `file` and `bytes`. The file is not linked to the store: after saving changes in the app, call `open_project` on it.
+
+### `delete_project`
+
+Delete a project's folder from the store, with the G-code of its slices. Exported files and source files are not touched.
+
+- `project` (string, required), `confirm` (string, required): the project id again.
+
+## Slicing
+
+Slicing runs the installed Creality Print (7.2 or 7.3, 7.3 preferred and needing nothing extra from the user; other versions give an `unavailable` error) and writes G-code into the project folder. The tools never print: the reply carries what the `creality-k2-mcp` server needs.
+
+### `slice_project`
+
+Slice a project.
+
+- `project` (string, required).
+- `plate` (integer, optional, default 0 = every plate with objects), `arrange`, `orient` (boolean, optional, default false: the tools place objects first and write it into the project).
+- `overrides` (object, optional): settings for this slice only, checked like `update_settings` at project scope; the project is not changed.
+- `wait` (number, optional, seconds, 1 to 600, default 60): the call waits this long for the result. A slice that finishes in time returns the full result; a longer one returns `state: running` and its `job_id` with polling advice, and carries on in the background (`get_slice_status`).
+- `background` (boolean, optional, default false): true returns the `job_id` at once without waiting.
+- `thumbnails` (boolean, optional, default true): put the plate pictures the printer preset asks for into the G-code.
+- `timeout` (number, optional, seconds, default 1800, at most 1800): the anti-hang limit for the slicer run, not the wait.
+- `preview` (string, optional, `none` | `small` | `large`, default `none`): attach the sliced plate and its first layer as pictures of that size.
+
+The front matter has the project fields, `state` (`finished` or `running`), `plates` (`index`, `bytes`, `time_s`, `time_text`, `filament_g` per tool, `total_g`, `layers`, `objects`, `multicolour`, `changes` (filament changes)), `warnings`, `stale` and `handoff`. Per plate the handoff has `gcode_path`, `upload_name` (`<project name>_plate<N>.gcode`, sanitised), `tools` (`tool` T0 and so on, `filament` the 0-based index, `preset`, `type`, `colour`, `filament_id`) and `exclude_names` (the object labels `exclude_object` takes; `get_project` and the slice reply also show the label of each object). The body has one table with a row per plate (time, grams, layers, upload name, G-code path), the tools table, the exclusion label of every object, the warnings and the printer steps: `get_filaments`, then `upload_gcode_file` with `path` = `gcode_path` and `filename` = `upload_name`, then `start_print` with `source` `cfs` and `slot_map` (`filament` = the 0-based index, `slot` = the CFS slot with the same material), then `exclude_object` during the print.
+
+A failed slice is a `slicer_error` with the exit code name, its meaning, a hint and the slicer's output; an unsupported install is `unavailable`.
+
+### `get_slice_status`
+
+Check a background slice.
+
+- `job_id` (string, optional): without it the running and recent jobs are listed.
+- `wait` (number, optional, seconds, 0 to 600, default 0): hold the call while the job runs, until it ends or the seconds are up, instead of polling.
+- `cancel` (boolean, optional, default false): stop the job (needs `job_id`).
+
+A running job gives its state and elapsed time. A finished job gives the same reply as `slice_project`, including the handoff. A failed job gives the same error. An id nobody knows (or one that is not a job id, such as a project id) is a `not_found` error "no slice job with id ..."; jobs are forgotten after a day, and `get_project` still shows the last slice of a project.
+
+### `get_slice_report`
+
+Read the last slice of a plate.
+
+- `project` (string, required), `plate` (integer, optional, default 1).
+- `section` (string, optional, `summary` | `filaments` | `objects` | `layers` | `layer` | `settings`, default `summary`).
+- `layer` (integer, from 1) or `z` (number, mm) for section `layer`; `color_by` (`feature` | `filament` | `speed`, default `feature`); `preview` (`none` | `small` | `large`; default `small` for section `layer`).
+
+`summary` is the plate line, the generator and the bounds; `filaments` gives grams, millimetres and cubic centimetres per tool; `objects` the labels with centre and box; `layers` the count, first layer and height range; `layer` the extrusion by feature and travel, with a picture; `settings` the effective settings that differ from the process preset. A report older than the project says so (`stale`). Time per layer and the flush share are not reported.
+
+## Command line
+
+Three commands have tool equivalents. They call the same functions as the tools, so the answers agree; the output is the tool's reply as text (for `status`, its fields then its body; for `presets` and `slice`, its body).
+
+- `creality-slicer-mcp status [--refresh]`: the same as `get_slicer_status`, including the catalog drift line.
+- `creality-slicer-mcp presets <printer|process|filament> [--printer NAME|all|any] [--filament-type TYPE] [--source system|user|all]`: the same as `list_presets` with the same defaults, but every preset on one page instead of paged output.
+- `creality-slicer-mcp slice <project.3mf> [--plate N] [--out DIR]`: copy the project file into the projects store (the file itself is never changed), slice it (every plate, or plate N) and print the summary `slice_project` gives, including the G-code path. With `--out` the G-code files are copied to that folder under their upload names and the temporary project is deleted; without it the project stays in the store and the printed paths point into it.
+
+All exit 0 on success, 2 for a usage error or invalid input (a bad flag, an unknown type, a file that is not a project, a bad environment setting) and 1 for any other failure, with the message and hint on stderr. The interactive app (run the program with no arguments in a terminal) has the same status as its "Show slicer status" menu entry, and a "Recent projects" entry that lists the projects in the store, newest first.

@@ -1,0 +1,10 @@
+{
+    "type": "process",
+    "name": "0.20mm Standard @Test A 0.4",
+    "from": "system",
+    "instantiation": "true",
+    "inherits": "fdm_process_test_common",
+    "setting_id": "GP101",
+    "layer_height": "0.2",
+    "compatible_printers": ["Test Printer A 0.4 nozzle"]
+}

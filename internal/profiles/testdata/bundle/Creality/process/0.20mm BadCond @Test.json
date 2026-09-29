@@ -1,0 +1,9 @@
+{
+    "type": "process",
+    "name": "0.20mm BadCond @Test",
+    "from": "system",
+    "instantiation": "true",
+    "inherits": "fdm_process_test_common",
+    "compatible_printers": [],
+    "compatible_printers_condition": "some_function(1) == 2"
+}

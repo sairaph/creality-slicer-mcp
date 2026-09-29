@@ -1,0 +1,9 @@
+{
+    "type": "filament",
+    "name": "fdm_filament_pla",
+    "from": "system",
+    "instantiation": "false",
+    "inherits": "fdm_filament_common",
+    "filament_type": ["PLA"],
+    "nozzle_temperature": ["210"]
+}

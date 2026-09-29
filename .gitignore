@@ -9,3 +9,9 @@
 
 # Project-scoped registry written by `creality-slicer-mcp add`
 /.creality-slicer-mcp/
+
+# tools/catalog-gen writes its full catalog (with Creality's AGPL tooltip text)
+# to ./settings-catalog-<ref>.json by default; only the slim catalog is committed.
+/tools/catalog-gen/settings-catalog-*.json
+/tools/catalog-gen/diff*.json
+/tools/catalog-gen/*.exe

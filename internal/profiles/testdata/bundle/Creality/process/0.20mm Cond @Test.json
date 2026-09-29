@@ -1,0 +1,9 @@
+{
+    "type": "process",
+    "name": "0.20mm Cond @Test",
+    "from": "system",
+    "instantiation": "true",
+    "inherits": "fdm_process_test_common",
+    "compatible_printers": [],
+    "compatible_printers_condition": "printer_model == \"Model A\" and nozzle_diameter[0] == 0.4"
+}

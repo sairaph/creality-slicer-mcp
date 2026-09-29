@@ -1,0 +1,548 @@
+// Package gcodeinfo reads the G-code files Creality Print writes: header,
+// bounds, objects, tool usage, footer totals, the embedded config block, a
+// layer index with byte offsets and the moves of a single layer. Files can be
+// 100 MB or more, so everything streams; nothing keeps the file in memory.
+package gcodeinfo
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+// Bounds is the MINX..MAXZ block of the header (plate-relative, mm).
+type Bounds struct {
+	MinX, MinY, MinZ, MaxX, MaxY, MaxZ float64
+}
+
+// Thumbnail is one embedded thumbnail block (the CLI writes none; the GUI and
+// the MCP thumbnail helper do).
+type Thumbnail struct {
+	Width, Height int
+	Length        int // base64 payload length as declared by the "thumbnail begin" line
+	Line          int // 1-based line number of the "thumbnail begin" line
+}
+
+// Object is one EXCLUDE_OBJECT_DEFINE entry.
+type Object struct {
+	Name    string
+	CenterX float64
+	CenterY float64
+	Polygon [][2]float64
+}
+
+// ToolUse is how often a T<n> line occurs.
+type ToolUse struct {
+	Tool      int
+	Count     int
+	FirstLine int // 1-based
+}
+
+// Summary is everything the MCP reports about a G-code file.
+type Summary struct {
+	Path  string
+	Size  int64
+	Lines int
+
+	// Header.
+	Generator        string // "Creality_Print V7.2.2.5483"
+	App              string // "Creality_Print"
+	Version          string // "7.2.2"
+	Build            string // "5483"
+	GeneratedAt      string // "2026-09-29 at 07:03:52" (local time of the slicing machine)
+	TotalLayerNumber int
+	MaxZHeight       float64
+	UUID             string
+	FilamentDensity  []float64
+	FilamentDiameter []float64
+	// MulticolorMethod is nil when the header has no such line.
+	MulticolorMethod  *int
+	Bounds            *Bounds
+	ObjectsBounding   []float64 // x0,y0,z0,x1,y1,z1 when present
+	WipeTowerBounding []float64 // when present
+	Thumbnails        []Thumbnail
+
+	// Body.
+	Objects    []Object
+	Tools      []ToolUse // in order of first use
+	M8200      bool      // the CFS colour-change command family is used
+	LayerCount int       // ;LAYER_CHANGE markers
+	Features   []string  // distinct ;TYPE: names in order of first appearance
+
+	// Footer.
+	FilamentUsedMM      []float64
+	FilamentUsedCM3     []float64
+	FilamentUsedG       []float64
+	FilamentCost        []float64
+	TotalFilamentG      float64 // the footer line when present, else the sum of FilamentUsedG
+	TotalFilamentCost   float64
+	TotalFilamentChange int
+	TotalLayersCount    int
+	TimeText            string // "3h 44m 0s" as written
+	TimeSeconds         int    // TimeText in seconds
+
+	// Config is the embedded config block (CONFIG_BLOCK_START..END) plus the
+	// "; key = value" lines that follow the executable block.
+	Config Config
+}
+
+// Layer locates one layer in the file.
+type Layer struct {
+	Index  int     // 0-based
+	Z      float64 // top of the layer (the ";:<z>" line after LAYER_CHANGE)
+	Height float64 // ";HEIGHT:"
+	Line   int     // 1-based line number of ;LAYER_CHANGE
+	Offset int64   // byte offset of the ;LAYER_CHANGE line
+	End    int64   // byte offset just after the last line of the layer
+	// Start is the machine state when the layer begins, so LayerMoves can
+	// resume in the middle of the file.
+	Start MotionState
+}
+
+// ReadSummary streams the file once and returns its summary.
+func ReadSummary(path string) (Summary, error) {
+	s, _, err := parse(path, false)
+	return s, err
+}
+
+// Read streams the file once and returns the summary and the layer index
+// together (a slice report needs both; ReadSummary then Layers would read a
+// 100 MB file twice).
+func Read(path string) (Summary, []Layer, error) { return parse(path, true) }
+
+// Layers streams the file once and returns the layer index.
+func Layers(path string) ([]Layer, error) {
+	_, l, err := parse(path, true)
+	return l, err
+}
+
+// LayerMoves reads the planar moves of one layer, seeking straight to it.
+func LayerMoves(path string, layer Layer) ([]Move, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if _, err := f.Seek(layer.Offset, io.SeekStart); err != nil {
+		return nil, err
+	}
+	lr := newLineReader(f, layer.Offset)
+	st := layer.Start
+	var moves []Move
+	for {
+		line, start, _, err := lr.next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return moves, err
+		}
+		if layer.End > 0 && start >= layer.End {
+			break
+		}
+		if mv, ok := st.apply(line); ok {
+			moves = append(moves, mv)
+		}
+	}
+	return moves, nil
+}
+
+func parse(path string, wantLayers bool) (Summary, []Layer, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return Summary{}, nil, err
+	}
+	defer f.Close()
+	s, layers, err := parseReader(f, path, wantLayers)
+	if err == nil {
+		if info, serr := f.Stat(); serr == nil {
+			s.Size = info.Size()
+		}
+	}
+	return s, layers, err
+}
+
+var (
+	reGenerated  = regexp.MustCompile(`^; generated by (\S+) V(\d+(?:\.\d+)*)(?: on (.*))?$`)
+	reThumbnail  = regexp.MustCompile(`^; thumbnail begin (\d+)x(\d+) (\d+)`)
+	reConfigLine = regexp.MustCompile(`^; ([A-Za-z0-9_]+) = ?(.*)$`)
+	reTimePart   = regexp.MustCompile(`(\d+)\s*([dhms])`)
+)
+
+func parseReader(r io.Reader, path string, wantLayers bool) (Summary, []Layer, error) {
+	s := Summary{Path: path}
+	lr := newLineReader(r, 0)
+	var layers []Layer
+	state := newMotionState()
+	var (
+		preExec      = true
+		inConfig     = false
+		afterExec    = false
+		lineNo       = 0
+		execEnd      = int64(-1)
+		expectLayer  = false // the two lines after ;LAYER_CHANGE carry Z and height
+		toolIndex    = map[int]int{}
+		featureSeen  = map[string]bool{}
+		totalGramsOK = false
+	)
+	for {
+		line, start, _, err := lr.next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return s, layers, err
+		}
+		lineNo++
+		if len(line) == 0 {
+			continue
+		}
+		if wantLayers && line[0] != ';' {
+			state.apply(line)
+		}
+		switch line[0] {
+		case 'T':
+			t := trimSpace(stripComment(line))
+			if len(t) > 1 {
+				if n, ok := parseUint(t[1:]); ok {
+					if i, seen := toolIndex[n]; seen {
+						s.Tools[i].Count++
+					} else {
+						toolIndex[n] = len(s.Tools)
+						s.Tools = append(s.Tools, ToolUse{Tool: n, Count: 1, FirstLine: lineNo})
+					}
+				}
+			}
+			continue
+		case 'E':
+			if hasPrefix(line, "EXCLUDE_OBJECT_DEFINE ") {
+				if o, ok := parseObject(string(line)); ok {
+					s.Objects = append(s.Objects, o)
+				}
+			}
+			continue
+		case 'M':
+			if string(firstWord(line)) == "M8200" {
+				s.M8200 = true
+			}
+			continue
+		case ';':
+		default:
+			continue
+		}
+
+		text := string(line)
+		switch {
+		case text == ";LAYER_CHANGE":
+			s.LayerCount++
+			if wantLayers {
+				if n := len(layers); n > 0 {
+					layers[n-1].End = start
+				}
+				layers = append(layers, Layer{Index: len(layers), Line: lineNo, Offset: start, Start: state})
+			}
+			expectLayer = wantLayers
+			continue
+		case expectLayer && strings.HasPrefix(text, ";:"):
+			if v, ok := parseFloat([]byte(text[2:])); ok {
+				layers[len(layers)-1].Z = v
+			}
+			continue
+		case expectLayer && strings.HasPrefix(text, ";HEIGHT:"):
+			if v, ok := parseFloat([]byte(text[8:])); ok {
+				layers[len(layers)-1].Height = v
+			}
+			expectLayer = false
+			continue
+		case strings.HasPrefix(text, ";TYPE:"):
+			name := strings.TrimSpace(text[6:])
+			if !featureSeen[name] {
+				featureSeen[name] = true
+				s.Features = append(s.Features, name)
+			}
+			state.Feature = name
+			continue
+		case text == "; EXECUTABLE_BLOCK_START":
+			preExec = false
+			continue
+		case text == "; EXECUTABLE_BLOCK_END":
+			afterExec = true
+			execEnd = start
+			continue
+		case text == "; CONFIG_BLOCK_START":
+			inConfig = true
+			continue
+		case text == "; CONFIG_BLOCK_END":
+			inConfig = false
+			continue
+		}
+		expectLayer = false
+
+		if inConfig || afterExec {
+			if m := reConfigLine.FindStringSubmatch(text); m != nil {
+				if s.Config == nil {
+					s.Config = Config{}
+				}
+				s.Config[m[1]] = strings.TrimSpace(m[2])
+				continue
+			}
+		}
+		if afterExec && !inConfig {
+			if parseFooter(&s, text) && strings.HasPrefix(text, "; total filament used [g]") {
+				totalGramsOK = true
+			}
+			continue
+		}
+		if preExec {
+			parseHeader(&s, text, lineNo)
+		}
+	}
+	s.Lines = lineNo
+	if !totalGramsOK {
+		s.TotalFilamentG = 0
+		for _, g := range s.FilamentUsedG {
+			s.TotalFilamentG += g
+		}
+	}
+	if len(layers) > 0 {
+		last := &layers[len(layers)-1]
+		if execEnd > last.Offset {
+			last.End = execEnd
+		} else {
+			last.End = lr.off
+		}
+	}
+	return s, layers, nil
+}
+
+func parseHeader(s *Summary, text string, lineNo int) {
+	if m := reGenerated.FindStringSubmatch(text); m != nil && s.Generator == "" {
+		s.App = m[1]
+		s.Generator = m[1] + " V" + m[2]
+		parts := strings.Split(m[2], ".")
+		if len(parts) > 3 {
+			s.Version = strings.Join(parts[:3], ".")
+			s.Build = strings.Join(parts[3:], ".")
+		} else {
+			s.Version = m[2]
+		}
+		s.GeneratedAt = strings.TrimSpace(m[3])
+		return
+	}
+	if m := reThumbnail.FindStringSubmatch(text); m != nil {
+		w, _ := strconv.Atoi(m[1])
+		h, _ := strconv.Atoi(m[2])
+		n, _ := strconv.Atoi(m[3])
+		s.Thumbnails = append(s.Thumbnails, Thumbnail{Width: w, Height: h, Length: n, Line: lineNo})
+		return
+	}
+	key, value, ok := splitKV(text)
+	if !ok {
+		return
+	}
+	switch key {
+	case "total layer number":
+		s.TotalLayerNumber, _ = strconv.Atoi(value)
+	case "max_z_height":
+		s.MaxZHeight, _ = strconv.ParseFloat(value, 64)
+	case "creality_uuid":
+		s.UUID = value
+	case "filament_density":
+		s.FilamentDensity = floats(value)
+	case "filament_diameter":
+		s.FilamentDiameter = floats(value)
+	case "multicolor_method":
+		if n, err := strconv.Atoi(value); err == nil {
+			s.MulticolorMethod = &n
+		}
+	case "MINX", "MINY", "MINZ", "MAXX", "MAXY", "MAXZ":
+		v, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return
+		}
+		if s.Bounds == nil {
+			s.Bounds = &Bounds{}
+		}
+		switch key {
+		case "MINX":
+			s.Bounds.MinX = v
+		case "MINY":
+			s.Bounds.MinY = v
+		case "MINZ":
+			s.Bounds.MinZ = v
+		case "MAXX":
+			s.Bounds.MaxX = v
+		case "MAXY":
+			s.Bounds.MaxY = v
+		case "MAXZ":
+			s.Bounds.MaxZ = v
+		}
+	case "OBJECTS_BOUNDING":
+		s.ObjectsBounding = floats(value)
+	case "WIPE_TOWER_BOUNDING":
+		s.WipeTowerBounding = floats(value)
+	}
+}
+
+// splitKV splits "; key = value" and "; key: value" comment lines.
+func splitKV(text string) (key, value string, ok bool) {
+	body := strings.TrimSpace(strings.TrimPrefix(text, ";"))
+	if i := strings.Index(body, " = "); i >= 0 {
+		return strings.TrimSpace(body[:i]), strings.TrimSpace(body[i+3:]), true
+	}
+	if strings.HasSuffix(body, " =") {
+		return strings.TrimSpace(strings.TrimSuffix(body, " =")), "", true
+	}
+	if i := strings.Index(body, ": "); i >= 0 {
+		return strings.TrimSpace(body[:i]), strings.TrimSpace(body[i+2:]), true
+	}
+	return "", "", false
+}
+
+// parseFooter reads the totals that follow the executable block. It reports
+// whether the line was one of them.
+func parseFooter(s *Summary, text string) bool {
+	key, value, ok := splitKV(text)
+	if !ok {
+		return false
+	}
+	switch key {
+	case "filament used [mm]":
+		s.FilamentUsedMM = floats(value)
+	case "filament used [cm3]":
+		s.FilamentUsedCM3 = floats(value)
+	case "filament used [g]":
+		s.FilamentUsedG = floats(value)
+	case "total filament used [g]":
+		s.TotalFilamentG, _ = strconv.ParseFloat(value, 64)
+	case "filament cost":
+		s.FilamentCost = floats(value)
+	case "total filament cost":
+		s.TotalFilamentCost, _ = strconv.ParseFloat(value, 64)
+	case "total filament change":
+		s.TotalFilamentChange, _ = strconv.Atoi(value)
+	case "total layers count":
+		s.TotalLayersCount, _ = strconv.Atoi(value)
+	case "estimated printing time (normal mode)":
+		s.TimeText = value
+		s.TimeSeconds = ParseDuration(value)
+	default:
+		return false
+	}
+	return true
+}
+
+// ParseDuration converts "1d 2h 3m 4s" (any subset) to seconds. Text without
+// any such part gives 0.
+func ParseDuration(text string) int {
+	total := 0
+	for _, m := range reTimePart.FindAllStringSubmatch(text, -1) {
+		n, _ := strconv.Atoi(m[1])
+		switch m[2] {
+		case "d":
+			total += n * 86400
+		case "h":
+			total += n * 3600
+		case "m":
+			total += n * 60
+		case "s":
+			total += n
+		}
+	}
+	return total
+}
+
+func floats(value string) []float64 {
+	var out []float64
+	for _, part := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ';' }) {
+		v, err := strconv.ParseFloat(strings.TrimSpace(part), 64)
+		if err != nil {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// parseObject reads "EXCLUDE_OBJECT_DEFINE NAME=n CENTER=x,y POLYGON=[[x,y],...]".
+func parseObject(line string) (Object, bool) {
+	var o Object
+	name := strings.Index(line, "NAME=")
+	center := strings.Index(line, " CENTER=")
+	poly := strings.Index(line, " POLYGON=")
+	if name < 0 {
+		return o, false
+	}
+	end := len(line)
+	for _, i := range []int{center, poly} {
+		if i > name && i < end {
+			end = i
+		}
+	}
+	o.Name = strings.TrimSpace(line[name+5 : end])
+	if center >= 0 {
+		end := len(line)
+		if poly > center {
+			end = poly
+		}
+		xy := floats(line[center+8 : end])
+		if len(xy) == 2 {
+			o.CenterX, o.CenterY = xy[0], xy[1]
+		}
+	}
+	if poly >= 0 {
+		flat := floats(strings.NewReplacer("[", " ", "]", " ").Replace(line[poly+9:]))
+		for i := 0; i+1 < len(flat); i += 2 {
+			o.Polygon = append(o.Polygon, [2]float64{flat[i], flat[i+1]})
+		}
+	}
+	return o, true
+}
+
+var errNotFound = errors.New("gcodeinfo: no such key")
+
+// Config is the key -> raw string map of the embedded config block.
+type Config map[string]string
+
+// Vector splits the value of key on sep (';' for strings and colours, ',' for
+// numbers, as the catalog types dictate) and drops the double quotes around
+// elements ("CR-PLA @Creality K2 0.4 nozzle";"...").
+func (c Config) Vector(key string, sep rune) ([]string, error) {
+	v, ok := c[key]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", errNotFound, key)
+	}
+	if v == "" {
+		return nil, nil
+	}
+	parts := strings.Split(v, string(sep))
+	for i, p := range parts {
+		p = strings.TrimSpace(p)
+		if len(p) >= 2 && p[0] == '"' && p[len(p)-1] == '"' {
+			p = p[1 : len(p)-1]
+		}
+		parts[i] = p
+	}
+	return parts, nil
+}
+
+// Floats is Vector for numeric values.
+func (c Config) Floats(key string, sep rune) ([]float64, error) {
+	parts, err := c.Vector(key, sep)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]float64, 0, len(parts))
+	for _, p := range parts {
+		v, err := strconv.ParseFloat(p, 64)
+		if err != nil {
+			return nil, fmt.Errorf("gcodeinfo: %s: %q is not a number", key, p)
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}

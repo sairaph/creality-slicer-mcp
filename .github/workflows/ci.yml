@@ -5,19 +5,107 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # The release workflow runs these jobs for a tag before publishing.
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  go:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version-file: go.mod
 
       - name: Vet
         run: go vet ./...
 
+      # Bounded: a hung test ends the run instead of holding a runner.
       - name: Test
-        run: go test ./...
+        run: go test ./... -count=1 -timeout 5m -p 2
+
+      - name: Build
+        run: go build -o dist/ .
+
+      # tools/catalog-gen is a separate module: the steps above do not build it.
+      # Its tests need no Creality checkout.
+      - name: Vet the catalog generator
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: tools/catalog-gen
+        run: go vet ./...
+
+      - name: Test the catalog generator
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: tools/catalog-gen
+        run: go test -timeout 5m -p 2 -count=1 ./...
+
+  # README and docs must not link to pages that do not exist. Only for a tag
+  # (the release workflow calls this workflow), so main can carry links to
+  # pages that are still to be written; a release cannot.
+  doc-links:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check relative links
+        run: sh tests/check_doc_links.sh
+
+  # install.sh's shell-profile edits and their undo, under a strict POSIX
+  # shell (dash) and macOS's sh.
+  install-script:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            shell: dash
+          - os: macos-latest
+            shell: sh
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test
+        run: ${{ matrix.shell }} tests/install_sh_test.sh
+
+  # install.ps1 parses under Windows PowerShell 5.1 and PowerShell 7. The
+  # script is only parsed, never run.
+  install-ps1:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Parse with Windows PowerShell
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          $path = (Resolve-Path install.ps1).Path
+          [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
+          foreach ($e in $errors) {
+            $message = $e.Message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error file=install.ps1,line=$($e.Extent.StartLineNumber),col=$($e.Extent.StartColumnNumber)::$message"
+          }
+          if ($errors.Count -gt 0) { exit 1 }
+          Write-Output "install.ps1 parses under PowerShell $($PSVersionTable.PSVersion)"
+
+      - name: Parse with PowerShell 7
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          $path = (Resolve-Path install.ps1).Path
+          [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
+          foreach ($e in $errors) {
+            $message = $e.Message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error file=install.ps1,line=$($e.Extent.StartLineNumber),col=$($e.Extent.StartColumnNumber)::$message"
+          }
+          if ($errors.Count -gt 0) { exit 1 }
+          Write-Output "install.ps1 parses under PowerShell $($PSVersionTable.PSVersion)"

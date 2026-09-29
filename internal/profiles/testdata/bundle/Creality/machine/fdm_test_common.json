@@ -1,0 +1,9 @@
+{
+    "type": "machine",
+    "name": "fdm_test_common",
+    "from": "system",
+    "instantiation": "false",
+    "inherits": "fdm_machine_common",
+    "gcode_flavor": "klipper",
+    "nozzle_volume": "100"
+}

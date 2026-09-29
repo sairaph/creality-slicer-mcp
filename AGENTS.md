@@ -36,7 +36,7 @@ During execution, if an agent struggles through multiple review-fix loops unable
 
 ### Hard testing rules
 - **Tests never open non-loopback sockets.** Test servers bind 127.0.0.1 only. Tests never contact a real printer or scan the real network. This keeps Windows Firewall from prompting for every new test binary.
-- **Tests never spawn the product binary or the real slicer.** No test may exec the product or Creality Print; slicer runs are faked behind an interface or use recorded output.
+- **Tests never spawn the product binary or the real slicer.** No test may exec the product or Creality Print; slicer runs are faked behind an interface or use recorded output. A package's own test binary may serve as the stand-in executable (helper-process pattern).
 - **Bounded test runs.** Always run `go test` with `-timeout 5m` and `-p 2`, and after every run check that no `*.test.exe` / `go-build` process is left behind (`Get-Process | Where-Object { $_.Path -match 'go-build|\.test\.exe' }`); if one is, find out why before continuing.
 
 ### Hard formatting rules

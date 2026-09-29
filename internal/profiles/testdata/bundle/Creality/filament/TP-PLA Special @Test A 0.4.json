@@ -1,0 +1,10 @@
+{
+    "type": "filament",
+    "name": "TP-PLA Special @Test A 0.4",
+    "from": "system",
+    "instantiation": "true",
+    "inherits": "TP-PLA @Test A 0.4",
+    "filament_id": "04099",
+    "compatible_printers": [],
+    "compatible_prints": ["0.20mm Standard @Test A 0.4"]
+}

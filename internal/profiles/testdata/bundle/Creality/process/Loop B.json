@@ -1,0 +1,1 @@
+{"type": "process", "name": "Loop B", "from": "system", "instantiation": "true", "inherits": "Loop A"}

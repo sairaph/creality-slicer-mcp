@@ -1,0 +1,9 @@
+{
+    "type": "filament",
+    "name": "fdm_filament_petg",
+    "from": "system",
+    "instantiation": "false",
+    "inherits": "fdm_filament_common",
+    "filament_type": ["PETG"],
+    "nozzle_temperature": ["240"]
+}

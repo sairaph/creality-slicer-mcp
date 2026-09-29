@@ -1,0 +1,7 @@
+{
+    "from": "User",
+    "name": "My PLA",
+    "inherits": "TP-PLA @Test A 0.4",
+    "nozzle_temperature": ["215"],
+    "filament_settings_id": ["My PLA"]
+}

@@ -1,0 +1,225 @@
+package mcpserver
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"runtime/debug"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sairaph/mcp-wizard/render"
+
+	"github.com/sairaph/creality-slicer-mcp/internal/domain"
+)
+
+// codeSlicer marks a failure Creality Print reported for a well-formed request.
+const codeSlicer = "slicer_error"
+
+// maxOutputBytes bounds the output one reply carries (printed output, logs,
+// listings), so the reply stays under render.MaxBytes with room for its front
+// matter, hints and an image.
+const maxOutputBytes = 512 << 10
+
+// replyMargin is room kept in a reply for its JSON framing and notices.
+const replyMargin = 32 << 10
+
+// maxMessageBytes bounds an error message. The message says what failed;
+// output that explains it goes in the reply body instead.
+const maxMessageBytes = 2 << 10
+
+// Hints for the error classes failure reports.
+const (
+	cancelledHint = "The call was cancelled before it finished; send it again to retry."
+	timeoutHint   = "The operation did not finish in time. Call the tool again; for slow work pass a larger timeout where the tool takes one."
+	unavailHint   = "Something this call needs did not answer. Run `" + domain.BinaryName + " doctor` to check the installation, then call the tool again."
+	internalHint  = "This is not caused by the arguments. Run `" + domain.BinaryName + " doctor` to check the installation, then call the tool again."
+)
+
+// toolError is an error that already carries its structured form.
+type toolError struct{ e render.Error }
+
+func (t *toolError) Error() string { return t.e.Message }
+
+// failure builds an error result for err, which occurred while doing what.
+// hint, when not empty, replaces the hint of err's class. Errors are returned
+// as results, never as Go errors, so the model always sees the hint.
+func failure(_ context.Context, what string, err error, hint string) *mcp.CallToolResult {
+	var te *toolError
+	if errors.As(err, &te) {
+		return render.ErrorResult(te.e)
+	}
+	e := render.Error{Code: render.CodeInternal, Message: shortMessage(fmt.Sprintf("Failed to %s: %v", what, err)), Hint: internalHint}
+	var netErr net.Error
+	switch {
+	case errors.Is(err, context.Canceled):
+		e.Code = render.CodeUnavailable
+		e.Message = fmt.Sprintf("Failed to %s: the request was cancelled", what)
+		e.Hint = cancelledHint
+	case isTimeout(err):
+		e.Code = render.CodeUnavailable
+		e.Hint = timeoutHint
+	case errors.As(err, &netErr):
+		e.Code = render.CodeUnavailable
+		e.Hint = unavailHint
+	}
+	if hint != "" {
+		e.Hint = hint
+	}
+	return render.ErrorResult(e)
+}
+
+// isTimeout reports whether err is an operation that did not finish in time.
+func isTimeout(err error) bool {
+	var netErr net.Error
+	return errors.Is(err, context.DeadlineExceeded) || errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// reported builds an error result for a failure Creality Print reported for a
+// well-formed request; msg is what it said. Its own output goes in the body
+// through the caller, not in the message.
+func reported(what, msg, hint string) *mcp.CallToolResult {
+	if msg == "" {
+		msg = "unknown error"
+	}
+	return render.ErrorResult(render.Error{
+		Code:    codeSlicer,
+		Message: shortMessage(fmt.Sprintf("Failed to %s: %s", what, msg)),
+		Hint:    hint,
+	})
+}
+
+// successResult renders front, a typed struct (never a map: key order must be
+// deterministic), and body into a tool result.
+func successResult(front any, body string) *mcp.CallToolResult {
+	return render.SuccessResult(front, body)
+}
+
+// shortMessage keeps the start of an error message, which says what failed,
+// within maxMessageBytes.
+func shortMessage(s string) string {
+	if len(s) <= maxMessageBytes {
+		return s
+	}
+	cut := maxMessageBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + " ... (message truncated)"
+}
+
+// truncateOutput keeps the last maxOutputBytes of s, the part that holds the
+// result or the error, and says how much was left out.
+func truncateOutput(s string) string {
+	if len(s) <= maxOutputBytes {
+		return s
+	}
+	tail := s[len(s)-maxOutputBytes:]
+	// Start on a whole line when one begins nearby, else on a whole character.
+	if i := strings.IndexByte(tail, '\n'); i >= 0 && i < 4<<10 {
+		tail = tail[i+1:]
+	} else {
+		for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+			tail = tail[1:]
+		}
+	}
+	return fmt.Sprintf("[output truncated: the first %d of %d bytes are left out, the last %d follow]\n%s",
+		len(s)-len(tail), len(s), len(tail), tail)
+}
+
+// jsonBlock renders v as indented JSON in a fence, truncated to its last
+// maxOutputBytes.
+func jsonBlock(v any) string {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		data = []byte(fmt.Sprint(v))
+	}
+	return render.Fence(truncateOutput(string(data)), "json")
+}
+
+// textBlock renders free text, such as a log, in a fence, truncated to its
+// last maxOutputBytes.
+func textBlock(s string) string {
+	return render.Fence(truncateOutput(s), "text")
+}
+
+// capList returns at most limit items of list, and how many were left out.
+func capList[T any](list []T, limit int) ([]T, int) {
+	if len(list) <= limit {
+		return list, 0
+	}
+	return list[:limit], len(list) - limit
+}
+
+// invalidArguments turns the error the SDK returns for arguments that fail a
+// tool's input schema, or cannot be decoded into its input, into the
+// invalid_input error the tools themselves return. The tools never set such
+// an error on a result, so one that carries it came from the SDK.
+func invalidArguments(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		if call, ok := req.(*mcp.CallToolRequest); ok && method == "tools/call" && call.Params != nil {
+			// A call without arguments means no arguments. The SDK cannot apply
+			// schema defaults to a missing object, so give it an empty one.
+			if a := strings.TrimSpace(string(call.Params.Arguments)); a == "" || a == "null" {
+				call.Params.Arguments = json.RawMessage("{}")
+			}
+		}
+		result, err := next(ctx, method, req)
+		if err != nil || method != "tools/call" {
+			return result, err
+		}
+		res, ok := result.(*mcp.CallToolResult)
+		if !ok || res == nil || !res.IsError || res.GetError() == nil {
+			return result, err
+		}
+		tool := "the tool"
+		if call, ok := req.(*mcp.CallToolRequest); ok && call.Params != nil && call.Params.Name != "" {
+			tool = call.Params.Name
+		}
+		return render.ErrorResult(render.Error{
+			Code:    render.CodeInvalidInput,
+			Message: shortMessage("Invalid arguments: " + argumentProblem(res.GetError())),
+			Hint: fmt.Sprintf("Call %s again with arguments that match its input schema: every required "+
+				"argument, each of the listed type, and only listed values and argument names.", tool),
+		}), nil
+	}
+}
+
+// argumentProblem states an SDK argument error without the SDK's framing.
+func argumentProblem(err error) string {
+	msg := err.Error()
+	for _, prefix := range []string{`validating "arguments": `, "validating root: "} {
+		msg = strings.TrimPrefix(msg, prefix)
+	}
+	msg = strings.TrimPrefix(msg, "json: ")
+	return msg
+}
+
+// recoverPanics turns a panic in a tool handler into an internal_error result:
+// one bad call must not end the server and with it every running slice. The
+// stack goes to stderr.
+func recoverPanics(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (result mcp.Result, err error) {
+		defer func() {
+			r := recover()
+			if r == nil {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "creality-slicer-mcp: panic in %s: %v\n%s\n", method, r, debug.Stack())
+			if method != "tools/call" {
+				err = fmt.Errorf("internal error: %v", r)
+				return
+			}
+			result, err = render.ErrorResult(render.Error{
+				Code:    render.CodeInternal,
+				Message: "The tool failed unexpectedly.",
+				Hint:    "This is a bug: report it with the arguments you used.",
+			}), nil
+		}()
+		return next(ctx, method, req)
+	}
+}

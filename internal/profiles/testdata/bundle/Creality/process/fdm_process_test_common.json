@@ -1,0 +1,9 @@
+{
+    "type": "process",
+    "name": "fdm_process_test_common",
+    "from": "system",
+    "instantiation": "false",
+    "inherits": "fdm_process_common",
+    "enable_prime_tower": "1",
+    "exclude_object": "1"
+}

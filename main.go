@@ -1,37 +1,29 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/http"
-	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
-	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/sairaph/mcp-wizard/app"
-	"github.com/sairaph/mcp-wizard/app/detail"
-	"github.com/sairaph/mcp-wizard/app/menu"
-	"github.com/sairaph/mcp-wizard/async"
 	"github.com/sairaph/mcp-wizard/cli"
 	"github.com/sairaph/mcp-wizard/command"
 	"github.com/sairaph/mcp-wizard/doctor"
 	"github.com/sairaph/mcp-wizard/flow"
 	"github.com/sairaph/mcp-wizard/harness"
 	"github.com/sairaph/mcp-wizard/installer"
-	"github.com/sairaph/mcp-wizard/proxy"
-	"github.com/sairaph/mcp-wizard/secret"
 	"github.com/sairaph/mcp-wizard/tui"
 	"github.com/sairaph/mcp-wizard/update"
 
+	"github.com/sairaph/creality-slicer-mcp/internal/clicmd"
+	"github.com/sairaph/creality-slicer-mcp/internal/doctorchecks"
 	"github.com/sairaph/creality-slicer-mcp/internal/domain"
 	"github.com/sairaph/creality-slicer-mcp/internal/mcpserver"
 )
@@ -39,26 +31,44 @@ import (
 // version is set by goreleaser via -ldflags "-X main.version=...".
 var version = "dev"
 
+// oneShotCommands are the product's own CLI commands. They call the same
+// functions the MCP tools call, through internal/clicmd, so the two never
+// disagree. Each is registered in init with a Run that calls a clicmd.Run<Name>
+// with clicmd.NewDefaultDeps().
 var oneShotCommands = command.New()
 
 func init() {
-	// Register one-shot CLI commands that share business logic with the TUI:
-	//
-	// oneShotCommands.Register(command.Handler{
-	//     Name:        "list-items",
-	//     Description: "List all items",
-	//     Run: func(ctx context.Context, args []string) int {
-	//         return 0
-	//     },
-	// })
+	oneShotCommands.Register(command.Handler{
+		Name:        "status",
+		Description: "Show whether Creality Print is installed and usable (the get_slicer_status tool)",
+		Usage:       "status [--refresh]",
+		Run: func(ctx context.Context, args []string) int {
+			return clicmd.RunStatus(ctx, clicmd.NewDefaultDeps(), args)
+		},
+	})
+	oneShotCommands.Register(command.Handler{
+		Name:        "presets",
+		Description: "List printer, process or filament presets (the list_presets tool, all pages)",
+		Usage:       "presets <printer|process|filament> [--printer NAME|all|any] [--filament-type TYPE] [--source system|user|all]",
+		Run: func(ctx context.Context, args []string) int {
+			return clicmd.RunPresets(ctx, clicmd.NewDefaultDeps(), args)
+		},
+	})
+	oneShotCommands.Register(command.Handler{
+		Name:        "slice",
+		Description: "Slice a 3MF project file with Creality Print and print the summary (the slice_project tool)",
+		Usage:       "slice <project.3mf> [--plate N] [--out DIR [--overwrite]]",
+		Run: func(ctx context.Context, args []string) int {
+			return clicmd.RunSlice(ctx, clicmd.NewDefaultDeps(), args)
+		},
+	})
 }
 
 var usageSpecs = []cli.Spec{
-	{Name: "mcp", Description: "Run the MCP server, or bridge to the remote endpoint (default when not in a terminal)"},
-	{Name: "install", Description: "Install and configure AI client integration"},
-	{Name: "uninstall", Description: "Remove AI client integration"},
+	{Name: "mcp", Description: "Run the MCP server (default when not in a terminal)"},
+	{Name: "install", Description: "Register the server and the guide skill with AI clients"},
+	{Name: "uninstall", Description: "Remove AI client integration (--all: also the guide skill, cache and program)"},
 	{Name: "add", Description: "Register the server in this project's AI client configs"},
-	{Name: "login", Description: "Sign in to creality-slicer-mcp"},
 	{Name: "doctor", Description: "Diagnose the installation"},
 	{Name: "update", Description: "Update to the latest release"},
 	{Name: "version", Description: "Print the version"},
@@ -100,12 +110,15 @@ func main() {
 		os.Exit(runUninstall(ctx, cmd))
 	case "add":
 		os.Exit(runAdd(ctx, cmd))
-	case "login":
-		os.Exit(runLogin(ctx, cmd))
 	case "doctor":
 		os.Exit(runDoctor(ctx))
 	case "update":
 		os.Exit(runUpdate(ctx, cmd))
+	case "refresh-guide":
+		// Hidden: not in usageSpecs or oneShotCommands, so it never appears
+		// in --help. update runs it with the binary it just installed, whose
+		// embedded guide is the new one.
+		os.Exit(runRefreshGuide(cmd))
 	case "help":
 		printUsage(os.Stdout)
 	case "version":
@@ -131,12 +144,15 @@ func printUsage(w *os.File) {
 type AppState struct {
 	flow.BaseState
 	Harness installer.HarnessState
-	Login   installer.LoginState
 	Results installer.ResultsState
+	// UntickedClients names the clients left unticked because their entry
+	// was edited or runs another program; harnessDetecting is set while the
+	// client list is being detected (see harnessSelection).
+	UntickedClients  []string
+	harnessDetecting bool
 }
 
 func harnessState(s *AppState) *installer.HarnessState { return &s.Harness }
-func loginState(s *AppState) *installer.LoginState     { return &s.Login }
 func resultsState(s *AppState) *installer.ResultsState { return &s.Results }
 
 func serverName(cmd cli.Command) string {
@@ -159,10 +175,13 @@ func newDetector(name string) (*harness.Detector, error) {
 	})
 }
 
-// selectIDs picks the harnesses to act on. --clients wins, then --all, and by
-// default every selectable client that is not configured yet. The returned
-// reason explains an empty selection.
-func selectIDs(harnesses []harness.Harness, cmd cli.Command) (ids []harness.ID, reason string) {
+// selectIDs picks the harnesses to register. --clients wins, then --all, and
+// by default every selectable client that is not configured yet. Replacing
+// an entry that was edited, or that runs another program (see clients.go),
+// would drop what is there, so those are returned in kept instead; --all
+// replaces edited entries too, and only --clients replaces another
+// program's. The returned reason explains an empty selection.
+func selectIDs(harnesses []harness.Harness, entries map[harness.ID]clientEntry, cmd cli.Command) (ids []harness.ID, kept []harness.Harness, reason string) {
 	if len(cmd.Clients) > 0 {
 		var unknown []string
 		for _, want := range cmd.Clients {
@@ -178,9 +197,9 @@ func selectIDs(harnesses []harness.Harness, cmd cli.Command) (ids []harness.ID, 
 			}
 		}
 		if len(unknown) > 0 {
-			return nil, "no detected client matches --clients " + strings.Join(unknown, ",")
+			return nil, nil, "no detected client matches --clients " + strings.Join(unknown, ",")
 		}
-		return ids, ""
+		return ids, nil, ""
 	}
 	// Default: installed clients that are not configured yet. --all: every
 	// installed or configured client (in project scope that means every
@@ -191,14 +210,18 @@ func selectIDs(harnesses []harness.Harness, cmd cli.Command) (ids []harness.ID, 
 			continue
 		}
 		candidates++
-		if cmd.All || !h.Configured {
+		e := entries[h.ID]
+		switch {
+		case e.kind == entryForeign, !cmd.All && e.kind == entryEdited:
+			kept = append(kept, h)
+		case cmd.All, !h.Configured:
 			ids = append(ids, h.ID)
 		}
 	}
-	if len(ids) == 0 && candidates > 0 {
-		return nil, "every detected client is already configured (use --all to re-register)"
+	if len(ids) == 0 && len(kept) == 0 && candidates > 0 {
+		return nil, nil, "every detected client is already configured (use --all to re-register)"
 	}
-	return ids, ""
+	return ids, kept, ""
 }
 
 func exitCodeFor(results []harness.Result) int {
@@ -218,75 +241,12 @@ func byID(harnesses []harness.Harness) map[harness.ID]harness.Harness {
 	return m
 }
 
-// credentialKey is the store key the bridge reads the remote token from.
-func credentialKey() string {
-	if r := domain.Remote(); r != nil && r.CredentialKey != "" {
-		return r.CredentialKey
-	}
-	return "token"
-}
-
-// saveCredentialsFromFlags stores --email/--token given to an unattended
-// install so the server can use them without a login step. The token is
-// stored under the key the bridge reads.
-func saveCredentialsFromFlags(ctx context.Context, store secret.Store, cmd cli.Command) error {
-	if len(cmd.Credentials) == 0 {
-		return nil
-	}
-	sess, _, err := store.Load(ctx)
-	if err != nil {
-		return err
-	}
-	for k, v := range cmd.Credentials {
-		if k == "token" {
-			k = credentialKey()
-			v = strings.TrimSpace(v)
-		}
-		sess.Set(k, v)
-	}
-	return store.Save(ctx, sess)
-}
-
-// loadCredential returns the stored value for key, looking in the current
-// project's store first (where `add` saves it) and then the global one.
-func loadCredential(ctx context.Context, key string) (string, error) {
-	paths := []string{domain.CredentialPath()}
-	if cwd, err := os.Getwd(); err == nil {
-		paths = append([]string{domain.ProjectCredentialPath(cwd)}, paths...)
-	}
-	for _, path := range paths {
-		sess, exists, err := secret.NewFileStore(path).Load(ctx)
-		if err != nil {
-			return "", err
-		}
-		if !exists {
-			continue
-		}
-		if v := strings.TrimSpace(sess.GetString(key)); v != "" {
-			return v, nil
-		}
-	}
-	return "", nil
-}
-
-// checkRemoteURL refuses to send a credential over plain HTTP to anything
-// but a loopback address.
-func checkRemoteURL(raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return fmt.Errorf("invalid remote URL %q: %w", raw, err)
-	}
-	switch u.Scheme {
-	case "https":
-		return nil
-	case "http":
-		host := u.Hostname()
-		if host == "localhost" || net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback() {
-			return nil
-		}
-		return fmt.Errorf("remote URL %q uses plain http; the credential would be sent in cleartext (use https)", raw)
-	default:
-		return fmt.Errorf("remote URL %q must use https", raw)
+// warnUnusedCredentials tells the user that --email/--token, which cli.Parse
+// still accepts for install/add/uninstall, do nothing for this server: it has
+// no login concept.
+func warnUnusedCredentials(cmd cli.Command) {
+	if len(cmd.Credentials) > 0 {
+		fmt.Println("  --email and --token are not used by this server; ignoring them.")
 	}
 }
 
@@ -298,12 +258,12 @@ func runInstall(ctx context.Context, cmd cli.Command) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	credStore := secret.NewFileStore(domain.CredentialPath())
 
-	if tui.IsInteractive() && !cmd.Yes {
-		return runWizard(ctx, detector, harness.Scope{}, domain.LoginConfig(credStore), cmd, "creality-slicer-mcp setup")
+	if tui.IsInteractive() && !runsUnattended(cmd) {
+		warnUnusedCredentials(cmd)
+		return runWizard(ctx, detector, harness.Scope{}, cmd, domain.BinaryName+" setup")
 	}
-	return runUnattended(ctx, detector, harness.Scope{}, credStore, cmd, harness.Present)
+	return runUnattended(ctx, detector, harness.Scope{}, cmd, harness.Present)
 }
 
 // projectDir resolves --dir (default: the working directory) to an absolute path.
@@ -332,56 +292,127 @@ func runAdd(ctx context.Context, cmd cli.Command) int {
 		return 1
 	}
 	scope := harness.ProjectScopeDir(dir)
-	credStore := secret.NewFileStore(domain.ProjectCredentialPath(dir))
 
-	if tui.IsInteractive() && !cmd.Yes {
-		return runWizard(ctx, detector, scope, domain.ProjectLoginConfig(credStore, dir), cmd, "creality-slicer-mcp project setup")
+	if tui.IsInteractive() && !runsUnattended(cmd) {
+		warnUnusedCredentials(cmd)
+		return runWizard(ctx, detector, scope, cmd, domain.BinaryName+" project setup")
 	}
-	return runUnattended(ctx, detector, scope, credStore, cmd, harness.Present)
+	return runUnattended(ctx, detector, scope, cmd, harness.Present)
 }
 
-// runWizard drives the interactive install: pick clients, sign in, register.
-func runWizard(ctx context.Context, detector *harness.Detector, scope harness.Scope, login installer.LoginConfig, cmd cli.Command, title string) int {
-	if cmd.DryRun {
-		// A dry run must not write anything, credentials included.
-		login.Store = nil
-	}
+// runWizard drives the interactive install: pick clients, register. Nothing is
+// written before the registration step; the guide skill follows it.
+func runWizard(ctx context.Context, detector *harness.Detector, scope harness.Scope, cmd cli.Command, title string) int {
 	state := &AppState{}
 	steps := []flow.Step[AppState]{
-		installer.HarnessStep(ctx, detector, harnessState, installer.HarnessStepOptions{AllDetected: true, Scope: scope}),
-		installer.LoginStep(ctx, login, loginState),
-		installer.ApplyStep(ctx, detector, harnessState, resultsState, installer.ApplyStepOptions{Scope: scope, DryRun: cmd.DryRun}),
+		harnessSelection{
+			Step: installer.HarnessStep(ctx, detector, harnessState, installer.HarnessStepOptions{AllDetected: true, Scope: scope}),
+			name: serverName(cmd),
+			findUnticked: func(hs []harness.Harness) map[harness.ID]bool {
+				return untickedClients(clientEntries(ctx, detector, scope, hs))
+			},
+		},
+		applyGuard{installer.ApplyStep(ctx, detector, harnessState, resultsState, installer.ApplyStepOptions{Scope: scope, DryRun: cmd.DryRun}), cmd.DryRun},
 	}
+	applyIndex := stepIndex(steps, "apply")
 	f := flow.New(steps, state)
 	code := tui.Run(ctx, f, tui.Options{Title: title})
+
+	switch classifyWizard(&state.BaseState, code, f.Current() >= applyIndex, cmd.DryRun, ctx.Err() != nil) {
+	case outcomeCancelled:
+		fmt.Println("  Setup cancelled; nothing was changed.")
+		return exitCancelled
+	case outcomeInterrupted:
+		fmt.Fprintln(os.Stderr, interruptedMessage)
+		return 1
+	case outcomeFailed:
+		if state.Failure != nil {
+			fmt.Fprintln(os.Stderr, state.Failure)
+		} else {
+			fmt.Fprintln(os.Stderr, "  The setup wizard could not run in this terminal; nothing was changed.\n"+
+				"  Run `"+domain.BinaryName+" install --yes` to install without it.")
+		}
+		return 1
+	}
 	if state.Failure != nil {
+		// Registration failed for some clients; the rest still get the guide.
 		fmt.Fprintln(os.Stderr, state.Failure)
 	}
-	return code
+	return max(code, installSkills(os.Stdout, scope, selectedIDs(state.Harness.Selected), cmd.DryRun, false))
 }
 
-func runUnattended(ctx context.Context, detector *harness.Detector, scope harness.Scope, credStore secret.Store, cmd cli.Command, desired harness.DesiredState) int {
-	enabling := desired == harness.Present
+func runUnattended(ctx context.Context, detector *harness.Detector, scope harness.Scope, cmd cli.Command, desired harness.DesiredState) int {
+	warnUnusedCredentials(cmd)
 	harnesses := detector.DetectIn(ctx, scope)
 
-	var ids []harness.ID
-	if enabling {
-		var reason string
-		ids, reason = selectIDs(harnesses, cmd)
+	entries := clientEntries(ctx, detector, scope, harnesses)
+	name := serverName(cmd)
+
+	if desired == harness.Present {
+		ids, kept, reason := selectIDs(harnesses, entries, cmd)
 		if reason != "" {
 			fmt.Fprintf(os.Stderr, "  %s\n", reason)
 			if len(cmd.Clients) > 0 {
 				return 2
 			}
-			return 0
+			// Every client is registered already; the guide skill is still
+			// written for them.
+			return installSkills(os.Stdout, scope, skillClients(harnesses, entries, nil), cmd.DryRun, true)
 		}
-	} else {
-		for _, h := range harnesses {
-			if h.Configured {
+		printKept(os.Stdout, kept, entries, scope, name, cmd.DryRun)
+		code := 0
+		if len(ids) > 0 || len(kept) == 0 {
+			code = registerIDs(ctx, detector, scope, harnesses, ids, cmd.DryRun, desired)
+		}
+		return max(code, installSkills(os.Stdout, scope, skillClients(harnesses, entries, ids), cmd.DryRun, true))
+	}
+	// Removal targets every entry that runs creality-slicer-mcp, edited ones
+	// too; another program's entry under the same name only when named.
+	wanted, unknown := matchClients(harnesses, cmd.Clients)
+	if len(unknown) > 0 {
+		fmt.Fprintf(os.Stderr, "  no known client matches --clients %s\n", strings.Join(unknown, ","))
+		return 2
+	}
+	var ids []harness.ID
+	var foreign []harness.Harness
+	for _, h := range harnesses {
+		e, found := entries[h.ID]
+		switch {
+		case !found:
+		case len(cmd.Clients) > 0:
+			if wanted[h.ID] {
 				ids = append(ids, h.ID)
 			}
+		case e.ours():
+			ids = append(ids, h.ID)
+		default:
+			foreign = append(foreign, h)
 		}
 	}
+	printSkippedForeign(os.Stdout, foreign, entries, scope, name)
+	if len(ids) == 0 && len(foreign) > 0 {
+		return 0
+	}
+	code := registerIDs(ctx, detector, scope, harnesses, ids, cmd.DryRun, desired)
+	// The guide skill goes with the clients it was written for, except from a
+	// folder another client that stays registered still reads.
+	removing := map[harness.ID]bool{}
+	for _, id := range ids {
+		removing[id] = true
+	}
+	var remaining []harness.ID
+	for id, e := range entries {
+		if e.ours() && !removing[id] {
+			remaining = append(remaining, id)
+		}
+	}
+	return max(code, removeSkills(os.Stdout, scope, ids, remaining, cmd.DryRun))
+}
+
+// registerIDs adds or removes the server in the given harnesses, replacing a
+// differing same-name entry: callers only pass harnesses meant to change.
+func registerIDs(ctx context.Context, detector *harness.Detector, scope harness.Scope, harnesses []harness.Harness, ids []harness.ID, dryRun bool, desired harness.DesiredState) int {
+	enabling := desired == harness.Present
 	if len(ids) == 0 {
 		if enabling {
 			installer.PrintNoClients(os.Stdout, domain.BinaryName, false)
@@ -390,33 +421,18 @@ func runUnattended(ctx context.Context, detector *harness.Detector, scope harnes
 		}
 		return 0
 	}
-	if cmd.DryRun {
+	if dryRun {
 		return printPlan(ctx, detector, scope, ids, desired)
 	}
 
-	policy := harness.ConflictReplace
-	if !enabling {
-		policy = harness.ConflictError
-	}
-	results := detector.ApplyIn(ctx, scope, ids, desired, policy)
+	results := detector.ApplyIn(ctx, scope, ids, desired, harness.ConflictReplace)
 	installer.PrintResultsWithScope(os.Stdout, results, scope, enabling, false)
 	installer.PrintReloadHints(os.Stdout, results, byID(harnesses))
-
-	if enabling {
-		if err := saveCredentialsFromFlags(ctx, credStore, cmd); err != nil {
-			fmt.Fprintf(os.Stderr, "  Could not save credentials: %v\n", err)
-			return 1
-		}
-	}
 	return exitCodeFor(results)
 }
 
 func printPlan(ctx context.Context, detector *harness.Detector, scope harness.Scope, ids []harness.ID, desired harness.DesiredState) int {
-	policy := harness.ConflictReplace
-	if desired == harness.Absent {
-		policy = harness.ConflictError
-	}
-	changes, err := detector.PlanResultsIn(ctx, scope, ids, desired, policy)
+	changes, err := detector.PlanResultsIn(ctx, scope, ids, desired, harness.ConflictReplace)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -435,40 +451,31 @@ func runUninstall(ctx context.Context, cmd cli.Command) int {
 	}
 	scope := harness.Scope{}
 	if cmd.Scope == string(harness.ScopeProject) {
+		// --all removes the program and everything installed for the user,
+		// which a project-scoped uninstall must not touch.
+		if cmd.All {
+			fmt.Fprintln(os.Stderr, "  --all removes the program itself, so it cannot be combined with --scope project.\n"+
+				"  Run `"+domain.BinaryName+" uninstall --scope project` to remove this project's client entries,\n"+
+				"  or `"+domain.BinaryName+" uninstall --all` to remove everything installed for your user.")
+			return 2
+		}
 		dir, err := projectDir(cmd)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
 		scope = harness.ProjectScopeDir(dir)
-	}
-	return runUnattended(ctx, detector, scope, nil, cmd, harness.Absent)
-}
-
-// --- Login ---
-
-func runLogin(ctx context.Context, cmd cli.Command) int {
-	credStore := secret.NewFileStore(domain.CredentialPath())
-
-	if len(cmd.Credentials) > 0 {
-		if err := saveCredentialsFromFlags(ctx, credStore, cmd); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
+	} else if cmd.All {
+		// --all removes everything, not only the client registrations, so
+		// it cannot leave some clients registered to the deleted program.
+		if len(cmd.Clients) > 0 {
+			fmt.Fprintln(os.Stderr, "  --all removes the program itself, so it cannot be combined with --clients.\n"+
+				"  Run `"+domain.BinaryName+" uninstall --clients ...` to remove only some registrations.")
+			return 2
 		}
-		fmt.Printf("  Credentials saved to %s\n", credStore.Path())
-		return 0
+		return runUninstallAll(ctx, detector, cmd)
 	}
-	if !tui.IsInteractive() {
-		fmt.Fprintln(os.Stderr, "login requires an interactive terminal, or pass credentials as flags")
-		return 1
-	}
-
-	state := &AppState{}
-	step := installer.LoginStep(ctx, domain.LoginConfig(credStore),
-		func(s *AppState) *installer.LoginState { return &s.Login },
-	)
-	f := flow.New([]flow.Step[AppState]{step}, state)
-	return tui.Run(ctx, f, tui.Options{Title: "creality-slicer-mcp login"})
+	return runUnattended(ctx, detector, scope, cmd, harness.Absent)
 }
 
 // --- Doctor ---
@@ -488,17 +495,14 @@ func updateOptions() update.Options {
 	return opts
 }
 
-func newDoctor(ctx context.Context) *doctor.Runner {
+func newDoctor() *doctor.Runner {
 	opts := updateOptions()
 	r := doctor.New(
-		doctor.ExecutableCheck{},
+		executableCheck{},
 		doctor.PathCheck{Dir: opts.InstallDir},
-		credentialsCheck{path: domain.CredentialPath()},
 		clientsCheck{},
 	)
-	if remote := domain.Remote(); remote != nil {
-		r.Add(remoteCheck{remote: remote})
-	}
+	r.Add(doctorchecks.Checks()...)
 	if version != "dev" {
 		r.Add(doctor.UpdateCheck{Opts: opts})
 	}
@@ -506,84 +510,32 @@ func newDoctor(ctx context.Context) *doctor.Runner {
 }
 
 func runDoctor(ctx context.Context) int {
-	return newDoctor(ctx).Run(ctx, os.Stdout)
+	return newDoctor().Run(ctx, os.Stdout)
 }
 
-// credentialsCheck reports whether stored credentials exist. Missing
-// credentials are a warning, not a failure, because login is optional.
-type credentialsCheck struct{ path string }
+// executableCheck is doctor.ExecutableCheck, except on Windows: there Go
+// reports no execute permission bits, so the library check always fails, and
+// a file that exists and is running is executable by definition.
+type executableCheck struct{}
 
-func (c credentialsCheck) Name() string { return "Credentials" }
+func (executableCheck) Name() string { return doctor.ExecutableCheck{}.Name() }
 
-func (c credentialsCheck) Run(_ context.Context) doctor.Result {
-	if _, err := os.Stat(c.path); err != nil {
-		return doctor.Result{Name: c.Name(), Status: doctor.Warn, Detail: "not signed in; run `creality-slicer-mcp login`"}
+func (c executableCheck) Run(ctx context.Context) doctor.Result {
+	if runtime.GOOS != "windows" {
+		return doctor.ExecutableCheck{}.Run(ctx)
 	}
-	return doctor.Result{Name: c.Name(), Status: doctor.OK, Detail: c.path}
-}
-
-// remoteCheck confirms the remote endpoint accepts the stored credential
-// with a single bounded MCP initialize request. It does not open a session,
-// so nothing has to be torn down afterwards.
-type remoteCheck struct{ remote *domain.RemoteConfig }
-
-func (remoteCheck) Name() string { return "Remote endpoint" }
-
-func (c remoteCheck) Run(ctx context.Context) doctor.Result {
-	if err := checkRemoteURL(c.remote.URL); err != nil {
-		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: err.Error()}
-	}
-	token, err := loadCredential(ctx, c.remote.CredentialKey)
+	path, err := os.Executable()
 	if err != nil {
-		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: err.Error()}
+		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: fmt.Sprintf("cannot determine executable: %v", err)}
 	}
-	if token == "" {
-		return doctor.Result{Name: c.Name(), Status: doctor.Warn, Detail: "no credential stored; run `creality-slicer-mcp login`"}
+	if _, err := os.Stat(path); err != nil {
+		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: fmt.Sprintf("cannot stat %s: %v", path, err)}
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"creality-slicer-mcp-doctor","version":"` + version + `"}}}`
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.remote.URL, strings.NewReader(body))
-	if err != nil {
-		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: err.Error()}
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	if c.remote.HeaderName != "" {
-		req.Header.Set(c.remote.HeaderName, c.remote.HeaderPrefix+token)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: oneLine(fmt.Sprintf("%s: %v", c.remote.URL, err))}
-	}
-	defer resp.Body.Close()
-	// Tell the server we are not keeping the session it may have created.
-	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" && resp.StatusCode < 300 {
-		if del, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.remote.URL, nil); err == nil {
-			del.Header.Set("Mcp-Session-Id", sid)
-			if c.remote.HeaderName != "" {
-				del.Header.Set(c.remote.HeaderName, c.remote.HeaderPrefix+token)
-			}
-			if r, err := http.DefaultClient.Do(del); err == nil {
-				r.Body.Close()
-			}
-		}
-	}
-	switch {
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: fmt.Sprintf("%s rejected the stored credential (HTTP %d); run `creality-slicer-mcp login`", c.remote.URL, resp.StatusCode)}
-	case resp.StatusCode >= 300:
-		return doctor.Result{Name: c.Name(), Status: doctor.Fail, Detail: fmt.Sprintf("%s: HTTP %d", c.remote.URL, resp.StatusCode)}
-	}
-	return doctor.Result{Name: c.Name(), Status: doctor.OK, Detail: c.remote.URL}
+	return doctor.Result{Name: c.Name(), Status: doctor.OK, Detail: path}
 }
 
-func oneLine(s string) string {
-	return strings.Join(strings.Fields(s), " ")
-}
-
-// clientsCheck lists the AI clients that have this server registered.
+// clientsCheck lists the AI clients that have this server registered,
+// including entries the user has edited (see clients.go).
 type clientsCheck struct{}
 
 func (clientsCheck) Name() string { return "AI clients" }
@@ -593,14 +545,26 @@ func (clientsCheck) Run(ctx context.Context) doctor.Result {
 	if err != nil {
 		return doctor.Result{Name: "AI clients", Status: doctor.Fail, Detail: err.Error()}
 	}
+	harnesses := detector.Detect(ctx)
+	entries := clientEntries(ctx, detector, harness.Scope{}, harnesses)
 	var configured []string
-	for _, h := range detector.Detect(ctx) {
-		if h.Configured {
+	outdated := false
+	for _, h := range harnesses {
+		switch e := entries[h.ID]; e.kind {
+		case entryConfigured:
 			configured = append(configured, h.Name)
+		case entryEdited:
+			configured = append(configured, h.Name+" (entry edited)")
+		case entryOutdated:
+			configured = append(configured, h.Name+" (runs "+e.command+")")
+			outdated = true
 		}
 	}
 	if len(configured) == 0 {
-		return doctor.Result{Name: "AI clients", Status: doctor.Warn, Detail: "no client is configured; run `creality-slicer-mcp install`"}
+		return doctor.Result{Name: "AI clients", Status: doctor.Warn, Detail: "no client is configured; run `" + domain.BinaryName + " install`"}
+	}
+	if outdated {
+		return doctor.Result{Name: "AI clients", Status: doctor.Warn, Detail: strings.Join(configured, ", ") + "; run `" + domain.BinaryName + " install --yes` to register this copy instead"}
 	}
 	return doctor.Result{Name: "AI clients", Status: doctor.OK, Detail: strings.Join(configured, ", ")}
 }
@@ -610,15 +574,16 @@ func (clientsCheck) Run(ctx context.Context) doctor.Result {
 func runUpdate(ctx context.Context, cmd cli.Command) int {
 	opts := updateOptions()
 
-	// `update --from <file>` is used by the install script, which has already
-	// downloaded and verified the new binary.
+	// `update --from <file>` swaps in a binary that was already downloaded
+	// and verified by other means, then refreshes the guide skill, as a
+	// download does.
 	if len(cmd.Args) >= 2 && cmd.Args[0] == "--from" {
 		if err := update.SwapFrom(ctx, cmd.Args[1], opts); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
 		fmt.Println("  Updated.")
-		return 0
+		return runNewBinaryGuideRefresh(ctx, filepath.Join(opts.InstallDir, opts.BinaryName))
 	}
 
 	if version == "dev" {
@@ -631,191 +596,70 @@ func runUpdate(ctx context.Context, cmd cli.Command) int {
 		return 1
 	}
 	if !available {
-		fmt.Printf("  creality-slicer-mcp %s is up to date.\n", version)
+		fmt.Printf("  %s %s is up to date.\n", domain.BinaryName, version)
 		return 0
 	}
-	fmt.Printf("  Updating creality-slicer-mcp %s -> %s\n", version, latest)
+	fmt.Printf("  Updating %s %s -> %s\n", domain.BinaryName, version, latest)
 	if err := update.SelfUpdate(ctx, opts); err != nil {
 		fmt.Fprintf(os.Stderr, "  Update failed: %v\n", err)
 		return 1
 	}
 	fmt.Printf("  Updated to %s.\n", latest)
+	// The new binary carries the matching guide; let it refresh the copies.
+	return runNewBinaryGuideRefresh(ctx, filepath.Join(opts.InstallDir, opts.BinaryName))
+}
+
+// runNewBinaryGuideRefresh runs `refresh-guide` with the binary an update just
+// installed, since this process still holds the old guide.
+func runNewBinaryGuideRefresh(ctx context.Context, exe string) int {
+	cmd := exec.CommandContext(ctx, exe, "refresh-guide")
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "  Could not update the guide skill (%v); run `%s install --yes` to write it again.\n", err, domain.BinaryName)
+		return 1
+	}
 	return 0
 }
 
-// --- App ---
-
-// The interactive app opens when the binary is run bare in a terminal. It
-// starts as a menu; extend appState with your own steps and screens.
-
-const (
-	stepMenu app.Step = iota
-	stepDoctor
-)
-
-type appState struct {
-	app.AppModel
-	ctx    context.Context
-	menu   *menu.Model
-	detail *detail.Model
-}
-
-func runApp(ctx context.Context) int {
-	s := &appState{ctx: ctx}
-	s.menu = menu.New(domain.ServerName+" "+version, func() []menu.Item {
-		return []menu.Item{
-			{Label: "Run doctor", Action: "doctor"},
-			{Label: "Quit", Action: "quit"},
-		}
-	})
-	return app.Run(ctx, s, app.Options{Title: domain.ServerName, Version: version})
-}
-
-func (m *appState) Init() tea.Cmd { return m.menu.Init() }
-
-func (m *appState) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if handled, cmd := m.HandleGlobalKeys(msg); handled {
-		return m, cmd
-	}
-
-	switch msg := msg.(type) {
-	case app.ActionMsg:
-		switch msg.Source {
-		case "menu":
-			action, _ := msg.Data.(string)
-			if msg.Value == "quit" || action == "quit" {
-				m.Quit = true
-				return m, tea.Quit
-			}
-			if action == "doctor" {
-				m.Step = stepDoctor
-				m.Status = "Running checks..."
-				m.detail = detail.New("Doctor", m.Status)
-				return m, tea.Batch(m.detail.Init(), async.Load(func() (string, error) {
-					var buf bytes.Buffer
-					newDoctor(m.ctx).Run(m.ctx, &buf)
-					return buf.String(), nil
-				}))
-			}
-		case "detail":
-			if msg.Value == "back" {
-				m.Step = stepMenu
-				return m, nil
-			}
-		}
-		return m, nil
-
-	case async.Result[string]:
-		m.Status = ""
-		if msg.Err != nil {
-			m.detail.SetContent("Doctor failed: " + msg.Err.Error())
-		} else {
-			m.detail.SetContent(msg.Value)
-		}
-		return m, nil
-	}
-
-	switch m.Step {
-	case stepMenu:
-		return m, m.menu.Update(msg)
-	case stepDoctor:
-		if m.detail != nil {
-			return m, m.detail.Update(msg)
+// runRefreshGuide rewrites the copies of the guide skill this program wrote
+// before with the guide embedded in this binary. --dry-run only reports them.
+func runRefreshGuide(cmd cli.Command) int {
+	dryRun := false
+	for _, a := range cmd.Args {
+		if a == "--dry-run" || a == "-dry-run" {
+			dryRun = true
 		}
 	}
-	return m, nil
-}
-
-func (m *appState) View() string {
-	switch m.Step {
-	case stepDoctor:
-		if m.detail != nil {
-			return m.detail.View()
-		}
-	}
-	return m.menu.View()
+	return refreshSkills(os.Stdout, dryRun)
 }
 
 // --- MCP Server ---
 
 func runMCPServer(ctx context.Context, cmd cli.Command) int {
-	transport := os.Getenv("TRANSPORT")
-
-	// --remote, or a configured remote endpoint when TRANSPORT is not set
-	// explicitly, turns this binary into a stdio bridge: the AI client talks
-	// to us, we talk to the remote with the stored credential. An explicit
-	// TRANSPORT always serves the embedded server.
-	if remoteURL, remote := bridgeTarget(cmd); remoteURL != "" && (cmd.Remote != "" || transport == "") {
-		return runBridge(ctx, remoteURL, remote)
+	// This server only ever serves its own MCP tools over the configured
+	// transport; it never bridges to another MCP endpoint.
+	if cmd.Remote != "" {
+		fmt.Fprintf(os.Stderr, "  %s does not bridge to other MCP servers, so `mcp --remote %s` is refused.\n"+
+			"  Run `%s mcp` without --remote.\n", domain.BinaryName, cmd.Remote, domain.BinaryName)
+		return 2
 	}
 
-	if transport == "" {
-		transport = "stdio"
+	settings, err := domain.SettingsFromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
 	}
-	addr := os.Getenv("ADDR")
-	if addr == "" {
-		addr = "127.0.0.1:8080"
-	}
-
 	srv := mcpserver.New(mcpserver.Config{
 		Version:   version,
-		Transport: transport,
-		HTTPAddr:  addr,
+		Transport: settings.Transport,
+		HTTPAddr:  settings.Addr,
+		Settings:  settings,
 	})
-	err := srv.Run(ctx)
+	err = srv.Run(ctx)
 	if err == nil || errors.Is(err, context.Canceled) || isClientHangup(err) {
 		return 0
 	}
 	fmt.Fprintln(os.Stderr, err)
-	return 1
-}
-
-// bridgeTarget returns the remote URL to bridge to: --remote wins, then the
-// project's RemoteConfig. The second value carries the header settings.
-func bridgeTarget(cmd cli.Command) (string, *domain.RemoteConfig) {
-	remote := domain.Remote()
-	if cmd.Remote != "" {
-		if remote == nil {
-			// Ad-hoc bridge on a project without a configured remote: a
-			// bearer token stored with `login --token`.
-			remote = &domain.RemoteConfig{HeaderName: "Authorization", HeaderPrefix: "Bearer ", CredentialKey: "token"}
-		}
-		return cmd.Remote, remote
-	}
-	if remote != nil {
-		return remote.URL, remote
-	}
-	return "", nil
-}
-
-func runBridge(ctx context.Context, remoteURL string, remote *domain.RemoteConfig) int {
-	if err := checkRemoteURL(remoteURL); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 2
-	}
-	err := proxy.Run(ctx, proxy.Config{
-		URL: remoteURL,
-		HeaderFunc: func(ctx context.Context) (map[string]string, error) {
-			if remote.HeaderName == "" || remote.CredentialKey == "" {
-				return nil, nil
-			}
-			token, err := loadCredential(ctx, remote.CredentialKey)
-			if err != nil {
-				return nil, err
-			}
-			if token == "" {
-				return nil, fmt.Errorf("no credential stored; run `creality-slicer-mcp login` (or `creality-slicer-mcp login --token <token>`) first")
-			}
-			return map[string]string{remote.HeaderName: remote.HeaderPrefix + token}, nil
-		},
-	})
-	if err == nil || errors.Is(err, context.Canceled) {
-		return 0
-	}
-	fmt.Fprintln(os.Stderr, err)
-	if errors.Is(err, proxy.ErrUnauthorized) {
-		fmt.Fprintln(os.Stderr, "  The stored credential was rejected; run `creality-slicer-mcp login` to replace it.")
-	}
 	return 1
 }
 

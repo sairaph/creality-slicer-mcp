@@ -1,0 +1,10 @@
+{
+    "type": "filament",
+    "name": "Generic ABS",
+    "from": "system",
+    "instantiation": "true",
+    "inherits": "fdm_filament_common",
+    "filament_id": "00004",
+    "filament_type": ["ABS"],
+    "compatible_printers": []
+}

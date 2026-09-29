@@ -1,0 +1,14 @@
+{
+    "type": "machine",
+    "name": "Test Printer A 0.4 nozzle",
+    "from": "system",
+    "instantiation": "true",
+    "inherits": "fdm_test_common",
+    "setting_id": "70001",
+    "printer_model": "Model A",
+    "printer_variant": "0.4",
+    "nozzle_diameter": ["0.4"],
+    "printable_area": "0x0,260x0,260x260,0x260",
+    "nozzle_volume": "183",
+    "min_layer_height": 0.08
+}

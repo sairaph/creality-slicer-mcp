@@ -41,7 +41,7 @@ get_slicer_status says `supported` false when the installed app is neither 7.2 n
 6. `arrange` re-packs a plate even when it is locked; leave it out to keep a layout (see `multi-plate`).
 7. A setting has no effect: it is gated by another one. describe_setting lists the dependency.
 8. A mesh looks tiny or huge: wrong units. add_model warns; use `scale`.
-9. Slicer and firmware versions drifted apart: time estimates and purge behave oddly; update both. A catalog drift note (the app sets settings the shipped catalog does not know) appears in get_slicer_status and doctor only, never on a project; the tools still pass those settings through untouched.
+9. Slicer and firmware versions drifted apart: time estimates and purge behave oddly; update both. A catalog drift note (the app sets settings the shipped catalog does not know) appears in get_slicer_status and doctor only, never on a project; those settings are not written into new projects, or into an opened project when set_presets rebuilds its settings; projects opened from the app otherwise keep them.
 
 ## Reading the output
 

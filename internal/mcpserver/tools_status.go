@@ -142,7 +142,7 @@ func driftLine(catalogVersion, appVersion string, drift []string) string {
 	if len(drift) > len(shown) {
 		line += fmt.Sprintf(" and %d more", len(drift)-len(shown))
 	}
-	return line + "; they are passed through untouched.\n"
+	return line + "; they are not written into new projects, or into an opened project when set_presets rebuilds its settings; projects opened from the app otherwise keep them.\n"
 }
 
 func sourceText(src string) string {

@@ -215,6 +215,10 @@ func TestOverlappingCrashesAreFlaggedAmbiguousAndDumpsClaimedOnce(t *testing.T) 
 	arrived := 0
 	both := make(chan struct{})
 	dumpRoot := t.TempDir()
+	// Both dumps are completely written before either run returns from the
+	// fake slicer, so neither run can see the other's dump half written.
+	var written sync.WaitGroup
+	written.Add(2)
 	mk := func() *Runner {
 		ex := &fakeExec{fn: func(_ context.Context, spec ExecSpec) (ExecResult, error) {
 			mu.Lock()
@@ -226,6 +230,8 @@ func TestOverlappingCrashesAreFlaggedAmbiguousAndDumpsClaimedOnce(t *testing.T) 
 			mu.Unlock()
 			<-both // both runs are inside their window at the same time
 			_ = os.WriteFile(filepath.Join(dumpRoot, fmt.Sprintf("crash-%d.dmp", n)), []byte("MDMP"), 0o644)
+			written.Done()
+			written.Wait()
 			return ExecResult{ExitCode: -1073741819}, nil
 		}}
 		r, _ := newRunner(t, ex)
@@ -424,5 +430,40 @@ func TestJobStateComesFromHowTheRunEnded(t *testing.T) {
 		if s.State != want {
 			t.Errorf("state %s with ending %v", s.State, s.Result)
 		}
+	}
+}
+
+// A dump that cannot be removed after the copy (the crash reporter still has it
+// open on Windows) is not claimed: the copy goes, the original stays for its
+// owner, so two overlapping runs never claim one dump.
+func TestMoveFileDoesNotClaimAFileItCannotRemove(t *testing.T) {
+	dir := t.TempDir()
+	src, dst := filepath.Join(dir, "a.dmp"), filepath.Join(dir, "b.dmp")
+	os.WriteFile(src, []byte("MDMP"), 0o644)
+	oldRename, oldRemove := renameFile, removeFile
+	defer func() { renameFile, removeFile = oldRename, oldRemove }()
+	renameFile = func(a, b string) error { return errors.New("sharing violation") }
+	removeFile = func(p string) error {
+		if p == src {
+			return errors.New("sharing violation")
+		}
+		return os.Remove(p)
+	}
+	if moveFile(src, dst) {
+		t.Fatal("a file that could not be removed was claimed")
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Error("the original must stay")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Error("the copy must not stay")
+	}
+	// When the removal works, the copy is claimed and the source is gone.
+	removeFile = os.Remove
+	if !moveFile(src, dst) {
+		t.Fatal("copy and remove failed")
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Error("source must be gone")
 	}
 }

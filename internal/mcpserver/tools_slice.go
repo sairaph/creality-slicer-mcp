@@ -203,11 +203,7 @@ func sliceReply(info *projects.Info, last *projects.LastSlice, warnings []string
 	labels := exclusionLabels(info, last)
 	var b strings.Builder
 	front.ElapsedS = round1(last.ElapsedS)
-	if last.ElapsedS > 0 {
-		fmt.Fprintf(&b, "Sliced %d plate(s) from revision %d in %s (%.0f s).\n\n", len(last.Plates), last.Revision, durText(int(last.ElapsedS+0.5)), last.ElapsedS)
-	} else {
-		fmt.Fprintf(&b, "Sliced %d plate(s) from revision %d.\n\n", len(last.Plates), last.Revision)
-	}
+	fmt.Fprintf(&b, "Sliced %d plate(s) from revision %d in %s.\n\n", len(last.Plates), last.Revision, elapsedText(last.ElapsedS))
 	b.WriteString("Plates (plate | time | grams | layers | upload name | G-code path):\n")
 	var tools, objects, actions strings.Builder
 	for _, p := range last.Plates {
@@ -831,3 +827,15 @@ func sameSetting(a, b string) bool {
 }
 
 var _ = render.CodeInternal
+
+// elapsedText is a duration once: "under 0.1 s", seconds with a decimal under
+// a minute, else minutes and seconds. A slice reply always states it.
+func elapsedText(sec float64) string {
+	if sec < 0.05 {
+		return "under 0.1 s"
+	}
+	if sec < 59.95 {
+		return fmt.Sprintf("%.1f s", sec)
+	}
+	return durText(int(sec + 0.5))
+}

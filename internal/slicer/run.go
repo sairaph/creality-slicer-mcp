@@ -397,10 +397,18 @@ func collectDumps(dir string, before map[string]bool, outputDir string, start, e
 	return moved
 }
 
-// moveFile renames, falling back to copy and delete across volumes. It
-// reports whether dst now holds the file.
+// renameFile and removeFile are os.Rename and os.Remove; tests replace them.
+var (
+	renameFile = os.Rename
+	removeFile = os.Remove
+)
+
+// moveFile moves a file, copying when a rename is not possible. It reports true
+// only when the source is gone afterwards: a file that cannot be removed (still
+// open for writing by the crash reporter on Windows) stays where it is for its
+// owner and is not claimed, so two runs never claim one dump.
 func moveFile(src, dst string) bool {
-	if err := os.Rename(src, dst); err == nil {
+	if err := renameFile(src, dst); err == nil {
 		return true
 	}
 	in, err := os.Open(src)
@@ -418,10 +426,13 @@ func moveFile(src, dst string) bool {
 		cerr = err
 	}
 	if cerr != nil {
-		os.Remove(dst)
+		removeFile(dst)
 		return false
 	}
-	os.Remove(src) // best effort: the copy is what counts
+	if err := removeFile(src); err != nil && !os.IsNotExist(err) {
+		removeFile(dst) // the original stays, so the copy must not count
+		return false
+	}
 	return true
 }
 

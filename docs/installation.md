@@ -110,7 +110,7 @@ Changes nothing that stays (the data folder check creates and removes one tempor
 | Creality Print data | Whether the app's own data folder can be read. |
 | Profiles | How many process and filament presets the installed bundle has for `Creality K2 0.4 nozzle`. |
 | Setting descriptions | How many settings have a description from the app's message catalogs. |
-| Settings catalog | Settings the installed K2 presets use that the shipped catalog does not know (up to ten are listed); they are passed through untouched. |
+| Settings catalog | Settings the installed K2 presets use that the shipped catalog does not know (up to ten are listed); they are not written into new projects, or into an opened project when set_presets rebuilds its settings; projects opened from the app otherwise keep them. |
 | Update | Whether a newer release exists (skipped in development builds). |
 
 A warning does not make doctor fail; the exit status is 1 only when a check fails.

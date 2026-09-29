@@ -293,7 +293,7 @@ func TestCatalogDrift(t *testing.T) {
 
 	f.store.keys = append(f.store.keys, "new_printer_key", "new_filament_key", "new_process_key")
 	r := f.run(t, "Settings catalog")
-	want(t, r, doctor.Warn, "3 setting(s)", "new_filament_key, new_printer_key, new_process_key", "7.2.2", "passed through untouched")
+	want(t, r, doctor.Warn, "3 setting(s)", "new_filament_key, new_printer_key, new_process_key", "7.2.2", "they are not written into new projects, or into an opened project when set_presets rebuilds its settings; projects opened from the app otherwise keep them")
 	if strings.Contains(r.Detail, "more") {
 		t.Errorf("three keys were abbreviated: %s", r.Detail)
 	}

@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -61,5 +62,24 @@ func TestFrontNumbersAreRounded(t *testing.T) {
 	}
 	if round2(1.4999) != 1.5 || round2(3.216) != 3.22 || round1(0.04) != 0 || round1(12.26) != 12.3 {
 		t.Errorf("rounding: %v %v %v %v", round2(1.4999), round2(3.216), round1(0.04), round1(12.26))
+	}
+}
+
+// The slicer's time is shown once.
+func TestElapsedIsShownOnce(t *testing.T) {
+	for sec, want := range map[float64]string{0: "under 0.1 s", 0.049: "under 0.1 s", 0.05: "0.1 s", 0.94: "0.9 s", 12.34: "12.3 s", 59.96: "1m 00s", 1290.4: "21m 30s"} {
+		if got := elapsedText(sec); got != want {
+			t.Errorf("elapsedText(%v) = %q, want %q", sec, got, want)
+		}
+	}
+	pf := newProjFixture(t)
+	id := pf.withModel(t, "Timed")
+	body := bodyOf(pf.ok(t, "slice_project", map[string]any{"project": id, "wait": 30}))
+	re := regexp.MustCompile(`Sliced 1 plate\(s\) from revision \d+ in (under 0\.1 s|\d+\.\d s|\d+m \d\ds)\.`)
+	if !re.MatchString(body) {
+		t.Errorf("elapsed wording:\n%s", body)
+	}
+	if strings.Contains(body, " s).") {
+		t.Errorf("the time is given twice:\n%s", body)
 	}
 }

@@ -291,5 +291,5 @@ func (k driftCheck) Run(ctx context.Context) doctor.Result {
 	if len(unknown) > len(shown) {
 		detail += fmt.Sprintf(" and %d more", len(unknown)-len(shown))
 	}
-	return doctor.Result{Name: k.Name(), Status: doctor.Warn, Detail: detail + "; they are passed through untouched"}
+	return doctor.Result{Name: k.Name(), Status: doctor.Warn, Detail: detail + "; they are not written into new projects, or into an opened project when set_presets rebuilds its settings; projects opened from the app otherwise keep them"}
 }

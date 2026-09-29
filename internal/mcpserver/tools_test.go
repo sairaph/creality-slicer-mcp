@@ -561,7 +561,7 @@ func TestStatusReportsCatalogDrift(t *testing.T) {
 	if frontOf(t, out)["catalog_drift"] != 2 {
 		t.Fatalf("catalog_drift = %v, want 2", frontOf(t, out)["catalog_drift"])
 	}
-	contains(t, "body", bodyOf(out), "Catalog drift", "2 setting(s)", "aa_new_filament_setting, zz_new_process_setting", "7.2.1", "passed through untouched")
+	contains(t, "body", bodyOf(out), "Catalog drift", "2 setting(s)", "aa_new_filament_setting, zz_new_process_setting", "7.2.1", "they are not written into new projects, or into an opened project when set_presets rebuilds its settings; projects opened from the app otherwise keep them")
 	notContains(t, "body", bodyOf(out), "k1_only_setting")
 }
 

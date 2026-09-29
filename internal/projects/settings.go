@@ -634,6 +634,9 @@ func (h *handle) updateRange(req SettingsRequest, res *SettingsResult) error {
 		opt := opts[key]
 		old := r.Options.Value(key)
 		if req.Values[key] == nil {
+			if key == "layer_height" {
+				return invalidf("give a layer height, or remove the whole range with set_height_ranges", "layer_height is always part of a height range (the slicer crashes without it) and cannot be removed")
+			}
 			r.Options.Delete(key)
 			res.Changed = append(res.Changed, Change{Key: key, Label: label(opt), Scope: ScopeLayerRange, Target: req.Target, Old: old, New: "(from the object)", Removed: true})
 			continue

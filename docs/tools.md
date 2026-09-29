@@ -2,11 +2,11 @@
 
 [Back to README](../README.md) · [Installation](installation.md) · [Configuration](configuration.md)
 
-Creality Slicer MCP exposes 26 tools, grouped below by task: the first seven read the settings catalog, the guide and the installed Creality Print's presets and change nothing; the project tools change only this server's own projects store; the slicing tools run the installed Creality Print. Nothing here talks to a printer. Every tool carries a title and behaviour hints (read-only, changing, destructive) that clients use for approval prompts, and the server sends short instructions that name the rules shared by all tools: paths, the store, the printer handoff and never guessing a setting key. The `creality-slicer` guide skill (see [installation](installation.md#what-is-written-where)) holds the same pages `get_guide` serves.
+Creality Slicer MCP exposes 27 tools, grouped below by task: the first seven read the settings catalog, the guide and the installed Creality Print's presets and change nothing; the project tools change only this server's own projects store; the slicing tools run the installed Creality Print. Nothing here talks to a printer. Every tool carries a title and behaviour hints (read-only, changing, destructive) that clients use for approval prompts, and the server sends short instructions that name the rules shared by all tools: paths, the store, the printer handoff and never guessing a setting key. The `creality-slicer` guide skill (see [installation](installation.md#what-is-written-where)) holds the same pages `get_guide` serves.
 
 Conventions shared by the tools:
 
-- Tools that change a project (`add_model`, `update_object`, `remove_object`, `add_modifier`, `set_height_ranges`, `manage_plates` with add, remove or set, and `set_presets` with filaments) attach a small screenshot of the affected plate: Isometric, 512 pixels on the longest edge, parts and labels on, framed on what changed. `include_screenshot` false leaves it out; the environment setting `CREALITY_SLICER_MCP_ONLY_TEXT_FEEDBACK` (see [configuration](configuration.md)) turns it off for every call and wins. A picture that cannot be drawn or does not fit is left out and never fails the call.
+- Tools that change a project (`add_model`, `update_object`, `remove_object`, `add_modifier`, `set_height_ranges`, `manage_plates` with add, remove or set, and `set_presets` with filaments) attach a small screenshot of the affected plate: the whole plate, Isometric, 512 by 384 pixels, parts and labels on, with the objects that changed outlined in magenta (so a move shows). `include_screenshot` false leaves it out; the environment setting `CREALITY_SLICER_MCP_ONLY_TEXT_FEEDBACK` (see [configuration](configuration.md)) turns it off for every call and wins. A picture that cannot be drawn or does not fit is left out and never fails the call.
 - Setting keys are Creality's own (`wall_loops`, `sparse_infill_density`). Find one with `search_settings`, read it with `describe_setting`; a wrong key never silently works.
 - Levels: `beginner` shows the app's simple mode (the default), `advanced` adds advanced settings, `all` adds developer settings.
 - Long lists are paged by size. The reply carries `page`, `total` and `total_pages` in its front matter and ends with `Next: page=N.` when there is another page; a page past the end is an empty page, not an error.
@@ -140,7 +140,7 @@ Show one project as text: no pictures (for those see `get_view`).
 
 - `project` (string, required).
 
-The front matter has the project fields, `printer`, `process`, `filaments`, `plates` (`index`, `name`, `objects`, `bed_type`, `print_sequence`, `locked`), `overrides` (settings changed from the presets) and `last_slice`. The body lists filaments, plates, objects (name, id, plate, size in mm, position, rotation, filament, override count, parts, and the exclusion label once the project was sliced), the parts of each object (modifier, negative part, support enforcer or blocker) with kind, name, size and centre on the plate, the changed settings and warnings such as an object outside the bed. It ends with a `Next:` line that suggests `get_view`.
+The front matter has the project fields, `printer`, `process`, `filaments`, `plates` (`index`, `name`, `objects`, `bed_type`, `print_sequence`, `locked`), `overrides` (settings changed from the presets) and `last_slice`. The body lists filaments, plates, objects (name, id, plate, size in mm, position, rotation, filament, override count, parts, and the exclusion label once the project was sliced), the parts of each object (modifier, negative part, support enforcer or blocker) with kind, name, size and centre on the plate, the changed settings and warnings: an object outside the bed, `sequence_clearance` (a plate printed by object whose objects are too close or too tall for the extruder clearance, with the distance needed), `v72_by_layer_crash` (Creality Print 7.2 with two or more filaments on a plate printed by layer) and `range_no_layer_height` (a height range without `layer_height`). It ends with a `Next:` line that suggests `get_view`.
 
 ### `get_view`
 
@@ -153,9 +153,9 @@ Draw a plate from a named camera, to check placement, heights and modifier cover
 - `show_parts` (boolean, optional, default true): modifiers (translucent yellow), negative parts (red), support enforcers (green) and support blockers (blue-grey), each with a solid outline. A part is drawn at full strength where it is in front of the model and only as a faint tint where the model hides it; its outline is always drawn.
 - `show_labels` (boolean, optional, default true): each object's id and short name at its top.
 - `show_ranges` (boolean, optional, default false): height ranges as tinted bands on their objects.
-- `width`, `height` (integers, optional, 1 to 2048): the image size. Without both, the longest edge is 1024 at the aspect of the framing; one given keeps that aspect.
+- `width`, `height` (integers, optional, 1 to 2048): the image size. Without both, the frame is 1024 by 768 (4:3); one given keeps the 4:3 shape. The framing is fitted inside the frame.
 
-The picture shows the bed (260 mm square on the K2, printable area outline, 10 mm grid), the plate axes at the plate origin (X red, Y green), the wipe tower footprint, and the objects lit in their filament colours (tinted red outside the printable area). The front matter has the project fields, `plate`, `view`, `focus` (the names framed), `objects` and `parts` (counts drawn), `ranges` (bands drawn, only with `show_ranges`; 0 means no object in the picture has height ranges), `width` and `height`. The body says what is shown, gives a legend and ends with a `Next:` line; the image follows the text, scaled down when it would not fit in a reply (a picture that cannot be made to fit is an `invalid_input` error with a hint to ask for a smaller size).
+The picture shows the bed (260 mm square on the K2, printable area outline, 10 mm grid), the plate axes at the plate origin (X red, Y green), the wipe tower footprint, and the objects lit in their filament colours (tinted red outside the printable area). The front matter has the project fields, `plate`, `view`, `focus` (the names framed), `objects` and `parts` (counts drawn), `ranges` (bands drawn, only with `show_ranges`; 0 means no object in the picture has height ranges), `width` and `height`. The body says what is shown, gives a legend (each height range band by colour, object, heights and settings), lists labels that were left out because they would have covered another, and ends with a `Next:` line; the image follows the text, scaled down when it would not fit in a reply (a picture that cannot be made to fit is an `invalid_input` error with a hint to ask for a smaller size).
 
 ### `add_model`
 
@@ -164,6 +164,8 @@ Add a model (`.stl`, `.obj` or `.3mf`) to a plate.
 - `project`, `path` (string, required).
 - `plate` (integer, optional, default 1), `position` (`[x, y]` or `[x, y, z]` mm from the corner of the object's own plate, optional: automatic placement without it), `rotation` (`[x, y, z]` degrees), `scale` (a number or `[x, y, z]`, above 0), `filament` (slot, default 1), `name`, `copies` (integer, default 1), `objects` (list of names: for a `.3mf`, take only these objects; default all).
 - `include_screenshot` (boolean, optional, default true): attach the screenshot described in the conventions above.
+
+The first object on an empty plate goes to the middle of the bed; on a plate printed by object the objects are spaced by the clearance the printer needs.
 
 The front matter has `added` (id, name, plate, size, position, rotation, filament). The body says where each copy went and warns when the size looks like the wrong unit. A model that does not fit is a `conflict` error with the free area and what to try. A `.3mf` adds all its objects, or only the ones named in `objects` (an unknown name is an `invalid_input` error that lists the names in the file).
 
@@ -185,6 +187,15 @@ Remove an object with its parts, modifiers and height ranges.
 - `include_screenshot` (boolean, optional, default true): attach the screenshot described in the conventions above.
 
 The front matter has `removed`.
+
+### `remove_part`
+
+Remove one part of an object: a modifier, negative part, support blocker or enforcer, or an extra model part.
+
+- `project`, `object`, `part` (string, required): the part is an id or a name, as `get_project` lists under the object.
+- `include_screenshot` (boolean, optional, default true): attach the screenshot described in the conventions above.
+
+The front matter has `object`, `removed` (the part name), `kind` and `parts` (how many are left). The last model part of an object cannot be removed (`invalid_input`, use `remove_object`); an unknown object or part is `not_found`.
 
 ### `update_settings`
 
@@ -226,7 +237,7 @@ The front matter has `part` and `kind`. A support enforcer only works with `enab
 Replace the height ranges of an object: bands of layers with their own settings.
 
 - `project`, `object` (string, required).
-- `ranges` (list, required): each `{from_z, to_z, values}` in mm above the bed. The list replaces the current one; an empty list clears it. Ranges must not overlap; values are checked at layer range scope.
+- `ranges` (list, required): each `{from_z, to_z, values}` in mm above the bed. The list replaces the current one; an empty list clears it. Ranges must not overlap; values are checked at layer range scope. Every range also carries `layer_height` (the object's own value unless the range sets one): the slicer crashes on a range without it, so the tools add it and refuse to remove it.
 - `include_screenshot` (boolean, optional, default true): attach the screenshot described in the conventions above.
 
 The front matter has `object` and `ranges` (the count).
@@ -280,11 +291,11 @@ Slice a project.
 - `background` (boolean, optional, default false): true returns the `job_id` at once without waiting.
 - `thumbnails` (boolean, optional, default true): put the plate pictures the printer preset asks for into the G-code.
 - `timeout` (number, optional, seconds, default 1800, at most 1800): the anti-hang limit for the slicer run, not the wait.
-- `preview` (string, optional, `none` | `small` | `large`, default `none`): attach the sliced plate and its first layer as pictures of that size.
+- `preview` (string, optional, `none` | `small` | `large`, default `none`): attach two pictures of the sliced result: an isometric drawing of the toolpaths, layer upon layer in the colour of each filament (512 or 1024 pixels wide), and the first layer of all objects (384 or 1024 pixels square; a plate printed by object has one first layer per object).
 
-The front matter has the project fields, `state` (`finished` or `running`), `plates` (`index`, `bytes`, `time_s`, `time_text`, `filament_g` per tool, `total_g`, `layers`, `objects`, `multicolour`, `changes` (filament changes)), `warnings`, `stale` and `handoff`. Per plate the handoff has `gcode_path`, `upload_name` (`<project name>_plate<N>.gcode`, sanitised), `tools` (`tool` T0 and so on, `filament` the 0-based index, `preset`, `type`, `colour`, `filament_id`) and `exclude_names` (the object labels `exclude_object` takes; `get_project` and the slice reply also show the label of each object). The body has one table with a row per plate (time, grams, layers, upload name, G-code path), the tools table, the exclusion label of every object, the warnings and the printer steps: `get_filaments`, then `upload_gcode_file` with `path` = `gcode_path` and `filename` = `upload_name`, then `start_print` with `source` `cfs` and `slot_map` (`filament` = the 0-based index, `slot` = the CFS slot with the same material), then `exclude_object` during the print.
+The front matter has the project fields, `state` (`finished` or `running`), `elapsed_s` (how long the slicer ran), `plates` (`index`, `bytes`, `time_s`, `time_text`, `filament_g` per tool, `total_g`, `layers`, `objects`, `multicolour`, `changes` (filament changes)), `warnings`, `stale` and `handoff`. Per plate the handoff has `gcode_path`, `upload_name` (`<project name>_plate<N>.gcode`, sanitised), `tools` (`tool` T0 and so on, `filament` the 0-based index, `preset`, `type`, `colour`, `filament_id`) and `exclude_names` (the object labels `exclude_object` takes; `get_project` and the slice reply also show the label of each object). The body has one table with a row per plate (time, grams, layers, upload name, G-code path), the tools table, the exclusion label of every object, the warnings and the printer steps: `get_filaments`, then `upload_gcode_file` with `path` = `gcode_path` and `filename` = `upload_name`, then `start_print` with `source` `cfs` and `slot_map` (`filament` = the 0-based index, `slot` = the CFS slot with the same material), then `exclude_object` during the print. The body starts with the time the slicer ran (`Sliced 1 plate(s) from revision 4 in 21m 31s (1290 s).`). When the plate has layer actions (pauses, colour changes, custom G-code), a table `Layer actions (plate | action | result in the G-code)` follows the tools table: each action is listed as found in the G-code at its height, or as `not found in the G-code: it did nothing`.
 
-A failed slice is a `slicer_error` with the exit code name, its meaning, a hint and the slicer's output; an unsupported install is `unavailable`.
+A failed slice is a `slicer_error` with the exit code name, its meaning, a hint, the last 15 meaningful lines of the slicer's own log and the path of the full log (`log_file` in the fields; the log of the last slice is `slice.log` in the project's output folder); the application's whole output is not repeated. An unsupported install is `unavailable`. Numbers in the front matter are rounded: millimetres and grams to 0.01, degrees and seconds to 0.1.
 
 ### `get_slice_status`
 
@@ -294,7 +305,7 @@ Check a background slice.
 - `wait` (number, optional, seconds, 0 to 600, default 0): hold the call while the job runs, until it ends or the seconds are up, instead of polling.
 - `cancel` (boolean, optional, default false): stop the job (needs `job_id`).
 
-A running job gives its state and elapsed time. A finished job gives the same reply as `slice_project`, including the handoff. A failed job gives the same error. An id nobody knows (or one that is not a job id, such as a project id) is a `not_found` error "no slice job with id ..."; jobs are forgotten after a day, and `get_project` still shows the last slice of a project.
+The job list shows how each job really ended: `running`, `finished`, `failed` (with the exit name, for example OBJECT_COLLISION_IN_SEQ_PRINT or a crash name) or `cancelled`. A running job gives its state and elapsed time. A finished job gives the same reply as `slice_project`, including the handoff. A failed job gives the same error. An id nobody knows (or one that is not a job id, such as a project id) is a `not_found` error "no slice job with id ..."; jobs are forgotten after a day, and `get_project` still shows the last slice of a project.
 
 ### `get_slice_report`
 
@@ -304,7 +315,7 @@ Read the last slice of a plate.
 - `section` (string, optional, `summary` | `filaments` | `objects` | `layers` | `layer` | `settings`, default `summary`).
 - `layer` (integer, from 1) or `z` (number, mm) for section `layer`; `color_by` (`feature` | `filament` | `speed`, default `feature`); `preview` (`none` | `small` | `large`; default `small` for section `layer`).
 
-`summary` is the plate line, the generator and the bounds; `filaments` gives grams, millimetres and cubic centimetres per tool; `objects` the labels with centre and box; `layers` the count, first layer and height range; `layer` the extrusion by feature and travel, with a picture; `settings` the effective settings that differ from the process preset. A report older than the project says so (`stale`). Time per layer and the flush share are not reported.
+`summary` is the plate line, the generator and the bounds; `filaments` gives grams, millimetres and cubic centimetres per tool; `objects` the labels with centre and box; `layers` the count, first layer and height range; `layer` the extrusion by feature and travel, with a picture (on a plate printed by object the layers are counted across all objects, so the report says so and shows every object at that layer's height; pick a height with `z`); `settings` the effective settings that differ from the process preset, grouped: changed in this project, switched by a rule of Creality Print (for example the prime tower when printing by object, with the condition), and differences nothing in the project explains. A report older than the project says so (`stale`). Time per layer and the flush share are not reported.
 
 ## Command line
 

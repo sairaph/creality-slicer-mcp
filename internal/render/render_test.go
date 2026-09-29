@@ -304,7 +304,7 @@ func TestPreviewShowsBedGridAndOutline(t *testing.T) {
 			seen[img.NRGBAAt(x, y)] = true
 		}
 	}
-	if !seen[bedFill] {
+	if !seen[lightBed.fill] {
 		t.Error("the bed fill is missing")
 	}
 	dark := 0
@@ -320,7 +320,7 @@ func TestPreviewShowsBedGridAndOutline(t *testing.T) {
 	// grid-coloured pixel in the interior row through the middle of a cell.
 	grid := 0
 	for x := 20; x < 240; x++ {
-		if p := img.NRGBAAt(x, 135); p.R < bedFill.R-8 && p.R > 190 {
+		if p := img.NRGBAAt(x, 135); p.R < lightBed.fill.R-8 && p.R > 190 {
 			grid++
 		}
 	}

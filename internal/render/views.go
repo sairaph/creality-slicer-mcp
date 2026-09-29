@@ -94,14 +94,20 @@ type ViewOptions struct {
 	// edge of 1024 at the aspect of the framing; one given keeps that aspect.
 	Width, Height int
 	// LongEdge is the longest edge when Width and Height are both zero; 0 means
-	// 1024.
+	// 1024. The frame is 4:3 unless a size is given.
 	LongEdge int
+	// Highlight lists the indexes into Scene.Objects drawn with a bright outline
+	// (the objects a change touched).
+	Highlight []int
 }
 
 // ViewStats says what RenderView drew.
 type ViewStats struct {
 	Objects, Parts, Ranges int
 	Width, Height          int
+	// SkippedLabels are the labels left out because they would have covered
+	// another one.
+	SkippedLabels []string
 }
 
 // The colours of the parts, as a fill seen in front of the model, the same
@@ -247,7 +253,6 @@ func RenderView(s *Scene, o ViewOptions) ([]byte, ViewStats, error) {
 	if math.IsInf(minX, 1) {
 		return nil, st, fmt.Errorf("render: nothing to frame")
 	}
-	// Keep the framing box from being extremely thin or wide.
 	dx, dy := maxX-minX, maxY-minY
 	if dx < 1 {
 		dx = 1
@@ -255,40 +260,31 @@ func RenderView(s *Scene, o ViewOptions) ([]byte, ViewStats, error) {
 	if dy < 1 {
 		dy = 1
 	}
-	if dy < dx/4 {
-		dy = dx / 4
-	} else if dx < dy/4 {
-		dx = dy / 4
-	}
 	cx, cy := (minX+maxX)/2, (minY+maxY)/2
 	minX, maxX, minY, maxY = cx-dx/2, cx+dx/2, cy-dy/2, cy+dy/2
 
+	// The frame is 4:3 unless a size is given; one given side keeps that shape.
 	w, h := o.Width, o.Height
-	aspect := dx / dy
 	switch {
 	case w == 0 && h == 0:
 		long := o.LongEdge
 		if long <= 0 {
 			long = 1024
 		}
-		if aspect >= 1 {
-			w, h = long, int(math.Round(float64(long)/aspect))
-		} else {
-			w, h = int(math.Round(float64(long)*aspect)), long
-		}
+		w, h = long, long*3/4
 	case w == 0:
-		w = int(math.Round(float64(h) * aspect))
+		w = h * 4 / 3
 	case h == 0:
-		h = int(math.Round(float64(w) / aspect))
+		h = w * 3 / 4
 	}
 	w, h = min(max(w, 64), MaxSize), min(max(h, 64), MaxSize)
 	st.Width, st.Height = w, h
 
 	ss := ssFactor(max(w, h))
-	c := newCanvas(w*ss, h*ss, previewBackground)
+	c := newCanvas(w*ss, h*ss, viewBackground)
 	f := newFit(minX, minY, maxX, maxY, c.w, c.h, viewMargin)
 
-	c.drawBed(cam, f, s, ss)
+	c.drawBed(cam, f, s, ss, viewBed)
 	bed := s.bed()
 	type tip struct {
 		text string
@@ -316,13 +312,28 @@ func RenderView(s *Scene, o ViewOptions) ([]byte, ViewStats, error) {
 		tips = append(tips, tip{ax.text, x1 + ux*hl*1.6, y1 + uy*hl*1.6, ax.col})
 	}
 
-	c.drawObjects(cam, f, ps, shadeLit, func(ob *Object) color.NRGBA {
+	c.drawObjects(cam, f, ps, shadeView, func(ob *Object) color.NRGBA {
 		col := objectColour(ob)
 		if s.Outside(*ob) {
 			return tint(col)
 		}
 		return col
 	})
+	// Edges darken the outline of every object so a white one is not lost on
+	// the light faces of its neighbours; a very dark one gets a light edge.
+	highlight := map[int]bool{}
+	for _, i := range o.Highlight {
+		highlight[i] = true
+	}
+	for i, p := range ps {
+		if p.obj.Mesh == nil || len(p.obj.Mesh.Triangles) > maxEdgeTriangles {
+			continue
+		}
+		c.drawEdges(cam, f, p, edgeColour(objectColour(p.obj)), float32(ss)*1.3, 0.05)
+		if highlight[i] {
+			c.drawEdges(cam, f, p, highlightColour, float32(ss)*3.4, 0.12)
+		}
+	}
 	for _, v := range volumes {
 		c.drawVolume(cam, f, v.world, v.m, v.col, ss)
 	}
@@ -333,6 +344,7 @@ func RenderView(s *Scene, o ViewOptions) ([]byte, ViewStats, error) {
 		x, y := int(t.x)/ss-glyphWidth*scale/2, int(t.y)/ss-glyphHeight*scale/2
 		drawText(img, x, y, scale, t.text, t.col)
 	}
+	var labelRects []image.Rectangle
 	if o.ShowLabels {
 		for _, p := range ps {
 			if p.obj.Label == "" || p.obj.Mesh == nil {
@@ -347,23 +359,99 @@ func RenderView(s *Scene, o ViewOptions) ([]byte, ViewStats, error) {
 			if px < 0 || py < 0 || int(px) >= c.w || int(py) >= c.h {
 				continue // out of the frame (not in the focus): no label
 			}
-			drawLabel(img, int(px)/ss, int(py)/ss, scale, p.obj.Label)
+			// Try the spot above the object, then above and below it in
+			// steps; a label that fits nowhere is left out and reported.
+			r := labelRect(img, int(px)/ss, int(py)/ss, scale, p.obj.Label)
+			step := r.Dy() + 2
+			placed := false
+			for _, dy := range []int{0, -step, step, -2 * step, 2 * step} {
+				cand := r.Add(image.Pt(0, dy))
+				if cand.Min.Y < 0 || cand.Max.Y > img.Bounds().Max.Y || overlapsAny(cand, labelRects) {
+					continue
+				}
+				labelRects = append(labelRects, cand)
+				drawLabelAt(img, cand, scale, p.obj.Label)
+				placed = true
+				break
+			}
+			if !placed {
+				st.SkippedLabels = append(st.SkippedLabels, p.obj.Label)
+			}
 		}
 	}
 	data, err := encodePNG(img)
 	return data, st, err
 }
 
-// drawLabel draws text centred above the point x, y on a light panel, kept
-// inside the image.
-func drawLabel(img *image.NRGBA, x, y, scale int, text string) {
+// labelRect is the panel of a label centred above the point x, y, kept inside
+// the image.
+func labelRect(img *image.NRGBA, x, y, scale int, text string) image.Rectangle {
 	pad := scale
 	tw, th := textWidth(text, scale), glyphHeight*scale
 	b := img.Bounds()
 	left := min(max(x-tw/2-pad, b.Min.X), b.Max.X-tw-2*pad)
 	top := min(max(y-th-3*pad, b.Min.Y), b.Max.Y-th-2*pad)
-	fillRect(img, left, top, tw+2*pad, th+2*pad, labelPanel)
-	drawText(img, left+pad, top+pad, scale, text, labelText)
+	return image.Rect(left, top, left+tw+2*pad, top+th+2*pad)
+}
+
+func drawLabelAt(img *image.NRGBA, r image.Rectangle, scale int, text string) {
+	fillRect(img, r.Min.X, r.Min.Y, r.Dx(), r.Dy(), labelPanel)
+	drawText(img, r.Min.X+scale, r.Min.Y+scale, scale, text, labelText)
+}
+
+func overlapsAny(r image.Rectangle, rs []image.Rectangle) bool {
+	for _, o := range rs {
+		if r.Overlaps(o) {
+			return true
+		}
+	}
+	return false
+}
+
+// maxEdgeTriangles is the largest mesh whose edges are drawn: finding them
+// costs about a microsecond per triangle.
+const maxEdgeTriangles = 200000
+
+var highlightColour = [4]uint8{255, 40, 140, 255}
+
+// edgeColour is a darker shade of the object's colour, or a light grey for a
+// colour that is already nearly black.
+func edgeColour(base color.NRGBA) [4]uint8 {
+	if int(base.R)+int(base.G)+int(base.B) < 150 {
+		return [4]uint8{170, 174, 184, 255}
+	}
+	return [4]uint8{uint8(int(base.R) * 35 / 100), uint8(int(base.G) * 35 / 100), uint8(int(base.B) * 35 / 100), 255}
+}
+
+// drawEdges draws the feature and silhouette edges of a placed object as
+// ribbons, tested against the depth buffer with a bias towards the camera so an
+// edge sits on its own faces and a hidden one stays hidden.
+func (c *canvas) drawEdges(cam camera, f fit, p placed, col [4]uint8, width, bias float32) {
+	world := p.world
+	sx := make([]float32, len(world))
+	sy := make([]float32, len(world))
+	sz := make([]float32, len(world))
+	for i, v := range world {
+		x, y, z := cam.project([3]float64{float64(v[0]), float64(v[1]), float64(v[2])})
+		sx[i], sy[i] = f.px(x, y)
+		sz[i] = float32(z) + bias
+	}
+	for _, e := range outlineEdges(world, p.obj.Mesh.Triangles, cam) {
+		c.lineDepth(sx[e[0]], sy[e[0]], sz[e[0]], sx[e[1]], sy[e[1]], sz[e[1]], width, col)
+	}
+}
+
+// lineDepth paints a segment as a ribbon of the given width in pixels, tested
+// against and written to the depth buffer.
+func (c *canvas) lineDepth(x0, y0, z0, x1, y1, z1, width float32, col [4]uint8) {
+	dx, dy := x1-x0, y1-y0
+	l := float32(math.Hypot(float64(dx), float64(dy)))
+	if l == 0 {
+		return
+	}
+	nx, ny := -dy/l*width/2, dx/l*width/2
+	c.tri(x0+nx, y0+ny, z0, x1+nx, y1+ny, z1, x1-nx, y1-ny, z1, col, true)
+	c.tri(x0+nx, y0+ny, z0, x1-nx, y1-ny, z1, x0-nx, y0-ny, z0, col, true)
 }
 
 // drawVolume draws a translucent volume: each triangle blended over what is

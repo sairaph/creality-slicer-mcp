@@ -2,6 +2,7 @@ package projects
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -114,6 +115,7 @@ func (h *handle) occupied(plate, skipObject, skipInstance int) []rect {
 		return nil
 	}
 	var out []rect
+	var heights []float64
 	for _, in := range pl.Instances {
 		if in.ObjectID == skipObject && in.InstanceID == skipInstance {
 			continue
@@ -129,8 +131,10 @@ func (h *handle) occupied(plate, skipObject, skipInstance int) []rect {
 		}
 		if b, ok := bboxOf(m, h.itemT(in.ObjectID, in.InstanceID)); ok {
 			out = append(out, footprint(b))
+			heights = append(heights, float64(b.Max[2]))
 		}
 	}
+	h.takenHeights = heights // aligned with the result, for findSpot
 	return out
 }
 
@@ -144,10 +148,45 @@ func (h *handle) findSpot(plate int, w, d float64, taken []rect) (cx, cy float64
 	if t, has := h.towerRect(plate); has {
 		obstacles = append(obstacles, t)
 	}
+	// Objects printed one after another keep the printer's clearance between them.
+	gap := math.Max(PlacementGap, h.seqGap(plate))
+	// By object, an object taller than the rod height cannot share a Y band with
+	// another one (the slicer's too-tall rule): keep the bands apart.
+	byObject := h.plateSequence(plate) == "by object"
+	rod := cfgFloat(h, "extruder_clearance_height_to_rod", 1e9)
+	half := math.Max(0, (gap-1)/2)
+	tallNew := byObject && h.placeHeight > rod
+	heights := h.takenHeights
+	rodOK := func(c rect) bool {
+		if !byObject {
+			return true
+		}
+		for i, t := range taken {
+			tall := tallNew || (i < len(heights) && len(heights) == len(taken) && heights[i] > rod)
+			if tall && c.y0 < t.y1+half && t.y0 < c.y1+half {
+				return false
+			}
+		}
+		return true
+	}
+	// The first object of a plate goes to the centre of the bed when that is free.
+	if len(taken) == 0 {
+		ccx, ccy := (usable.x0+usable.x1)/2, (usable.y0+usable.y1)/2
+		c := rect{ccx - w/2, ccy - d/2, ccx + w/2, ccy + d/2}
+		free := usable.contains(c) && rodOK(c)
+		for _, o := range obstacles {
+			if c.overlaps(o.inflate(gap - 1e-6)) {
+				free = false
+			}
+		}
+		if free {
+			return ccx, ccy, true
+		}
+	}
 	xs, ys := []float64{usable.x0}, []float64{usable.y0}
 	for _, r := range obstacles {
-		xs = append(xs, r.x1+PlacementGap)
-		ys = append(ys, r.y1+PlacementGap)
+		xs = append(xs, r.x1+gap)
+		ys = append(ys, r.y1+gap)
 	}
 	sort.Float64s(xs)
 	sort.Float64s(ys)
@@ -157,9 +196,9 @@ func (h *handle) findSpot(plate int, w, d float64, taken []rect) (cx, cy float64
 			if !usable.contains(c) {
 				continue
 			}
-			clear := true
+			clear := rodOK(c)
 			for _, o := range obstacles {
-				if c.overlaps(o.inflate(PlacementGap - 1e-6)) {
+				if c.overlaps(o.inflate(gap - 1e-6)) {
 					clear = false
 					break
 				}
@@ -303,6 +342,7 @@ func (s *Store) AddModel(ref string, req AddModelRequest) (*AddModelResult, erro
 					}
 					placed := false
 					for _, pi := range plates {
+						h.placeHeight = size[2]
 						if x, y, ok := h.findSpot(pi, size[0], size[1], h.occupied(pi, -1, -1)); ok {
 							plate, cx, cy, placed = pi, x, y, true
 							break
@@ -494,6 +534,7 @@ func (s *Store) UpdateObject(ref string, req UpdateObjectRequest) (*UpdateObject
 			target = *req.Plate
 			if req.X == nil && req.Y == nil {
 				sz := size3(newB)
+				h.placeHeight = sz[2]
 				x, y, fits := h.findSpot(target, sz[0], sz[1], h.occupied(target, o.ID, req.Instance))
 				if !fits {
 					return conflictf("make room on that plate, or give x and y", "%q (%.1f x %.1f mm) does not fit on plate %d", o.Name, sz[0], sz[1], target)
@@ -737,4 +778,55 @@ func pickObjects(items []mesh.Placed, names []string, path string) ([]mesh.Place
 		}
 	}
 	return out, nil
+}
+
+// RemovePartResult reports a removed part.
+type RemovePartResult struct {
+	Info    *Info
+	Part    PartInfo
+	Object  string
+	Removed string
+}
+
+// RemovePart removes one part (a modifier, negative part, support blocker or
+// enforcer, or an extra model part) from an object. The last model part cannot
+// go: remove the object instead.
+func (s *Store) RemovePart(ref, object, part string) (*RemovePartResult, error) {
+	res := &RemovePartResult{}
+	err := s.write(ref, func(h *handle) error {
+		o, err := h.objectByRef(object)
+		if err != nil {
+			return err
+		}
+		pt, err := h.partByRef(o, part)
+		if err != nil {
+			return err
+		}
+		if pt.Subtype == threemf.SubtypeNormal {
+			normal := 0
+			for _, p := range o.Parts {
+				if p.Subtype == threemf.SubtypeNormal {
+					normal++
+				}
+			}
+			if normal <= 1 {
+				return invalidf("remove the whole object with remove_object", "part %q is the only model part of object %q", pt.Name, o.Name)
+			}
+		}
+		res.Part = PartInfo{ID: pt.ID, Name: pt.Name, Subtype: pt.Subtype}
+		res.Object, res.Removed = o.Name, pt.Name
+		h.touchObject(o.ID)
+		if h.meshes != nil {
+			delete(h.meshes, o.ID)
+		}
+		if err := h.p.RemovePart(o.ID, pt.ID); err != nil {
+			return threemfError(err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	res.Info, err = s.info(ref)
+	return res, err
 }

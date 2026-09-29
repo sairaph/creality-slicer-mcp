@@ -18,24 +18,6 @@ import (
 	"github.com/sairaph/creality-slicer-mcp/internal/catalog"
 )
 
-// MC2: a panic in a handler is an internal_error result, and the server keeps
-// serving.
-func TestAPanicInAHandlerIsAnErrorResult(t *testing.T) {
-	h := recoverPanics(func(context.Context, string, mcp.Request) (mcp.Result, error) { panic("boom") })
-	res, err := h(context.Background(), "tools/call", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, ok := res.(*mcp.CallToolResult)
-	if !ok || !r.IsError || !strings.Contains(text(t, r), "internal_error") || !strings.Contains(text(t, r), "report it") {
-		t.Fatalf("result = %+v", res)
-	}
-	// Not a tool call: the error goes back as a protocol error.
-	if _, err := h(context.Background(), "tools/list", nil); err == nil {
-		t.Error("a panic in another method was swallowed")
-	}
-}
-
 // MC5: pictures already in a reply count against the budget of the next one.
 func TestImageBudgetCountsImagesAlreadyInTheReply(t *testing.T) {
 	res := successResult(struct{}{}, "text")

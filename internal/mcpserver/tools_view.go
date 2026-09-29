@@ -104,6 +104,9 @@ func (s *Server) getView(ctx context.Context, _ *mcp.CallToolRequest, in viewInp
 	for _, l := range v.Legend {
 		fmt.Fprintf(&b, "- %s\n", l)
 	}
+	if len(v.SkippedLabels) > 0 {
+		fmt.Fprintf(&b, "\nLabels left out so that none covers another: %s. Use focus, hide or isolate to see them.\n", strings.Join(v.SkippedLabels, ", "))
+	}
 	b.WriteString("\nNext: get_view with another view_name (Front and Right show heights), or focus on one object; update_object, add_modifier or slice_project when it looks right.")
 	res := successResult(front, b.String())
 	fitted, ferr := fitPNG(v.PNG, imageBudget(res))
@@ -122,8 +125,9 @@ func (s *Server) getView(ctx context.Context, _ *mcp.CallToolRequest, in viewInp
 	return res, nil, nil
 }
 
-// withScreenshot attaches an isometric picture of a plate, 512 pixels on the
-// longest edge, with parts and labels, framed on the changed objects, to the
+// withScreenshot attaches an isometric picture of the whole plate, 512 pixels
+// on the longest edge (4:3), with parts and labels and the changed objects
+// outlined, to the
 // reply of a tool that changed a project. A picture that cannot be drawn or
 // does not fit never fails the call: it is logged and left out. The
 // environment setting CREALITY_SLICER_MCP_ONLY_TEXT_FEEDBACK and the tool's
@@ -136,7 +140,7 @@ func (s *Server) withScreenshot(be ProjectBackend, res *toolResult, include *boo
 		plate = 1
 	}
 	v, err := be.Store.View(project, projects.ViewRequest{
-		Plate: plate, View: string(render.Isometric), Focus: focus, ShowParts: true, ShowLabels: true, ShowRanges: ranges, LongEdge: 512,
+		Plate: plate, View: string(render.Isometric), Highlight: focus, ShowParts: true, ShowLabels: true, ShowRanges: ranges, LongEdge: 512,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "creality-slicer-mcp: the screenshot of %s was left out: %v\n", project, err)

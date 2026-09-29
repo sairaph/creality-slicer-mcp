@@ -84,6 +84,9 @@ type ProjectStore interface {
 	AddModel(ref string, req projects.AddModelRequest) (*projects.AddModelResult, error)
 	UpdateObject(ref string, req projects.UpdateObjectRequest) (*projects.UpdateObjectResult, error)
 	RemoveObject(ref, object string) (*projects.Info, error)
+	RemovePart(ref, object, part string) (*projects.RemovePartResult, error)
+	ListJobs() []projects.JobInfo
+	ExplainSettings(ref string, used map[string]string) ([]projects.SettingDiff, error)
 	UpdateSettings(ref string, req projects.SettingsRequest) (*projects.SettingsResult, error)
 	SetPresets(ref string, req projects.PresetsRequest) (*projects.PresetsResult, error)
 	AddModifier(ref string, req projects.ModifierRequest) (*projects.ModifierResult, error)

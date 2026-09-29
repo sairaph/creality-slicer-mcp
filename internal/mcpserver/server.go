@@ -61,7 +61,6 @@ func newServer(config Config, extra ...func(*Server)) *Server {
 		register(srv)
 	}
 	srv.mcpServer.AddReceivingMiddleware(invalidArguments)
-	srv.mcpServer.AddReceivingMiddleware(recoverPanics)
 
 	return srv
 }

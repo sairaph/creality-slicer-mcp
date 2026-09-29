@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -485,5 +486,560 @@ func TestAddModelMessagesAndScaleAxes(t *testing.T) {
 	wantCode(t, err, CodeInvalidInput)
 	if _, err := e.st.AddModel(info.ID, AddModelRequest{Path: writeSTL(t, "c", 10, 10, 10), Scale: [3]float64{2, 2, 2}}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// D1: the slicer crashes on a height range without layer_height (verified with
+// 7.2.2 and 7.3): every range written by the tools carries one.
+func TestHeightRangesAlwaysCarryLayerHeight(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "D1")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	res, err := e.st.SetHeightRanges(info.ID, "cube", []RangeSpec{
+		{From: 4, To: 8, Settings: map[string]any{"wall_loops": 4}},
+		{From: 10, To: 14, Settings: map[string]any{"layer_height": 0.1, "wall_loops": 3}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hr := res.Objects[0].HeightRanges
+	if hr[0].Settings["layer_height"] != "0.2" || hr[1].Settings["layer_height"] != "0.1" {
+		t.Fatalf("ranges %+v", hr)
+	}
+	saved := openSaved(t, e, info.ID).Objects[0].LayerRanges
+	if saved[0].Options.Value("layer_height") != "0.2" || saved[0].Options.Value("wall_loops") != "4" {
+		t.Fatalf("saved %+v", saved)
+	}
+	// An object with its own layer height gives its value to the ranges.
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: ScopeObject, Target: "cube", Values: map[string]any{"layer_height": 0.12}}); err != nil {
+		t.Fatal(err)
+	}
+	res, _ = e.st.SetHeightRanges(info.ID, "cube", []RangeSpec{{From: 4, To: 8, Settings: map[string]any{"wall_loops": 4}}})
+	if got := res.Objects[0].HeightRanges[0].Settings["layer_height"]; got != "0.12" {
+		t.Fatalf("object layer height not used: %q", got)
+	}
+	// layer_height cannot be removed from a range.
+	_, err = e.st.UpdateSettings(info.ID, SettingsRequest{Scope: ScopeLayerRange, Target: "cube/1", Values: map[string]any{"layer_height": nil}})
+	wantCode(t, err, CodeInvalidInput)
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: ScopeLayerRange, Target: "cube/1", Values: map[string]any{"layer_height": 0.16}}); err != nil {
+		t.Fatal(err)
+	}
+	// A range from another tool without it is warned about.
+	if err := e.st.write(info.ID, func(h *handle) error {
+		lr := threemf.LayerRange{MinZ: 1, MaxZ: 2}
+		lr.Options.Set("wall_loops", "5")
+		h.touchAll()
+		return h.p.SetLayerRanges(h.p.Objects[0].ID, []threemf.LayerRange{lr})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := e.st.GetProject(info.ID)
+	if !hasWarning(got, "range_no_layer_height") {
+		t.Fatalf("warnings %+v", got.Warnings)
+	}
+}
+
+// D2: printing by object keeps the printer's extruder clearance (radius 64 mm on
+// the K2): placement and arrange space the objects, the warning and the -63
+// hint state the needed distance and never send 7.2 with several filaments to
+// print by layer.
+func TestByObjectClearance(t *testing.T) {
+	e := newEnv(t)
+	e.st.cfg.Install.Dialect = "v72"
+	// The K2 values; the synthetic printer preset has none of them.
+	info := e.newProject(t, "Seq")
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Values: map[string]any{"print_sequence": "by object", "extruder_clearance_radius": 64, "extruder_clearance_height_to_lid": 118, "extruder_clearance_height_to_rod": 24}, AllowLocked: true}); err != nil {
+		t.Fatal(err)
+	}
+	// Automatic placement keeps the clearance: at least 2 * (32 - 0.1) mm between the objects.
+	res, err := e.st.AddModel(info.ID, AddModelRequest{Path: writeSTL(t, "tall", 20, 20, 30), Copies: 3, Filament: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range res.Added {
+		for j := i + 1; j < len(res.Added); j++ {
+			a, b := res.Added[i], res.Added[j]
+			ra := rect{a.Position[0] - 10, a.Position[1] - 10, a.Position[0] + 10, a.Position[1] + 10}
+			rb := rect{b.Position[0] - 10, b.Position[1] - 10, b.Position[0] + 10, b.Position[1] + 10}
+			if d := rectDistance(ra, rb); d < 63.8 {
+				t.Fatalf("%s and %s only %.1f mm apart", a.Name, b.Name, d)
+			}
+		}
+	}
+	if hasWarning(res.Info, "sequence_clearance") {
+		t.Fatalf("placed objects warn: %+v", res.Info.Warnings)
+	}
+	// Move one object close to another: the warning names the distance needed.
+	up, err := e.st.UpdateObject(info.ID, UpdateObjectRequest{Object: "tall_2", X: ptr(res.Added[0].Position[0] + 30), Y: ptr(res.Added[0].Position[1])})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg string
+	for _, w := range up.Info.Warnings {
+		if w.Code == "sequence_clearance" {
+			msg = w.Message
+		}
+	}
+	if !strings.Contains(msg, "-63") || !strings.Contains(msg, "needs 64 mm") || !strings.Contains(msg, "arrange") {
+		t.Fatalf("warning %q", msg)
+	}
+	// The failure hint: distance, objects, arrange; no by-layer advice on 7.2 with two filaments.
+	if _, err := e.st.UpdateObject(info.ID, UpdateObjectRequest{Object: "tall_3", Filament: ptr(2)}); err != nil {
+		t.Fatal(err)
+	}
+	e.exec.fn = func(spec slicer.ExecSpec) (slicer.ExecResult, error) { return slicer.ExecResult{ExitCode: -63}, nil }
+	_, err = e.st.Slice(info.ID, SliceOptions{})
+	ae := wantCode(t, err, CodeSlicerError)
+	if !strings.Contains(ae.Hint, "64 mm") || !strings.Contains(ae.Hint, "arrange true") || strings.Contains(ae.Hint, "by layer") {
+		t.Fatalf("hint %q", ae.Hint)
+	}
+	// Arrange packs the plate again with the clearance.
+	if _, err := e.st.AutoPlace(info.ID, 1, false, true); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := e.st.GetProject(info.ID)
+	if hasWarning(got, "sequence_clearance") {
+		t.Fatalf("after arrange: %+v", got.Warnings)
+	}
+	// With one filament, or on 7.3, by layer is offered.
+	e.st.cfg.Install.Dialect = "v73"
+	e.exec.fn = func(spec slicer.ExecSpec) (slicer.ExecResult, error) { return slicer.ExecResult{ExitCode: -63}, nil }
+	_, err = e.st.Slice(info.ID, SliceOptions{})
+	if ae := wantCode(t, err, CodeSlicerError); !strings.Contains(ae.Hint, "by layer") {
+		t.Fatalf("7.3 hint %q", ae.Hint)
+	}
+}
+
+// D2: a tall object printed before others in reach of the rod is too tall.
+func TestByObjectTooTall(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Tall")
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Values: map[string]any{"print_sequence": "by object", "extruder_clearance_radius": 40, "extruder_clearance_height_to_lid": 100, "extruder_clearance_height_to_rod": 24}, AllowLocked: true}); err != nil {
+		t.Fatal(err)
+	}
+	a, b := 60.0, 130.0
+	y := 100.0
+	if _, err := e.st.AddModel(info.ID, AddModelRequest{Path: writeSTL(t, "t", 20, 60, 50), X: &a, Y: &y, Name: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.st.AddModel(info.ID, AddModelRequest{Path: writeSTL(t, "s", 20, 60, 10), X: &b, Y: &y, Name: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg string
+	for _, w := range res.Info.Warnings {
+		if w.Code == "sequence_clearance" {
+			msg = w.Message
+		}
+	}
+	if !strings.Contains(msg, `"first" is 50 mm tall but only 24 mm is allowed`) {
+		t.Fatalf("warning %q", msg)
+	}
+}
+
+// D3: 7.2 with two or more filaments on a plate printed by layer is warned about.
+func TestV72ByLayerCrashWarning(t *testing.T) {
+	e := newEnv(t)
+	e.st.cfg.Install.Dialect = "v72"
+	info := e.newProject(t, "Warn72")
+	if !hasWarning(info, "v72_by_layer_crash") {
+		t.Fatalf("create_project: %+v", info.Warnings)
+	}
+	e.addBox(t, info.ID, "a", 20, 20, 10)
+	got, _ := e.st.GetProject(info.ID)
+	if hasWarning(got, "v72_by_layer_crash") {
+		t.Fatalf("one filament used: %+v", got.Warnings)
+	}
+	if _, err := e.st.AddModel(info.ID, AddModelRequest{Path: writeSTL(t, "b", 20, 20, 10), Filament: 2}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = e.st.GetProject(info.ID)
+	if !hasWarning(got, "v72_by_layer_crash") {
+		t.Fatalf("two filaments: %+v", got.Warnings)
+	}
+	up, err := e.st.UpdateSettings(info.ID, SettingsRequest{Values: map[string]any{"print_sequence": "by object"}})
+	if err != nil || hasWarning(up.Info, "v72_by_layer_crash") {
+		t.Fatalf("by object: %v %+v", err, up.Info.Warnings)
+	}
+	e.st.cfg.Install.Dialect = "v73"
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Values: map[string]any{"print_sequence": "by layer"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = e.st.GetProject(info.ID); hasWarning(got, "v72_by_layer_crash") {
+		t.Fatal("7.3 must not warn")
+	}
+}
+
+// The first object of a plate goes to the middle of the bed.
+func TestFirstObjectAtTheBedCentre(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Centre")
+	res := e.addBox(t, info.ID, "one", 40, 20, 10)
+	p := res.Added[0].Position
+	if math.Abs(p[0]-130) > 1e-3 || math.Abs(p[1]-130) > 1e-3 {
+		t.Fatalf("first object at %v, want the bed centre 130, 130", p)
+	}
+	res2 := e.addBox(t, info.ID, "two", 40, 20, 10)
+	q := res2.Added[0].Position
+	a := rect{p[0] - 20, p[1] - 10, p[0] + 20, p[1] + 10}
+	b := rect{q[0] - 20, q[1] - 10, q[0] + 20, q[1] + 10}
+	if a.overlaps(b.inflate(PlacementGap - 1e-6)) {
+		t.Fatalf("second object %v too close to the first %v", q, p)
+	}
+}
+
+// D5: each exclusion label belongs to one object, also when names repeat.
+func TestObjectLabelsPerObject(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Labels")
+	for i := 0; i < 3; i++ {
+		x, y := 60.0+70*float64(i), 100.0
+		if _, err := e.st.AddModel(info.ID, AddModelRequest{Path: writeSTL(t, "b", 20, 20, 10), Name: "Body", X: &x, Y: &y}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.exec.gcode = func(int) string {
+		return gcodeFor(
+			"EXCLUDE_OBJECT_DEFINE NAME=Body_id_0_copy_0 CENTER=60,100 POLYGON=[[50,90]]",
+			"EXCLUDE_OBJECT_DEFINE NAME=Body_id_1_copy_0 CENTER=130,100 POLYGON=[[120,90]]",
+			"EXCLUDE_OBJECT_DEFINE NAME=Body_id_2_copy_0 CENTER=200,100 POLYGON=[[190,90]]")
+	}
+	out, err := e.st.Slice(info.ID, SliceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := e.st.GetProject(info.ID)
+	labels := out.Last.Plates[0].ObjectLabels
+	if len(labels) != 3 {
+		t.Fatalf("labels %+v", labels)
+	}
+	for i, l := range labels {
+		if l.ObjectID != got.Objects[i].ID || l.Label != "Body_id_"+strconv.Itoa(i)+"_copy_0" {
+			t.Fatalf("label %d: %+v (object %d)", i, l, got.Objects[i].ID)
+		}
+	}
+}
+
+// D12 and the failed slice log: the elapsed time is recorded, a failure carries
+// the path of the slicer's log and its last meaningful lines.
+func TestElapsedAndFailureLog(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Logs")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	out, err := e.st.Slice(info.ID, SliceOptions{})
+	if err != nil || out.Last.ElapsedS < 0 {
+		t.Fatalf("%+v %v", out, err)
+	}
+	e.exec.fn = func(spec slicer.ExecSpec) (slicer.ExecResult, error) {
+		// The slicer writes its own log (--logfile).
+		var logPath string
+		for i, a := range spec.Args {
+			if a == "--logfile" {
+				logPath = spec.Args[i+1]
+			}
+		}
+		var b strings.Builder
+		for i := 0; i < 40; i++ {
+			b.WriteString("[2026-09-29 10:00:00.000001] [0x00000001] [trace]   noise " + strconv.Itoa(i) + "\n")
+			b.WriteString("[2026-09-29 10:00:00.000002] [0x00000001] [info]    step " + strconv.Itoa(i) + "\n")
+		}
+		b.WriteString("[2026-09-29 10:00:01.000000] [0x00000001] [error]   Object collides with the bed\n")
+		os.WriteFile(logPath, []byte(b.String()), 0o644)
+		return slicer.ExecResult{ExitCode: -100}, nil
+	}
+	_, err = e.st.Slice(info.ID, SliceOptions{})
+	ae := wantCode(t, err, CodeSlicerError)
+	tail, _ := ae.Fields["log_tail"].([]string)
+	if len(tail) != 15 || tail[14] != "error: Object collides with the bed" || strings.Contains(strings.Join(tail, "|"), "noise") || tail[13] != "info: step 39" {
+		t.Fatalf("tail %q", tail)
+	}
+	if p, _ := ae.Fields["log_file"].(string); !strings.HasSuffix(p, "slice.log") {
+		t.Fatalf("log file %v", ae.Fields["log_file"])
+	}
+}
+
+// Layer actions of the slice reply: found in the G-code, by z.
+func TestSliceReportsLayerActionsFound(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Found")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	if _, err := e.st.SetLayerActions(info.ID, 1, []LayerAction{
+		{Layer: 3, Kind: ActionPause}, {Layer: 5, Kind: ActionCustom, GCode: "M117 hello\nM117 again"}, {Layer: 7, Kind: ActionToolChange, Filament: 2}, {Layer: 9, Kind: ActionColorChange, Colour: "#FF0000"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e.exec.gcode = func(int) string {
+		var b strings.Builder
+		b.WriteString(strings.Split(defaultGCode, "T0\n")[0])
+		b.WriteString("T0\n")
+		for layer, z := range []string{"0.2", "0.4", "0.6", "0.8", "1", "1.2", "1.4", "1.6"} {
+			b.WriteString(";LAYER_CHANGE\n;:" + z + "\n;HEIGHT:0.2\n")
+			switch layer {
+			case 2:
+				b.WriteString(";PAUSE_PRINT\nPAUSE\n")
+			case 4:
+				b.WriteString("M117 hello\nM117 again\n")
+			case 6:
+				b.WriteString("T1\n")
+			}
+		}
+		b.WriteString("; EXECUTABLE_BLOCK_END\n; filament used [g] = 1.00\n; estimated printing time (normal mode) = 1m 5s\n")
+		return b.String()
+	}
+	out, err := e.st.Slice(info.ID, SliceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acts := out.Last.Plates[0].Actions
+	if len(acts) != 4 {
+		t.Fatalf("actions %+v", acts)
+	}
+	found := map[string]bool{}
+	for _, a := range acts {
+		found[a.Kind] = a.Found
+	}
+	if !found[ActionPause] || !found[ActionCustom] || !found[ActionToolChange] || found[ActionColorChange] {
+		t.Fatalf("found %+v", acts)
+	}
+	for _, a := range acts {
+		if a.Kind == ActionPause && math.Abs(a.AtZ-0.6) > 1e-9 {
+			t.Fatalf("pause at %v", a.AtZ)
+		}
+	}
+}
+
+// D6: a job that ended in a failed slice is failed in the list.
+func TestJobListStates(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Jobs")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	ok, err := e.st.Slice(info.ID, SliceOptions{Background: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-e.st.cfg.Jobs.Get(ok.JobID).Done()
+	e.exec.fn = func(spec slicer.ExecSpec) (slicer.ExecResult, error) { return slicer.ExecResult{ExitCode: -63}, nil }
+	bad, err := e.st.Slice(info.ID, SliceOptions{Background: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-e.st.cfg.Jobs.Get(bad.JobID).Done()
+	states := map[string]JobInfo{}
+	for _, j := range e.st.ListJobs() {
+		states[j.ID] = j
+	}
+	if states[ok.JobID].State != slicer.StateFinished || states[bad.JobID].State != "failed" || states[bad.JobID].ExitName != "OBJECT_COLLISION_IN_SEQ_PRINT" {
+		t.Fatalf("%+v", states)
+	}
+}
+
+// D4: the report has the same filament change count as the slice.
+func TestReportUsesTheSliceChangeCount(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Changes")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	out, err := e.st.Slice(info.ID, SliceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := e.st.Report(info.ID, 1)
+	if err != nil || rep.Summary.TotalFilamentChange != out.Last.Plates[0].Changes || rep.Summary.TotalFilamentChange != 1 {
+		t.Fatalf("report %d, slice %d: %v", rep.Summary.TotalFilamentChange, out.Last.Plates[0].Changes, err)
+	}
+}
+
+// D10: differences from the process preset say where they come from.
+func TestExplainSettings(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Explain")
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Values: map[string]any{"wall_loops": 5}}); err != nil {
+		t.Fatal(err)
+	}
+	diffs, err := e.st.ExplainSettings(info.ID, map[string]string{"wall_loops": "5", "layer_height": "0.3", "initial_layer_print_height": "0.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]SettingDiff{}
+	for _, d := range diffs {
+		by[d.Key] = d
+	}
+	if d := by["wall_loops"]; d.Origin != "project" || d.Preset != "3" || d.Used != "5" || d.Why == "" {
+		t.Fatalf("wall_loops %+v", d)
+	}
+	if d := by["layer_height"]; d.Origin != "other" || d.Why == "" {
+		t.Fatalf("layer_height %+v", d)
+	}
+	if _, ok := by["initial_layer_print_height"]; ok {
+		t.Fatal("an equal setting is listed")
+	}
+}
+
+func TestRemovePart(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Parts")
+	e.addBox(t, info.ID, "box", 40, 40, 40)
+	mod, err := e.st.AddModifier(info.ID, ModifierRequest{Object: "box", Subtype: "negative", Shape: ShapeBox, Size: [3]float64{5, 5, 5}, Name: "hole"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mod.Info.Objects[0].Parts) != 2 {
+		t.Fatalf("parts %+v", mod.Info.Objects[0].Parts)
+	}
+	rev := mod.Info.Revision
+	res, err := e.st.RemovePart(info.ID, "box", "hole")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Info.Objects[0].Parts) != 1 || res.Removed != "hole" || res.Part.Subtype != threemf.SubtypeNegative || res.Info.Revision != rev+1 {
+		t.Fatalf("%+v", res)
+	}
+	// By id, and the model part cannot go.
+	mod2, _ := e.st.AddModifier(info.ID, ModifierRequest{Object: "box", Subtype: "support_blocker", Shape: ShapeSphere, Size: [3]float64{6, 0, 0}})
+	if _, err := e.st.RemovePart(info.ID, "box", strconv.Itoa(mod2.PartID)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.st.RemovePart(info.ID, "box", "box")
+	ae := wantCode(t, err, CodeInvalidInput)
+	if !strings.Contains(ae.Hint, "remove_object") {
+		t.Fatalf("hint %q", ae.Hint)
+	}
+	_, err = e.st.RemovePart(info.ID, "box", "ghost")
+	wantCode(t, err, CodeNotFound)
+	_, err = e.st.RemovePart(info.ID, "nobody", "hole")
+	wantCode(t, err, CodeNotFound)
+	// The saved file has one part again and still slices.
+	if got := len(openSaved(t, e, info.ID).Objects[0].Parts); got != 1 {
+		t.Fatalf("saved parts %d", got)
+	}
+}
+
+// B1: labels use the slicer's own name sanitising (sanitize_instance_name).
+func TestSanitizeInstanceName(t *testing.T) {
+	for in, want := range map[string]string{
+		"my part":          "my_part",
+		"  my  part  ":     "my_part",
+		"a!b@c#d$e%f^g&h":  "a_b_c_d_e_f_g_h",
+		"a(b)c=d+e[f]g{h}": "a_b_c_d_e_f_g_h",
+		`a;b:c"d,e'f`:      "a_b_c_d_e_f",
+		"under_score-dot.": "under_score-dot.",
+		"__x__":            "_x_", // only one underscore goes from each end
+		"":                 "",
+		"Body18.2.stl":     "Body18.2.stl",
+	} {
+		if got := SanitizeInstanceName(in); got != want {
+			t.Errorf("SanitizeInstanceName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestObjectLabelsOfSanitisedNames(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Sane")
+	names := []string{"my part", "a:b,c", "plain"}
+	for i, n := range names {
+		x, y := 60.0+70*float64(i), 100.0
+		if _, err := e.st.AddModel(info.ID, AddModelRequest{Path: writeSTL(t, "b", 20, 20, 10), Name: n, X: &x, Y: &y}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.exec.gcode = func(int) string {
+		return gcodeFor(
+			"EXCLUDE_OBJECT_DEFINE NAME=my_part_id_0_copy_0 CENTER=60,100 POLYGON=[[50,90]]",
+			"EXCLUDE_OBJECT_DEFINE NAME=a_b_c_id_1_copy_0 CENTER=130,100 POLYGON=[[120,90]]",
+			"EXCLUDE_OBJECT_DEFINE NAME=plain_id_2_copy_0 CENTER=200,100 POLYGON=[[190,90]]")
+	}
+	out, err := e.st.Slice(info.ID, SliceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := out.Last.Plates[0].ObjectLabels
+	if len(labels) != 3 || labels[0].Label != "my_part_id_0_copy_0" || labels[1].Label != "a_b_c_id_1_copy_0" {
+		t.Fatalf("labels %+v", labels)
+	}
+}
+
+func seqProject(t *testing.T, e *testEnv, name string, extra map[string]any) string {
+	t.Helper()
+	info := e.newProject(t, name)
+	vals := map[string]any{"print_sequence": "by object", "extruder_clearance_radius": 64, "extruder_clearance_height_to_lid": 118, "extruder_clearance_height_to_rod": 24, "nozzle_height": 30}
+	for k, v := range extra {
+		vals[k] = v
+	}
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Values: vals, AllowLocked: true}); err != nil {
+		t.Fatal(err)
+	}
+	return info.ID
+}
+
+// N1: a skirt only widens the clearance when one is printed around every object.
+func TestSeqSkirtOnlyForPerObject(t *testing.T) {
+	e := newEnv(t)
+	measure := func(extra map[string]any) float64 {
+		id := seqProject(t, e, "Skirt", extra)
+		var d float64
+		e.st.read(id, func(h *handle) error { d = h.seqHalf([]seqBox{{z: 50}}); return nil })
+		return d
+	}
+	base := measure(nil)
+	if math.Abs(base-31.9) > 1e-9 {
+		t.Fatalf("no skirt: %v", base)
+	}
+	if got := measure(map[string]any{"skirt_type": "combined", "skirt_loops": 3, "skirt_distance": 5}); got != base {
+		t.Fatalf("a combined skirt changed the clearance: %v", got)
+	}
+	if got := measure(map[string]any{"skirt_type": "perobject", "skirt_loops": 0, "skirt_distance": 5}); got != base {
+		t.Fatalf("no loops: %v", got)
+	}
+	// Short objects: max(2, skirt) - 0.1 with the skirt, 1.9 without.
+	e.st.read(seqProject(t, e, "Short", nil), func(h *handle) error {
+		if got := h.seqHalf([]seqBox{{z: 10}}); math.Abs(got-1.9) > 1e-9 {
+			t.Errorf("short, no skirt: %v", got)
+		}
+		return nil
+	})
+	id := seqProject(t, e, "ShortSkirt", map[string]any{"skirt_type": "perobject", "skirt_loops": 2, "skirt_distance": 3})
+	e.st.read(id, func(h *handle) error {
+		if got := h.seqHalf([]seqBox{{z: 10}}); got <= 1.9+1 {
+			t.Errorf("short with a per object skirt: %v", got)
+		}
+		return nil
+	})
+}
+
+// N3: a tall object added next to short ones gets the tall clearance.
+func TestPlacementUsesTheNewObjectsHeight(t *testing.T) {
+	e := newEnv(t)
+	id := seqProject(t, e, "Mixed", nil)
+	for i := 0; i < 2; i++ {
+		if _, err := e.st.AddModel(id, AddModelRequest{Path: writeSTL(t, "s", 20, 20, 10), Name: "short" + strconv.Itoa(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := e.st.AddModel(id, AddModelRequest{Path: writeSTL(t, "t", 20, 20, 50), Name: "tall"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasWarning(res.Info, "sequence_clearance") {
+		t.Fatalf("the new object was placed too close: %+v", res.Info.Warnings)
+	}
+}
+
+// N2: an object in the exclusion area of the bed is reported.
+func TestByObjectExclusionArea(t *testing.T) {
+	e := newEnv(t)
+	id := seqProject(t, e, "Excl", map[string]any{"bed_exclude_area": []any{"100x100", "140x100", "140x140", "100x140"}})
+	x, y := 120.0, 120.0
+	res, err := e.st.AddModel(id, AddModelRequest{Path: writeSTL(t, "c", 20, 20, 10), X: &x, Y: &y})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg string
+	for _, w := range res.Info.Warnings {
+		if w.Code == "sequence_clearance" {
+			msg = w.Message
+		}
+	}
+	if !strings.Contains(msg, "exclusion area") {
+		t.Fatalf("warnings %+v", res.Info.Warnings)
 	}
 }

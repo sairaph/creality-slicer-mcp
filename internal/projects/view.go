@@ -20,8 +20,11 @@ type ViewRequest struct {
 	// blocker volumes; ShowLabels each object's id and name; ShowRanges the
 	// height ranges as bands.
 	ShowParts, ShowLabels, ShowRanges bool
-	// Width and Height are pixels; both zero means a longest edge of 1024, one
-	// given keeps the aspect. At most render.MaxSize.
+	// Highlight lists objects (ids or names) drawn with a bright outline: the
+	// ones a change touched.
+	Highlight []string
+	// Width and Height are pixels; both zero means a 4:3 frame with a longest
+	// edge of 1024, one given keeps the 4:3 shape. At most render.MaxSize.
 	Width, Height int
 	// LongEdge is the longest edge when Width and Height are zero (default 1024).
 	LongEdge int
@@ -40,6 +43,8 @@ type ViewResult struct {
 	Focus []string
 	// Legend lists what the colours and marks of the picture mean.
 	Legend []string
+	// SkippedLabels are the labels left out so that none covers another.
+	SkippedLabels []string
 }
 
 // viewLabel is the text drawn at the top of an object: its id and a short name.
@@ -98,6 +103,10 @@ func (s *Store) View(ref string, req ViewRequest) (*ViewResult, error) {
 		if err != nil {
 			return err
 		}
+		highlight, err := resolve(req.Highlight)
+		if err != nil {
+			return err
+		}
 		keep := func(id int) bool {
 			if hide[id] {
 				return false
@@ -111,6 +120,9 @@ func (s *Store) View(ref string, req ViewRequest) (*ViewResult, error) {
 		opts := render.ViewOptions{View: name, ShowParts: req.ShowParts, ShowLabels: req.ShowLabels, ShowRanges: req.ShowRanges, Width: req.Width, Height: req.Height, LongEdge: req.LongEdge}
 		seen := map[string]bool{}
 		for i, id := range ids {
+			if highlight[id] {
+				opts.Highlight = append(opts.Highlight, i)
+			}
 			if focus[id] {
 				opts.Focus = append(opts.Focus, i)
 				if n := h.p.Object(id).Name; !seen[n] {
@@ -130,7 +142,11 @@ func (s *Store) View(ref string, req ViewRequest) (*ViewResult, error) {
 			return errf(CodeInternal, "", "drawing the view failed: %v", err)
 		}
 		res.PNG, res.Objects, res.Parts, res.Ranges, res.Width, res.Height = png, st.Objects, st.Parts, st.Ranges, st.Width, st.Height
+		res.SkippedLabels = st.SkippedLabels
 		res.Legend = viewLegend(req, sc)
+		if req.ShowRanges {
+			res.Legend = append(res.Legend, h.rangeLegend(ids)...)
+		}
 		return nil
 	})
 	if err != nil {
@@ -149,11 +165,40 @@ func viewLegend(req ViewRequest, sc *render.Scene) []string {
 	if req.ShowParts {
 		leg = append(leg, "yellow: modifier, red: negative part, green: support enforcer, blue-grey: support blocker (solid outline, faint where the model hides them)")
 	}
-	if req.ShowRanges {
-		leg = append(leg, "orange, teal, violet bands: height ranges")
-	}
 	if req.ShowLabels {
 		leg = append(leg, "labels: object id and short name at each object's top")
 	}
 	return leg
+}
+
+// rangeColourNames are the names of the band colours of render, in order.
+var rangeColourNames = []string{"orange", "teal", "violet"}
+
+// rangeLegend ties each band colour to its object, its heights and its
+// settings.
+func (h *handle) rangeLegend(ids []int) []string {
+	var out []string
+	seen := map[int]bool{}
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		o := h.p.Object(id)
+		if o == nil {
+			continue
+		}
+		for k, lr := range o.LayerRanges {
+			var opts []string
+			for _, kv := range lr.Options {
+				opts = append(opts, kv.Key+" "+kv.Value)
+			}
+			out = append(out, fmt.Sprintf("%s band: %s from z %s to %s mm (%s)", rangeColourNames[k%len(rangeColourNames)], o.Name, trimNum(lr.MinZ), trimNum(lr.MaxZ), strings.Join(opts, ", ")))
+		}
+	}
+	return out
+}
+
+func trimNum(f float64) string {
+	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", f), "0"), ".")
 }

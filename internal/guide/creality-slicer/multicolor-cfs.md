@@ -55,6 +55,7 @@ slice_project returns a `handoff` block: `gcode_path`, `upload_name`, `tools` (e
 
 ## Things that go wrong
 
+- Two or more filaments on one plate printed by layer crash the 7.2 slicer (7.3 slices them). Watch for the warning from create_project, set_presets and get_project; on 7.2 print one filament per plate, or upgrade to 7.3, or print by object with enough clearance (see multi-plate).
 - Colours swap at print time: the mapping on the printer differs from what you intended. Check the mapping on the screen or re-run get_filaments.
 - "No slot for this filament": type mismatch. Fix the preset type or load the right spool.
 - Only one colour prints: the printer was fed from the external spool holder instead of the CFS, which treats multi-colour files as single colour.

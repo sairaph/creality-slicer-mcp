@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -255,6 +256,9 @@ func (s *Server) describeSetting(ctx context.Context, _ *mcp.CallToolRequest, in
 		Key: o.Key, Label: o.Title(), Type: o.ValueType, Vector: o.IsVector, Unit: unitOf(o), Default: showDefault(o.Default),
 		Min: o.Min, Max: o.Max, Level: levelName(o.UILevel), Area: areaOf(o), Scopes: settingScopes(o), Locked: o.VendorLock,
 	}
+	if noUpperLimit[o.Key] {
+		front.Max = nil // the catalog's stop is a UI sentinel, see noUpperLimit
+	}
 	if o.Enum != nil {
 		for i, v := range o.Enum.Values {
 			label := ""
@@ -330,7 +334,7 @@ func (s *Server) describeSetting(ctx context.Context, _ *mcp.CallToolRequest, in
 			b.WriteString("- " + shortDependency(l) + "\n")
 		}
 	} else {
-		b.WriteString("None: this setting is always shown and always editable.\n")
+		b.WriteString("No other setting controls when this one is shown or enabled.\n")
 	}
 	if front.Locked != "" {
 		b.WriteString("\n" + lockedText(front.Locked) + "\n")
@@ -409,7 +413,14 @@ func changeText(o *catalog.Option) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Call update_settings at %s:\n\n```json\n{\"project\": \"<project>\", \"values\": {%q: %s}}\n```\n", scope, o.Key, sample)
 	if o.IsVector {
-		b.WriteString("\nThis is a per-filament setting: a list gives one value per filament slot (its length must equal the number of project filaments), and a single value applies to every slot.\n")
+		if o.Owner == "filament" {
+			b.WriteString("\nThis is a per-filament setting: a list gives one value per filament slot (its length must equal the number of project filaments), and a single value applies to every slot.\n")
+		} else {
+			fmt.Fprintf(&b, "\nThis %s setting holds a list (one entry for each mode, extruder or axis the app defines): give the whole list, for example the default shown above, with the entries in the same order.\n", ownerWord(o))
+		}
+	}
+	if noUpperLimit[o.Key] {
+		b.WriteString("\nThe app has no upper limit for this setting (the catalog stops at a round number only because the entry field needs one): keep to values that make sense.\n")
 	}
 	if len(o.Scopes) > 0 {
 		fmt.Fprintf(&b, "\nOther scopes for this key: %s.\n", strings.Join(o.Scopes, ", "))
@@ -421,9 +432,25 @@ func changeText(o *catalog.Option) string {
 func sampleValue(o *catalog.Option) string {
 	one := jsonLiteral(o, false)
 	if o.IsVector {
+		// A list that is not per filament is the whole default list.
+		if o.Owner != "filament" {
+			if list, ok := o.Default.([]any); ok && len(list) > 0 {
+				if data, err := json.Marshal(list); err == nil {
+					return string(data)
+				}
+			}
+		}
 		return "[" + one + "]"
 	}
 	return one
+}
+
+// ownerWord names what the setting belongs to: printer, process, project.
+func ownerWord(o *catalog.Option) string {
+	if o.Owner == "" {
+		return "preset"
+	}
+	return o.Owner
 }
 
 func jsonLiteral(o *catalog.Option, _ bool) string {
@@ -555,4 +582,11 @@ func shortDependency(line string) string {
 		cut = len(head)
 	}
 	return strings.TrimSpace(line[:cut]) + " ... and more conditions"
+}
+
+// noUpperLimit lists count settings whose maximum in the catalog is the entry
+// field's stop and not a limit of the app: they are shown without a maximum.
+var noUpperLimit = map[string]bool{
+	"wall_loops": true, "close_fan_the_first_x_layers": true, "full_fan_speed_layer": true,
+	"enforce_support_layers": true, "skirt_height": true,
 }

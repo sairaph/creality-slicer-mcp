@@ -190,7 +190,9 @@ func TestPartsAreDrawnWhereTheModifierIs(t *testing.T) {
 	}
 	// The part sticks out of the top of the cube: yellow fill over the
 	// background above the cube's top edge.
-	yellowish := func(c color.NRGBA) bool { return int(c.R) > 230 && int(c.G) > 200 && int(c.B) < 200 && int(c.B) > 60 }
+	yellowish := func(c color.NRGBA) bool {
+		return int(c.R) > 165 && int(c.G) > 130 && int(c.B) < 110 && int(c.R) > int(c.B)+90
+	}
 	if n, box := countWhere(on, yellowish); n < 200 {
 		t.Errorf("only %d yellow fill pixels", n)
 	} else if _, cube := countWhere(on, purplish); box.Min.Y >= cube.Min.Y {

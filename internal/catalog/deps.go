@@ -117,9 +117,29 @@ func (c *Catalog) restrictionSentence(o *Option, r Restriction) string {
 			vals[i] = fmt.Sprintf("%s (%s)", v, l)
 		}
 	}
+	all := o.enumValues()
+	if len(r.Values) >= len(all) {
+		return "" // every value is offered: nothing is restricted
+	}
+	allowed := map[string]bool{}
+	for _, v := range r.Values {
+		allowed[v] = true
+	}
+	var except []string
+	for _, v := range all {
+		if !allowed[v] {
+			if l := o.Enum.Label(v); l != "" && l != v {
+				v = fmt.Sprintf("%s (%s)", v, l)
+			}
+			except = append(except, v)
+		}
+	}
+	if len(vals) > 12 && len(except) <= 8 {
+		return fmt.Sprintf("While %s, the GUI offers every value except: %s.", r.When, strings.Join(except, ", "))
+	}
 	list := strings.Join(vals, ", ")
 	if len(vals) > 12 {
-		list = fmt.Sprintf("%d of the %d values", len(vals), len(o.enumValues()))
+		list = fmt.Sprintf("%d of the %d values", len(vals), len(all))
 	}
 	return fmt.Sprintf("While %s, the GUI offers only: %s.", r.When, list)
 }

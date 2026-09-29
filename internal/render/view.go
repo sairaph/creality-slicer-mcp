@@ -141,6 +141,7 @@ type shade int
 const (
 	shadeLit  shade = iota // directional light plus ambient
 	shadeFlat              // the flat colour, no shading
+	shadeView              // like shadeLit with a floor, so black stays visible
 )
 
 // drawObjects rasterises the objects into c.
@@ -167,8 +168,11 @@ func (c *canvas) drawObjects(cam camera, f fit, ps []placed, mode shade, colour 
 		for _, t := range p.obj.Mesh.Triangles {
 			a, b, d := t[0], t[1], t[2]
 			col := [4]uint8{base.R, base.G, base.B, 255}
-			if mode == shadeLit {
+			switch mode {
+			case shadeLit:
 				col = litColour(base, p.world[a], p.world[b], p.world[d], light)
+			case shadeView:
+				col = viewColour(base, p.world[a], p.world[b], p.world[d], light)
 			}
 			c.tri(sx[a], sy[a], sz[a], sx[b], sy[b], sz[b], sx[d], sy[d], sz[d], col, true)
 		}
@@ -196,6 +200,24 @@ func shadeByte(v uint8, k float64) uint8 {
 		return 255
 	}
 	return uint8(x + 0.5)
+}
+
+// viewColour shades base like litColour, with a higher lowest light and a lift
+// of the darks: a black filament keeps a visible shape and a white one never
+// blends into a mid grey background.
+func viewColour(base color.NRGBA, a, b, d [3]float32, light [3]float64) [4]uint8 {
+	e1 := [3]float64{float64(b[0] - a[0]), float64(b[1] - a[1]), float64(b[2] - a[2])}
+	e2 := [3]float64{float64(d[0] - a[0]), float64(d[1] - a[1]), float64(d[2] - a[2])}
+	n := cross(e1, e2)
+	l := math.Sqrt(dot(n, n))
+	k := 0.5
+	if l > 0 {
+		k += 0.5 * math.Abs(dot(n, light)) / l
+	}
+	lum := (float64(base.R) + float64(base.G) + float64(base.B)) / 765
+	lift := 34 * k * (1 - lum)
+	ch := func(v uint8) uint8 { return uint8(math.Min(255, float64(v)*k+lift+0.5)) }
+	return [4]uint8{ch(base.R), ch(base.G), ch(base.B), 255}
 }
 
 // meshDefault is the colour of an object without one.
@@ -230,16 +252,36 @@ func bedPoint(cam camera, f fit, x, y float64) (float32, float32) {
 
 var (
 	previewBackground = color.NRGBA{R: 246, G: 247, B: 249, A: 255}
-	bedFill           = color.NRGBA{R: 226, G: 229, B: 235, A: 255}
-	bedGrid           = color.NRGBA{R: 205, G: 209, B: 217, A: 255}
 	bedOutline        = color.NRGBA{R: 120, G: 126, B: 140, A: 255}
-	towerFill         = [4]uint8{120, 160, 220, 110}
-	towerOutline      = color.NRGBA{R: 70, G: 110, B: 190, A: 255}
+)
+
+// bedColours are the colours of the bed plane, its grid, its outline and the
+// wipe tower footprint.
+type bedColours struct {
+	fill, grid, outline color.NRGBA
+	tower               [4]uint8
+	towerOutline        color.NRGBA
+}
+
+// lightBed is the bed of Preview: light on a near white background.
+var lightBed = bedColours{
+	fill: color.NRGBA{R: 226, G: 229, B: 235, A: 255}, grid: color.NRGBA{R: 205, G: 209, B: 217, A: 255},
+	outline: bedOutline, tower: [4]uint8{120, 160, 220, 110}, towerOutline: color.NRGBA{R: 70, G: 110, B: 190, A: 255},
+}
+
+// viewBackground and viewBed are the neutral mid grey of RenderView: white and
+// black filaments both read against it.
+var (
+	viewBackground = color.NRGBA{R: 122, G: 126, B: 134, A: 255}
+	viewBed        = bedColours{
+		fill: color.NRGBA{R: 158, G: 162, B: 170, A: 255}, grid: color.NRGBA{R: 140, G: 144, B: 153, A: 255},
+		outline: color.NRGBA{R: 52, G: 56, B: 66, A: 255}, tower: [4]uint8{110, 160, 235, 130}, towerOutline: color.NRGBA{R: 40, G: 84, B: 170, A: 255},
+	}
 )
 
 // drawBed paints the bed plane with its outline, the 10 mm grid and the wipe
 // tower footprint, before the objects.
-func (c *canvas) drawBed(cam camera, f fit, s *Scene, ss int) {
+func (c *canvas) drawBed(cam camera, f fit, s *Scene, ss int, pal bedColours) {
 	bed := s.bed()
 	quad := func(r Rect, col [4]uint8) {
 		var p [4][2]float32
@@ -248,17 +290,17 @@ func (c *canvas) drawBed(cam camera, f fit, s *Scene, ss int) {
 		}
 		c.quad(p, col)
 	}
-	quad(bed, rgba(bedFill))
+	quad(bed, rgba(pal.fill))
 	gridW := float32(ss) * 0.8
 	for x := math.Ceil(bed.X0/10) * 10; x <= bed.X1; x += 10 {
 		x0, y0 := bedPoint(cam, f, x, bed.Y0)
 		x1, y1 := bedPoint(cam, f, x, bed.Y1)
-		c.line(x0, y0, x1, y1, gridW, rgba(bedGrid))
+		c.line(x0, y0, x1, y1, gridW, rgba(pal.grid))
 	}
 	for y := math.Ceil(bed.Y0/10) * 10; y <= bed.Y1; y += 10 {
 		x0, y0 := bedPoint(cam, f, bed.X0, y)
 		x1, y1 := bedPoint(cam, f, bed.X1, y)
-		c.line(x0, y0, x1, y1, gridW, rgba(bedGrid))
+		c.line(x0, y0, x1, y1, gridW, rgba(pal.grid))
 	}
 	outline := func(r Rect, col color.NRGBA, w float32) {
 		pts := [5][2]float64{{r.X0, r.Y0}, {r.X1, r.Y0}, {r.X1, r.Y1}, {r.X0, r.Y1}, {r.X0, r.Y0}}
@@ -269,10 +311,10 @@ func (c *canvas) drawBed(cam camera, f fit, s *Scene, ss int) {
 		}
 	}
 	if s.WipeTower != nil && !s.WipeTower.Empty() {
-		quad(*s.WipeTower, towerFill)
-		outline(*s.WipeTower, towerOutline, float32(ss)*1.4)
+		quad(*s.WipeTower, pal.tower)
+		outline(*s.WipeTower, pal.towerOutline, float32(ss)*1.4)
 	}
-	outline(bed, bedOutline, float32(ss)*1.8)
+	outline(bed, pal.outline, float32(ss)*1.8)
 }
 
 // Preview draws the plate from a view as a square PNG of size pixels: the bed
@@ -303,7 +345,7 @@ func Preview(s *Scene, view View, size int) ([]byte, error) {
 	}
 	f := newFit(minX, minY, maxX, maxY, c.w, c.h, 0.04)
 
-	c.drawBed(cam, f, s, ss)
+	c.drawBed(cam, f, s, ss, lightBed)
 	c.drawObjects(cam, f, ps, shadeLit, func(o *Object) color.NRGBA {
 		col := objectColour(o)
 		if s.Outside(*o) {

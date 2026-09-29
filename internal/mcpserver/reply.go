@@ -180,12 +180,17 @@ func invalidArguments(next mcp.MethodHandler) mcp.MethodHandler {
 		if call, ok := req.(*mcp.CallToolRequest); ok && call.Params != nil && call.Params.Name != "" {
 			tool = call.Params.Name
 		}
-		return render.ErrorResult(render.Error{
+		fresh := render.ErrorResult(render.Error{
 			Code:    render.CodeInvalidInput,
 			Message: shortMessage("Invalid arguments: " + argumentProblem(res.GetError())),
 			Hint: fmt.Sprintf("Call %s again with arguments that match its input schema: every required "+
 				"argument, each of the listed type, and only listed values and argument names.", tool),
-		}), nil
+		})
+		// Change the result in place instead of returning a new one: the SDK
+		// has already marked this one complete (resultType), which a client on
+		// the current protocol requires, and a fresh result would lack it.
+		res.Content, res.StructuredContent, res.IsError = fresh.Content, fresh.StructuredContent, true
+		return res, nil
 	}
 }
 
@@ -199,27 +204,23 @@ func argumentProblem(err error) string {
 	return msg
 }
 
-// recoverPanics turns a panic in a tool handler into an internal_error result:
-// one bad call must not end the server and with it every running slice. The
-// stack goes to stderr.
-func recoverPanics(next mcp.MethodHandler) mcp.MethodHandler {
-	return func(ctx context.Context, method string, req mcp.Request) (result mcp.Result, err error) {
+// recovering wraps a tool handler so that a panic in it is an internal_error
+// result and not the end of the server, and with it of every running slice.
+// The stack goes to stderr. It is done here, in the handler, and not in a
+// middleware: only the SDK's own result carries the resultType a client on the
+// current protocol requires.
+func recovering[In any](name string, h func(context.Context, *mcp.CallToolRequest, In) (*mcp.CallToolResult, any, error)) func(context.Context, *mcp.CallToolRequest, In) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (res *mcp.CallToolResult, out any, err error) {
 		defer func() {
-			r := recover()
-			if r == nil {
-				return
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "creality-slicer-mcp: panic in %s: %v\n%s\n", name, r, debug.Stack())
+				res, out, err = render.ErrorResult(render.Error{
+					Code:    render.CodeInternal,
+					Message: "The tool failed unexpectedly.",
+					Hint:    "This is a bug: report it with the arguments you used.",
+				}), nil, nil
 			}
-			fmt.Fprintf(os.Stderr, "creality-slicer-mcp: panic in %s: %v\n%s\n", method, r, debug.Stack())
-			if method != "tools/call" {
-				err = fmt.Errorf("internal error: %v", r)
-				return
-			}
-			result, err = render.ErrorResult(render.Error{
-				Code:    render.CodeInternal,
-				Message: "The tool failed unexpectedly.",
-				Hint:    "This is a bug: report it with the arguments you used.",
-			}), nil
 		}()
-		return next(ctx, method, req)
+		return h(ctx, req, in)
 	}
 }

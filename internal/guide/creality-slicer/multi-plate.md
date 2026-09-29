@@ -22,7 +22,7 @@ Only a few keys are per plate, set with `action` `set` and `values`: `curr_bed_t
 {"project": "kit", "action": "set", "plate": 2, "values": {"print_sequence": "by object"}}
 ```
 
-`by object` prints one object completely, then the next. It needs enough head clearance between objects, and the app checks for collisions; `by layer` is the default and needs no clearance.
+`by object` prints one object completely, then the next. It needs extruder clearance between objects (the printer's `extruder_clearance_radius`, plus the height rules for the rod and lid): get_project warns when objects are closer than the distance needed and says how far apart they must be, and slice_project with `arrange` true packs the plate with that clearance. `by layer` is the default and needs no clearance, but with two or more filaments on one plate it crashes the 7.2 slicer, so on 7.2 use it only for a single filament; on 7.3 it works with any number.
 
 Pick the bed surface that the filament allows: a filament not permitted on a plate's bed type fails the slice (exit code -61).
 

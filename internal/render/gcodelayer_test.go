@@ -1,6 +1,7 @@
 package render
 
 import (
+	"image"
 	"image/color"
 	"math"
 	"path/filepath"
@@ -62,16 +63,26 @@ func TestGCodeLayerColoursByFeature(t *testing.T) {
 	}
 }
 
+// stripTop is the first row of the margin strip under the drawing.
+func stripTop(img *image.NRGBA) int {
+	y := img.Bounds().Dy()
+	for y > 0 && img.NRGBAAt(0, y-1) == stripBackground {
+		y--
+	}
+	return y
+}
+
 func TestGCodeLayerFramesTheLayerAndKeepsAspect(t *testing.T) {
 	data, _ := GCodeLayer(square("Outer wall", 0, 3000), ByFeature, 400, LayerOptions{})
 	img := decode(t, data)
+	top := stripTop(img)
+	if top < 250 || top > 385 {
+		t.Fatalf("the drawing is %d rows of 400: the strip is missing or too tall", top)
+	}
 	col := featurePalette["outer wall"]
 	minX, minY, maxX, maxY := 400, 400, -1, -1
-	for y := 0; y < 400; y++ {
+	for y := 0; y < top; y++ {
 		for x := 0; x < 400; x++ {
-			if x < 20 && y < 20 {
-				continue // the legend swatch
-			}
 			if img.NRGBAAt(x, y) == col {
 				minX, maxX, minY, maxY = min(minX, x), max(maxX, x), min(minY, y), max(maxY, y)
 			}
@@ -81,13 +92,27 @@ func TestGCodeLayerFramesTheLayerAndKeepsAspect(t *testing.T) {
 	if absInt(w-h) > 3 {
 		t.Errorf("a square is drawn %d by %d px", w, h)
 	}
-	// 84 percent of 400 px, less the line width.
-	if w < 300 || w > 340 {
-		t.Errorf("the square spans %d px, want it to fill the frame with a margin", w)
+	// 84 percent of the drawing's height, less the line width.
+	if w < top*75/100 || w > top*88/100 {
+		t.Errorf("the square spans %d px of %d rows, want it to fill the frame with a margin", w, top)
 	}
-	// Y is up: the square's centre is the frame's centre.
-	if cx, cy := (minX+maxX)/2, (minY+maxY)/2; absInt(cx-200) > 3 || absInt(cy-200) > 3 {
+	if cx, cy := (minX+maxX)/2, (minY+maxY)/2; absInt(cx-200) > 3 || absInt(cy-top/2) > 3 {
 		t.Errorf("the square is centred at %d,%d", cx, cy)
+	}
+	// The legend never covers the drawing: its swatch is in the strip.
+	if n := countColour(img, 400, top, col); n == 0 {
+		t.Error("no drawing")
+	}
+	swatch := 0
+	for y := top; y < 400; y++ {
+		for x := 0; x < 400; x++ {
+			if img.NRGBAAt(x, y) == col {
+				swatch++
+			}
+		}
+	}
+	if swatch == 0 {
+		t.Error("the legend swatch is not in the strip")
 	}
 }
 
@@ -162,12 +187,14 @@ func TestGCodeLayerTravelsAreHiddenByDefault(t *testing.T) {
 	moves := append(square("Outer wall", 0, 3000), gcodeinfo.Move{X0: 50, Y0: 50, X1: 100, Y1: 100, Feature: "Outer wall"})
 	without := decode(t, mustLayer(t, moves, ByFeature, 300, LayerOptions{}))
 	with := decode(t, mustLayer(t, moves, ByFeature, 300, LayerOptions{Travels: true}))
-	trav := color.NRGBA{R: travelColour[0], G: travelColour[1], B: travelColour[2], A: 255}
-	if n := countColour(without, 300, 300, trav); n != 0 {
-		t.Errorf("travel pixels drawn by default: %d", n)
+	changed := 0
+	for i := 0; i < len(with.Pix); i += 4 {
+		if with.Pix[i] != without.Pix[i] || with.Pix[i+1] != without.Pix[i+1] || with.Pix[i+2] != without.Pix[i+2] {
+			changed++
+		}
 	}
-	if n := countColour(with, 300, 300, trav); n == 0 {
-		t.Error("Travels did not draw the travel move")
+	if changed < 30 {
+		t.Errorf("Travels changed only %d pixels: the travel move is not drawn", changed)
 	}
 	// Hidden travels also stay out of the framing.
 	far := append(square("Outer wall", 0, 3000), gcodeinfo.Move{X0: 50, Y0: 50, X1: 900, Y1: 900})
@@ -218,21 +245,29 @@ func TestGCodeLayerArcsAreDrawnAsCurves(t *testing.T) {
 func TestGCodeLayerScaleBarAndTitle(t *testing.T) {
 	data := mustLayer(t, square("Outer wall", 0, 3000), ByFeature, 400, LayerOptions{Title: "LAYER 1"})
 	img := decode(t, data)
-	// A 40 mm square fills about 340 px, so a nice bar of 20 mm fits: the bar
-	// is a dark horizontal run near the bottom left.
-	run := 0
-	for x := 6; x < 400; x++ {
-		if img.NRGBAAt(x, 400-6-1) == layerText {
-			run++
+	top := stripTop(img)
+	// A 40 mm square fills about 280 px, so a nice bar of 10 mm (a quarter of the width at most) fits: the bar
+	// is a dark horizontal run in the strip.
+	best := 0
+	for y := top; y < 400; y++ {
+		run, longest := 0, 0
+		for x := 0; x < 400; x++ {
+			if img.NRGBAAt(x, y) == layerText {
+				run++
+				longest = max(longest, run)
+			} else {
+				run = 0
+			}
 		}
+		best = max(best, longest)
 	}
-	if run < 100 {
-		t.Errorf("scale bar is %d px wide, want about 20 mm worth", run)
+	if best < 60 {
+		t.Errorf("scale bar is %d px wide, want about 10 mm worth", best)
 	}
-	// The title is drawn at the bottom right.
+	// The title is drawn at the bottom right of the strip.
 	dark := 0
-	for y := 380; y < 395; y++ {
-		for x := 320; x < 396; x++ {
+	for y := top; y < 400; y++ {
+		for x := 300; x < 400; x++ {
 			if img.NRGBAAt(x, y) == layerText {
 				dark++
 			}

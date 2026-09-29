@@ -607,7 +607,7 @@ func TestSliceWaitsThenHandsOverTheJob(t *testing.T) {
 	}
 	// The fallback of the status path carries the hint too.
 	e.st.mu.Lock()
-	e.st.hints()["slice-deadbeef"] = crashCtx{2, "by layer"}
+	e.st.hints()["slice-deadbeef"] = crashCtx{2, "by layer", ""}
 	e.st.mu.Unlock()
 	fe := e.st.failedJobError("slice-deadbeef", slicer.Result{Outcome: slicer.Outcome{Code: slicer.OutcomeCrashed, Message: "crashed"}})
 	if !strings.Contains(fe.Hint, "update to 7.3") {

@@ -36,7 +36,7 @@ add_modifier adds a helper shape to an object:
 {"project": "kit", "object": "hinge", "kind": "modifier", "shape": "cylinder", "size": [14, 14, 20], "position": [0, 0, 0], "values": {"sparse_infill_density": "80%", "wall_loops": 6}}
 ```
 
-Only settings valid at part scope are accepted. Check the result: add_modifier returns a screenshot with the modifier drawn as a translucent volume, and get_project lists the parts with their size and centre. To look closer, call get_view with `focus` set to the object and the `Front` or `Right` view (they show heights, so you can see how far up the modifier reaches), or `Top` for the footprint. A modifier inside a model is drawn with its outline and a faint tint; where it sticks out it is drawn solid.
+Remove a wrong modifier, negative part, enforcer or blocker with remove_part (project, object, part), which needs no more than the part's id or name from get_project; remove_object would delete the whole object. Only settings valid at part scope are accepted. Check the result: add_modifier returns a screenshot with the modifier drawn as a translucent volume, and get_project lists the parts with their size and centre. To look closer, call get_view with `focus` set to the object and the `Front` or `Right` view (they show heights, so you can see how far up the modifier reaches), or `Top` for the footprint. A modifier inside a model is drawn with its outline and a faint tint; where it sticks out it is drawn solid.
 
 ## Height ranges
 
@@ -46,11 +46,11 @@ set_height_ranges replaces the list of ranges on an object; an empty list clears
 {"project": "kit", "object": "vase", "ranges": [{"from_z": 0, "to_z": 10, "values": {"layer_height": 0.12}}, {"from_z": 10, "to_z": 60, "values": {"layer_height": 0.24}}]}
 ```
 
-Ranges must not overlap. A range can change `layer_height` and the region settings. Use it for fine detail low down and fast layers above.
+Ranges must not overlap. A range can change `layer_height` and the region settings. Use it for fine detail low down and fast layers above. Every range carries `layer_height`: the tools add it (the object's current layer height) when you leave it out, because a range without it crashes the slicer. get_view with `show_ranges` true draws the bands and lists each one's heights and values.
 
 ## Layer actions
 
-set_layer_actions changes what happens at a height, per plate: `pause`, `color_change` (with `filament`) or `custom` (with `gcode`). Give `z` or a `layer` number; layers are converted using the layer heights. A pause lets you insert a magnet or change material by hand; the printer waits until resumed.
+set_layer_actions changes what happens at a height, per plate: `pause`, `color_change` (with `filament`) or `custom` (with `gcode`). Give `z` or a `layer` number; layers are converted using the layer heights. A pause lets you insert a magnet or change material by hand; the printer waits until resumed. The slice reply lists the pauses, colour changes and custom G-code it found in the G-code, by height, so you can confirm they were written.
 
 ```json
 {"project": "kit", "plate": 1, "actions": [{"z": 12.4, "type": "pause"}]}

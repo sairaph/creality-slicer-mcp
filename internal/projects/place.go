@@ -72,8 +72,8 @@ func (h *handle) autoPlace(plate int, orient, arrange bool) error {
 	}
 	if arrange {
 		type item struct {
-			p    placed
-			w, d float64
+			p       placed
+			w, d, h float64
 		}
 		items := make([]item, 0, len(insts))
 		for _, p := range insts {
@@ -82,11 +82,14 @@ func (h *handle) autoPlace(plate int, orient, arrange bool) error {
 				continue
 			}
 			s := size3(b)
-			items = append(items, item{p, s[0], s[1]})
+			items = append(items, item{p, s[0], s[1], s[2]})
 		}
 		sort.SliceStable(items, func(i, j int) bool { return items[i].w*items[i].d > items[j].w*items[j].d })
 		var taken []rect
+		var takenH []float64
 		for _, it := range items {
+			h.placeHeight = it.h
+			h.takenHeights = takenH
 			x, y, ok := h.findSpot(plate, it.w, it.d, taken)
 			if !ok {
 				return conflictf("remove or shrink objects, move some to another plate, or place them yourself with update_object",
@@ -104,6 +107,7 @@ func (h *handle) autoPlace(plate int, orient, arrange bool) error {
 				}
 			}
 			taken = append(taken, rect{x - it.w/2, y - it.d/2, x + it.w/2, y + it.d/2})
+			takenH = append(takenH, it.h)
 		}
 	}
 	h.touchPlate(plate)

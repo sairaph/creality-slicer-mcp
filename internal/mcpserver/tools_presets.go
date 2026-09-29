@@ -159,7 +159,7 @@ func presetRows(t profiles.Type, ds []profiles.Descriptor) string {
 		var facts string
 		switch t {
 		case profiles.TypeProcess:
-			facts = fmt.Sprintf("%s | %s | %s", dash(d.LayerHeight), dash(d.WallLoops), dash(d.InfillDense))
+			facts = fmt.Sprintf("%s | %s | %s", dash(d.LayerHeight), dash(d.WallLoops), dash(percentText(d.InfillDense)))
 		case profiles.TypeFilament:
 			facts = fmt.Sprintf("%s | %s | %s | %s", dash(d.FilamentType), dash(d.FilamentVendor), dash(d.FilamentID), dash(d.NozzleTemp))
 		default:
@@ -401,9 +401,9 @@ func presetBody(cat *catalog.Catalog, p profiles.Preset, compare string, values 
 	var b strings.Builder
 	if compare != "" {
 		if total > len(values) {
-			fmt.Fprintf(&b, "%s `%s` compared with `%s`: shows %d of %d differing key(s) at level %s; pass level all or keys for the rest. Shown as `this -> other`.\n", p.Type, p.Name, compare, len(values), total, level)
+			fmt.Fprintf(&b, "Comparing %s `%s` (this) with `%s` (other): shows %d of %d differing key(s) at level %s; pass level all or keys for the rest. Each is shown as this value -> other value.\n", p.Type, p.Name, compare, len(values), total, level)
 		} else {
-			fmt.Fprintf(&b, "%s `%s` compared with `%s`: %d differing key(s), shown as `this -> other`.\n", p.Type, p.Name, compare, len(values))
+			fmt.Fprintf(&b, "Comparing %s `%s` (this) with `%s` (other): %d differing key(s), each shown as this value -> other value.\n", p.Type, p.Name, compare, len(values))
 		}
 	} else {
 		fmt.Fprintf(&b, "%s `%s` (%s; inherits %s): %d value(s).\n", p.Type, p.Name, p.Source, strings.Join(p.InheritsChain[min(1, len(p.InheritsChain)):], " > "), len(values))

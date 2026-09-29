@@ -59,6 +59,10 @@ type PlateResult struct {
 	Bytes        int64
 	// Changes is the number of filament changes in the G-code.
 	Changes int
+	// ObjectLabels tie each exclusion label to its object.
+	ObjectLabels []ObjectLabel
+	// Actions says what became of the plate's layer actions in the G-code.
+	Actions []ActionResult
 	// Multicolour is true when the G-code changes filament.
 	Multicolour bool
 }
@@ -74,6 +78,8 @@ type LastSlice struct {
 	// slice (written into the project).
 	Arranged bool
 	Oriented bool
+	// ElapsedS is how long the slicer ran, in seconds.
+	ElapsedS float64
 }
 
 // SliceOptions is slice_project.
@@ -278,6 +284,8 @@ func (s *Store) Slice(ref string, opts SliceOptions) (*SliceOutcome, error) {
 		platesOut []int
 		crashFil  int // filaments of the first multi-filament plate printed by layer (for the crash hint)
 		crashSeq  string
+		seqHint   string // the hint of a -63 failure (by object clearance)
+		logPath   string // the slicer's own log of this run
 		name      string
 	)
 	err = s.write(id, func(h *handle) error {
@@ -310,6 +318,7 @@ func (s *Store) Slice(ref string, opts SliceOptions) (*SliceOutcome, error) {
 				}
 			}
 		}
+		seqHint = h.seqHintText(platesOut, s.cfg.Install.Dialect)
 		if len(platesOut) == 0 {
 			return invalidf("move an object onto the plate or choose another plate", "plate %d has no objects", opts.Plate)
 		}
@@ -321,8 +330,11 @@ func (s *Store) Slice(ref string, opts SliceOptions) (*SliceOutcome, error) {
 		if err := copyFile(filepath.Join(h.dir, projectFile), snap); err != nil {
 			return errf(CodeInternal, "", "copying the project for slicing failed: %v", err)
 		}
+		logPath = filepath.Join(outDir, sliceLogName)
+		_ = os.Remove(logPath) // the log of an earlier slice is not this one's
 		req = slicer.SliceRequest{
 			Inputs: []string{snap}, Plate: opts.Plate, OutputDir: outDir,
+			LogFile:    logPath,
 			Overrides:  over,
 			AllowNewer: threemfNewer(h.appVersion(), s.version()),
 		}
@@ -349,7 +361,7 @@ func (s *Store) Slice(ref string, opts SliceOptions) (*SliceOutcome, error) {
 			}
 		}
 		if runErr != nil || !res.Outcome.OK {
-			return nil, slicerError(res, runErr, slicer.CrashHint(s.cfg.Install.Dialect, res.Outcome, crashFil, crashSeq))
+			return nil, withLog(slicerError(res, runErr, failureHint(s.cfg.Install.Dialect, res.Outcome, crashCtx{crashFil, crashSeq, seqHint})), logPath)
 		}
 		var notes []string
 		if retried {
@@ -389,7 +401,7 @@ func (s *Store) Slice(ref string, opts SliceOptions) (*SliceOutcome, error) {
 		if _, still := s.running[id]; still {
 			s.running[id] = job.ID
 		}
-		s.hints()[job.ID] = crashCtx{crashFil, crashSeq}
+		s.hints()[job.ID] = crashCtx{crashFil, crashSeq, seqHint}
 		s.mu.Unlock()
 		if !opts.Background && opts.Wait > 0 {
 			// Wait for the job in the foreground up to Wait; a slice that takes
@@ -443,6 +455,19 @@ func (s *Store) outcome(id string, last *LastSlice, opts SliceOptions) *SliceOut
 type crashCtx struct {
 	filaments int
 	sequence  string
+	seqHint   string
+}
+
+// failureHint is the extra hint of a failed slice: the crash of 7.2 on several
+// filaments by layer, or the clearance advice of a by-object collision.
+func failureHint(dialect string, o slicer.Outcome, c crashCtx) string {
+	if h := slicer.CrashHint(dialect, o, c.filaments, c.sequence); h != "" {
+		return h
+	}
+	if o.Name == "OBJECT_COLLISION_IN_SEQ_PRINT" {
+		return c.seqHint
+	}
+	return ""
 }
 
 // hints is the map of crash contexts by job id; call with s.mu held.
@@ -491,7 +516,7 @@ func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res
 	defer sp.Close()
 	snap := &handle{s: s, id: id, dir: filepath.Dir(filepath.Dir(snapPath)), meta: &meta{Name: projectName}, p: sp}
 
-	last := &LastSlice{Time: s.now(), Revision: startRev, Arranged: opts.Arrange, Oriented: opts.Orient, Warnings: notes}
+	last := &LastSlice{Time: s.now(), Revision: startRev, Arranged: opts.Arrange, Oriented: opts.Orient, Warnings: notes, ElapsedS: res.Duration.Seconds()}
 	sizes, sizeErr := render.ParseThumbnailSizes(sp.Settings.String("thumbnails"))
 	if sizeErr != nil {
 		last.Warnings = append(last.Warnings, "the printer's thumbnail sizes are not readable, so the G-code has no thumbnails: "+sizeErr.Error())
@@ -525,6 +550,8 @@ func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res
 			pr.ExcludeNames = append(pr.ExcludeNames, o.Name)
 		}
 		pr.Tools = toolTable(sp, sum)
+		pr.ObjectLabels = objectLabels(sp, plate, pr.ExcludeNames)
+		pr.Actions = scanActions(file, snap.layerActions(plate))
 		pr.Changes = sum.TotalFilamentChange
 		if pr.Changes == 0 {
 			uses := 0
@@ -791,6 +818,7 @@ func (s *Store) Report(ref string, plate int) (*SliceReport, error) {
 			return nil, notFoundf("slice again", "the G-code of plate %d is gone: %v", plate, err)
 		}
 		sum.Config = nil
+		sum.TotalFilamentChange = p.Changes // one source for the count of filament changes (D4)
 		r := &SliceReport{ProjectID: id, Revision: p.Revision, Stale: m.plateStale(p), Plate: p, Summary: sum, Warnings: m.LastSlice.Warnings}
 		return r, nil
 	}
@@ -814,7 +842,7 @@ func (s *Store) failedJobError(jobID string, res slicer.Result) *Error {
 	s.mu.Lock()
 	c := s.hints()[jobID]
 	s.mu.Unlock()
-	return slicerError(res, nil, slicer.CrashHint(s.cfg.Install.Dialect, res.Outcome, c.filaments, c.sequence))
+	return slicerError(res, nil, failureHint(s.cfg.Install.Dialect, res.Outcome, c))
 }
 
 // plateStale reports whether a sliced plate changed after its slice.

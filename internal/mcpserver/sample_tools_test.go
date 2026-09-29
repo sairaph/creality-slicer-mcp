@@ -74,6 +74,10 @@ func sampleFail(ctx context.Context, _ *mcp.CallToolRequest, in sampleFailInput)
 		return failure(ctx, what, fmt.Errorf("wrapped: %w", te), "ignored hint"), nil, nil
 	case "reported":
 		return reported("slice the plate", "the plate is empty", "Add a model first."), nil, nil
+	case "panic":
+		var m map[string]int
+		m["boom"] = 1 // a nil map: a real panic
+		return nil, nil, nil
 	case "long":
 		return failure(ctx, what, errors.New(strings.Repeat("x", 3*maxMessageBytes)), ""), nil, nil
 	}
@@ -211,7 +215,7 @@ func sampleTools(t *testing.T) func(*Server) {
 	return func(s *Server) {
 		addTool(s.mcpServer, "sample_ok", withRange(inputSchema[sampleOKInput](map[string]string{"count": "1"}), 1, 5, "count"), sampleOK)
 		addTool(s.mcpServer, "sample_fail", withEnum(inputSchema[sampleFailInput](nil), "mode",
-			"plain", "hint", "cancelled", "timeout", "net", "typed", "reported", "long"), sampleFail)
+			"plain", "hint", "cancelled", "timeout", "net", "typed", "reported", "long", "panic"), sampleFail)
 		addTool(s.mcpServer, "sample_image", withRange(inputSchema[sampleImageInput](nil), 1, 4000, "size"), sampleImage)
 		addTool(s.mcpServer, "sample_list", inputSchema[sampleListInput](nil), sampleList)
 		addTool(s.mcpServer, "sample_output", inputSchema[sampleOutputInput](nil), sampleOutput)

@@ -140,6 +140,7 @@ func (h *handle) moveInstance(req PlatesRequest, res *PlatesResult) error {
 	if req.X != nil && req.Y != nil {
 		cx, cy = *req.X, *req.Y
 	} else if from != req.Plate {
+		h.placeHeight = sz[2]
 		x, y, ok := h.findSpot(req.Plate, sz[0], sz[1], h.occupied(req.Plate, o.ID, req.Instance))
 		if !ok {
 			return conflictf("make room on that plate, or give x and y", "%q (%.1f x %.1f mm) does not fit on plate %d", o.Name, sz[0], sz[1], req.Plate)
@@ -202,6 +203,13 @@ func (s *Store) SetHeightRanges(ref, object string, ranges []RangeSpec) (*Info, 
 				if opt, ok := h.validate(key, v, catalog.ScopeLayerRange, false, &errs); ok {
 					lr.Options.Set(key, objectValue(opt, v))
 				}
+			}
+			// The slicer reads layer_height of every range and crashes (an access
+			// violation in 7.2.2 and 7.3) when it is missing, as it is for a range
+			// that only sets a region setting like wall_loops. The app always writes
+			// it: it is the object's own value unless the range sets another.
+			if lr.Options.Value("layer_height") == "" {
+				lr.Options.Set("layer_height", h.baseLayerHeight(o))
 			}
 			out = append(out, lr)
 		}
@@ -408,4 +416,18 @@ func (h *handle) towersRelative() [][2]float64 {
 		return nil
 	}
 	return towerRelative(h.p.Settings, len(h.p.Plates), towerDefault(h.s.cfg.Catalog))
+}
+
+// baseLayerHeight is the layer height a height range starts from: the
+// object's own override, else the project's.
+func (h *handle) baseLayerHeight(o *threemf.Object) string {
+	if v := o.Config.Value("layer_height"); v != "" {
+		return v
+	}
+	if h.p.Settings != nil {
+		if v := h.p.Settings.String("layer_height"); v != "" {
+			return v
+		}
+	}
+	return "0.2"
 }

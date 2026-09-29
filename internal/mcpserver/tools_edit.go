@@ -55,6 +55,7 @@ func (s *Server) registerEditTools() {
 	addTool(s.mcpServer, "add_model", withRange(withItemRange(withItemRange(inputSchema[addModelInput](map[string]string{"copies": "1", "include_screenshot": "true"}), "position", 2, 3), "rotation", 3, 3), 1, 1e6, "copies"), s.addModel)
 	addTool(s.mcpServer, "update_object", withItemRange(withItemRange(inputSchema[updateObjectInput](map[string]string{"include_screenshot": "true"}), "position", 2, 3), "rotation", 3, 3), s.updateObject)
 	addTool(s.mcpServer, "remove_object", inputSchema[removeObjectInput](map[string]string{"include_screenshot": "true"}), s.removeObject)
+	addTool(s.mcpServer, "remove_part", inputSchema[removePartInput](map[string]string{"include_screenshot": "true"}), s.removePart)
 	addTool(s.mcpServer, "update_settings", withEnum(inputSchema[updateSettingsInput](map[string]string{"scope": `"project"`, "allow_locked": "false"}), "scope", "project", "object", "part", "layer_range", "plate"), s.updateSettings)
 	addTool(s.mcpServer, "set_presets", inputSchema[setPresetsInput](map[string]string{"keep_changes": "true", "include_screenshot": "true"}), s.setPresets)
 	addTool(s.mcpServer, "add_modifier", withItemRange(withItemRange(withEnum(withEnum(withItemRange(inputSchema[addModifierInput](map[string]string{"include_screenshot": "true"}), "size", 3, 3), "kind", "modifier", "negative_part", "support_enforcer", "support_blocker"), "shape", "box", "cylinder", "sphere"), "position", 3, 3), "rotation", 3, 3), s.addModifier)
@@ -114,7 +115,7 @@ type objectFront struct {
 }
 
 func objectFrontOf(o projects.ObjectInfo) objectFront {
-	return objectFront{ID: o.ID, Name: o.Name, Plate: o.Plate, Size: o.Size, Position: o.Position, Rotation: o.Rotation, Filament: o.Filament}
+	return objectFront{ID: o.ID, Name: o.Name, Plate: o.Plate, Size: round2v(o.Size), Position: round2v(o.Position), Rotation: round1v(o.Rotation), Filament: o.Filament}
 }
 
 type addModelFront struct {
@@ -285,11 +286,21 @@ func (s *Server) updateSettings(ctx context.Context, _ *mcp.CallToolRequest, in 
 	}
 	front := updateSettingsFront{baseFront: base(res.Info), Scope: scope, Warnings: len(res.Warnings)}
 	var b strings.Builder
-	if len(res.Changed) == 0 {
+	// A value written as it already was is reported as unchanged, not as a
+	// change from 15% to 15%.
+	var changed, same []projects.Change
+	for _, c := range res.Changed {
+		if !c.Removed && c.Old != "" && sameSetting(c.Old, c.New) {
+			same = append(same, c)
+		} else {
+			changed = append(changed, c)
+		}
+	}
+	if len(changed) == 0 {
 		b.WriteString("Nothing changed: every value was already set.\n")
 	} else {
-		fmt.Fprintf(&b, "Changed %d setting(s) at %s scope:\n", len(res.Changed), scope)
-		for _, c := range res.Changed {
+		fmt.Fprintf(&b, "Changed %d setting(s) at %s scope:\n", len(changed), scope)
+		for _, c := range changed {
 			front.Changed = append(front.Changed, settingChangeText(c))
 			label := ""
 			if c.Label != "" && c.Label != c.Key {
@@ -297,6 +308,13 @@ func (s *Server) updateSettings(ctx context.Context, _ *mcp.CallToolRequest, in 
 			}
 			fmt.Fprintf(&b, "- %s%s\n", settingChangeText(c), label)
 		}
+	}
+	if len(same) > 0 {
+		var names []string
+		for _, c := range same {
+			names = append(names, c.Key+" ("+orDash(c.New)+")")
+		}
+		fmt.Fprintf(&b, "\nUnchanged, already at that value: %s.\n", strings.Join(names, ", "))
 	}
 	if len(res.Forced) > 0 {
 		b.WriteString("\nThe app would also set these as a consequence, so they were applied too:\n")
@@ -665,4 +683,42 @@ func (s *Server) managePlates(ctx context.Context, _ *mcp.CallToolRequest, in ma
 		out = s.withScreenshot(be, out, in.IncludeScreenshot, in.Project, shot, nil, false)
 	}
 	return out, nil, nil
+}
+
+// --- remove_part ---
+
+type removePartInput struct {
+	Project           string `json:"project"`
+	Object            string `json:"object"`
+	Part              string `json:"part"`
+	IncludeScreenshot *bool  `json:"include_screenshot,omitempty"`
+}
+
+type removePartFront struct {
+	baseFront `yaml:",inline"`
+	Object    string `yaml:"object"`
+	Removed   string `yaml:"removed"`
+	Kind      string `yaml:"kind"`
+	Parts     int    `yaml:"parts"`
+}
+
+func (s *Server) removePart(ctx context.Context, _ *mcp.CallToolRequest, in removePartInput) (*mcp.CallToolResult, any, error) {
+	be, fail := s.projectsOrFail(ctx)
+	if fail != nil {
+		return fail, nil, nil
+	}
+	res, err := be.Store.RemovePart(in.Project, in.Object, in.Part)
+	if err != nil {
+		return projFailure(err), nil, nil
+	}
+	parts := 0
+	for _, o := range res.Info.Objects {
+		if o.Name == res.Object {
+			parts = len(o.Parts)
+		}
+	}
+	kind := strings.ReplaceAll(res.Part.Subtype, "_", " ")
+	out := successResult(removePartFront{baseFront: base(res.Info), Object: res.Object, Removed: res.Removed, Kind: res.Part.Subtype, Parts: parts},
+		nextLine(fmt.Sprintf("Removed the %s `%s` from object `%s`. The object has %d part(s) left.", kind, res.Removed, res.Object, parts), "get_project to see the parts, add_modifier to add another, or slice_project."))
+	return s.withScreenshot(be, out, in.IncludeScreenshot, in.Project, plateOfObject(res.Info, in.Object, 1), []string{in.Object}, false), nil, nil
 }

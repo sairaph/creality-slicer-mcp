@@ -413,6 +413,32 @@ func (h *handle) warnings(in *Info, geo geometry) []Warning {
 			add("missing_filament", "object %q uses filament %d but the project has %d filament(s)", o.Name, o.Filament, len(in.Filaments))
 		}
 	}
+	// Printing by object: the clearance rules of the slicer (-63), and the crash
+	// of 7.2.2 on several filaments printed by layer (D2, D3).
+	for _, pl := range in.Plates {
+		if is := h.seqIssues(pl.Index); len(is) > 0 {
+			var parts []string
+			for _, x := range is {
+				parts = append(parts, x.text())
+			}
+			add("sequence_clearance", "plate %d is printed by object and will fail with -63: %s. slice_project with arrange true packs the plate with the needed clearance", pl.Index, strings.Join(parts, "; "))
+		}
+		if h.s.cfg.Install.Dialect == "v72" && h.plateSequence(pl.Index) != "by object" && h.plateFilamentCount(pl.Index) >= 2 {
+			add("v72_by_layer_crash", "plate %d uses %d filaments and prints by layer: Creality Print 7.2.2 crashes on that; update to 7.3 or set print_sequence to by object for this plate", pl.Index, h.plateFilamentCount(pl.Index))
+		}
+	}
+	if h.s.cfg.Install.Dialect == "v72" && len(in.Objects) == 0 && len(in.Filaments) >= 2 && h.plateSequence(1) != "by object" {
+		add("v72_by_layer_crash", "this project has %d filaments and prints by layer: Creality Print 7.2.2 crashes when one plate uses two or more of them; update to 7.3 or set print_sequence to by object", len(in.Filaments))
+	}
+	// A range without layer_height crashes the slicer (found when a project with
+	// a range from another tool is opened).
+	for _, o := range in.Objects {
+		for i, r := range o.HeightRanges {
+			if r.Settings["layer_height"] == "" {
+				add("range_no_layer_height", "height range %d of object %q sets no layer_height: the slicer crashes on it; set_height_ranges rewrites the ranges with one", i+1, o.Name)
+			}
+		}
+	}
 	// Layer actions that cannot do what they say (PR5, verified with 7.3 on the
 	// K2: tool changes, pauses and custom G-code are honoured; a colour change
 	// writes nothing because the printer preset has no colour change G-code).
@@ -449,10 +475,6 @@ func (h *handle) warnings(in *Info, geo geometry) []Warning {
 			if ok, _ := profiles.Compatible(pin.Printer, f); !ok {
 				add("incompatible_presets", "the filament preset %q is not compatible with the printer %q", f.Name, pin.Printer.Name)
 			}
-		}
-		if d := pin.drift(); len(d) > 0 {
-			add("catalog_drift", "%d setting(s) of the presets are newer than the setting catalog (%s%s): they are not written into the project",
-				len(d), strings.Join(firstN(d, 3), ", "), ellipsis(len(d), 3))
 		}
 	} else if ae := AsError(err); ae.Code == CodeNotFound {
 		add("missing_preset", "%s", ae.Message)

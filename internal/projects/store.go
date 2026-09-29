@@ -323,11 +323,15 @@ type handle struct {
 	p      *threemf.Project
 	unlock func()
 
-	changed   bool         // the project was modified and must be saved
-	plates    map[int]bool // plates whose thumbnails must be rendered again
-	allPlates bool
-	notes     []string // side effects to report
-	meshes    map[int]*meshEntry
+	changed      bool         // the project was modified and must be saved
+	plates       map[int]bool // plates whose thumbnails must be rendered again
+	allPlates    bool
+	notes        []string // side effects to report
+	meshes       map[int]*meshEntry
+	takenHeights []float64 // heights of the rects the last occupied call returned
+	// placeHeight is the height of the object findSpot is placing (0 when unknown):
+	// it decides whether the plate counts as all short for the by-object clearance.
+	placeHeight float64
 }
 
 func (h *handle) touchPlate(idx int) {

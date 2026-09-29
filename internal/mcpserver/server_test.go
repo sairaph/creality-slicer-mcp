@@ -100,7 +100,7 @@ func TestToolsAreListedWithTheirSchemas(t *testing.T) {
 	for _, tool := range res.Tools {
 		got = append(got, tool.Name)
 	}
-	want := []string{"add_model", "add_modifier", "browse_settings", "create_project", "delete_project", "describe_setting", "export_project", "get_guide", "get_preset", "get_project", "get_slice_report", "get_slice_status", "get_slicer_status", "get_view", "list_presets", "list_projects", "manage_plates", "open_project", "remove_object", "search_settings", "set_height_ranges", "set_layer_actions", "set_presets", "slice_project", "update_object", "update_settings"}
+	want := []string{"add_model", "add_modifier", "browse_settings", "create_project", "delete_project", "describe_setting", "export_project", "get_guide", "get_preset", "get_project", "get_slice_report", "get_slice_status", "get_slicer_status", "get_view", "list_presets", "list_projects", "manage_plates", "open_project", "remove_object", "remove_part", "search_settings", "set_height_ranges", "set_layer_actions", "set_presets", "slice_project", "update_object", "update_settings"}
 	if strings.Join(sortStrings(got), ",") != strings.Join(want, ",") {
 		t.Fatalf("tools = %v\nwant %v", got, want)
 	}

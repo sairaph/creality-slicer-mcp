@@ -78,7 +78,7 @@ var toolAnnotations = map[string]toolAnnotation{
 	"search_settings": annReadOnly, "describe_setting": annReadOnly, "browse_settings": annReadOnly,
 	"list_presets": annReadOnly, "get_preset": annReadOnly,
 	"create_project": annAdditive, "open_project": annAdditive, "list_projects": annReadOnly, "get_project": annReadOnly, "get_view": annReadOnly,
-	"add_model": annAdditive, "update_object": annChanging, "remove_object": annChanging,
+	"add_model": annAdditive, "update_object": annChanging, "remove_object": annChanging, "remove_part": annChanging,
 	"update_settings": annChanging, "set_presets": annChanging, "add_modifier": annAdditive,
 	"set_height_ranges": annChanging, "set_layer_actions": annChanging, "manage_plates": annChanging,
 	"export_project": annChanging, "delete_project": annChanging,
@@ -180,7 +180,7 @@ var toolTexts = map[string]toolText{
 		Params:      map[string]string{},
 	},
 	"get_view": {
-		Description: `Draw a plate from a named camera: the bed with a grid and the plate axes (X red, Y green), the objects in their filament colours, their modifiers, negative parts, support enforcers and blockers as translucent coloured volumes with outlines, each object's id and name, and optionally its height ranges as bands. Use it to check placement, heights and modifier coverage: the Front and Right views show heights. Frame one object with focus, hide or isolate objects, and ask for a size. It reads the project and changes nothing.`,
+		Description: `Draw a plate from a named camera: the bed with a grid and the plate axes (X red, Y green), the objects in their filament colours, their modifiers, negative parts, support enforcers and blockers as translucent coloured volumes with outlines, each object's id and name, and optionally its height ranges as bands. Use it to check placement, heights and modifier coverage: the Front and Right views show heights. Frame one object with focus, hide or isolate objects, and ask for a size (the frame is 4:3). Labels that would cover each other are moved or left out and listed. It reads the project and changes nothing.`,
 		Params: map[string]string{
 			"plate":       "plate to draw, starting at 1 (default 1)",
 			"view_name":   "camera: Isometric (default, from the front left), Front (camera at the front, looking along Y), Top, Right, Back, Left, Bottom, Dimetric or Trimetric",
@@ -190,7 +190,7 @@ var toolTexts = map[string]toolText{
 			"show_parts":  "draw modifiers (yellow), negative parts (red), support enforcers (green) and support blockers (blue-grey) (default true)",
 			"show_labels": "write each object's id and short name at its top (default true)",
 			"show_ranges": "draw the height ranges of the objects as tinted bands (default false)",
-			"width":       "image width in pixels, 1 to 2048; give one of width and height to keep the aspect (default: the longest edge is 1024)",
+			"width":       "image width in pixels, 1 to 2048; give one of width and height to get a 4:3 frame (default: 1024 wide, 768 high)",
 			"height":      "image height in pixels, 1 to 2048",
 		},
 	},
@@ -225,8 +225,15 @@ var toolTexts = map[string]toolText{
 		Description: `Remove one object, with its parts, modifiers and height ranges, from the project. Objects on other plates are not affected. Returns the remaining objects.`,
 		Params:      map[string]string{"object": "object id or unique name, as get_project shows it"},
 	},
+	"remove_part": {
+		Description: `Remove one part of an object: a modifier, a negative part, a support blocker or enforcer, or an extra model part. get_project lists the parts of each object with their names and ids. The last model part of an object cannot be removed: use remove_object for that. Returns the parts that are left and a screenshot of the plate.`,
+		Params: map[string]string{
+			"object": "object id or unique name, as get_project shows it",
+			"part":   "part id or name, as get_project shows it under the object",
+		},
+	},
 	"update_settings": {
-		Description: `Change settings at one scope: the whole project (default), an object, a part, a layer range or a plate. Every key and value is checked against Creality's catalog first (unknown key, type, choice, range, scope, vendor lock) and nothing changes unless all pass. Reports each change as old to new, warns about settings that do nothing until another is on, and applies the side effects the app would apply. For a vector key a list is one value per filament slot and a single value applies to every slot. Find keys with search_settings.`,
+		Description: `Change settings at one scope: the whole project (default), an object, a part, a layer range or a plate. Every key and value is checked against Creality's catalog first (unknown key, type, choice, range, scope, vendor lock) and nothing changes unless all pass. Reports each change as old to new, warns about settings that do nothing until another is on, and applies the side effects the app would apply. For a per-filament key (a filament preset setting) a list is one value per filament slot and a single value applies to every slot; a list key of the printer takes the whole list, as describe_setting shows. Find keys with search_settings.`,
 		Params: map[string]string{
 			"scope":        "project (default), object, part, layer_range or plate",
 			"target":       "what to change: object id or name; part as object/part; plate number; not used for project scope",
@@ -315,7 +322,7 @@ var toolTexts = map[string]toolText{
 			"background": "true returns a job_id at once without waiting (default false)",
 			"thumbnails": "put the plate pictures the printer preset asks for into the G-code (default true)",
 			"timeout":    "seconds after which a hung slicer is stopped, up to 1800 (default 1800)",
-			"preview":    "none (default), small (384 px) or large (1024 px): attach the sliced plate and its first layer as pictures of that size",
+			"preview":    "none (default), small or large: attach an isometric picture of the sliced toolpaths, layer upon layer in each filament's colour (512 or 1024 px wide), and the first layer of all objects (384 or 1024 px square)",
 		},
 	},
 	"get_slice_status": {
@@ -334,7 +341,7 @@ var toolTexts = map[string]toolText{
 			"layer":    "layer number, starting at 1; for section layer",
 			"z":        "height in mm; for section layer, the nearest layer is used when layer is not given",
 			"color_by": "feature (default), filament or speed; how the layer picture is coloured",
-			"preview":  "none, small (default for section layer) or large; the layer picture",
+			"preview":  "none, small (default for section layer) or large; the layer picture, 384 or 1024 px square. On a plate printed by object it shows every object at the layer's height",
 		},
 	},
 }
@@ -407,7 +414,7 @@ func addTool[In any](srv *mcp.Server, name string, schema *jsonschema.Schema,
 		Description: text.Description,
 		Annotations: annotationsFor(name),
 		InputSchema: schema,
-	}, handler)
+	}, recovering(name, handler))
 }
 
 // toolTextNames lists the tools that have text, sorted (for tests).

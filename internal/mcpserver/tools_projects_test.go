@@ -131,6 +131,7 @@ type fakeSlicer struct {
 	killed  chan struct{} // closed when a blocked run is cancelled
 	started chan struct{} // closed when the first run has begun
 	once    sync.Once
+	gcode   string // the G-code to write instead of sliceGCode, when set
 }
 
 func (f *fakeSlicer) Run(ctx context.Context, spec slicer.ExecSpec) (slicer.ExecResult, error) {
@@ -161,7 +162,11 @@ func (f *fakeSlicer) Run(ctx context.Context, spec slicer.ExecSpec) (slicer.Exec
 			out = spec.Args[i+1]
 		}
 	}
-	err := os.WriteFile(filepath.Join(out, fmt.Sprintf("plate_%d.gcode", plate)), []byte(sliceGCode), 0o644)
+	text := sliceGCode
+	if f.gcode != "" {
+		text = f.gcode
+	}
+	err := os.WriteFile(filepath.Join(out, fmt.Sprintf("plate_%d.gcode", plate)), []byte(text), 0o644)
 	return slicer.ExecResult{}, err
 }
 

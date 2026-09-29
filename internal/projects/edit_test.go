@@ -504,7 +504,7 @@ func TestCatalogDriftIsReportedNotWritten(t *testing.T) {
 		t.Fatalf("drift: %v %v", drift, err)
 	}
 	info := e.newProject(t, "Drift")
-	if !hasWarning(info, "catalog_drift") || len(info.Drift) != 1 {
+	if hasWarning(info, "catalog_drift") || len(info.Drift) != 1 { // drift is for status and doctor, not for every project
 		t.Fatalf("warnings %+v drift %v", info.Warnings, info.Drift)
 	}
 	if _, ok := openSaved(t, e, info.ID).Settings.Get("zz_future_setting"); ok {

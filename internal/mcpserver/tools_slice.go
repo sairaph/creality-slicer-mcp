@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -14,7 +13,6 @@ import (
 	"github.com/sairaph/mcp-wizard/render"
 
 	"github.com/sairaph/creality-slicer-mcp/internal/gcodeinfo"
-	"github.com/sairaph/creality-slicer-mcp/internal/profiles"
 	"github.com/sairaph/creality-slicer-mcp/internal/projects"
 	rend "github.com/sairaph/creality-slicer-mcp/internal/render"
 	"github.com/sairaph/creality-slicer-mcp/internal/slicer"
@@ -74,6 +72,7 @@ type handoffFront struct {
 
 type sliceFront struct {
 	baseFront `yaml:",inline"`
+	ElapsedS  float64           `yaml:"elapsed_s,omitempty"`
 	JobID     string            `yaml:"job_id,omitempty"`
 	State     string            `yaml:"state"`
 	Stale     bool              `yaml:"stale,omitempty"`
@@ -106,12 +105,6 @@ func (s *Server) sliceProject(ctx context.Context, _ *mcp.CallToolRequest, in sl
 		opts.Plate = *in.Plate
 	}
 	preview := deref(in.Preview)
-	switch preview {
-	case "small":
-		opts.Preview = projects.PreviewPlate
-	case "large":
-		opts.Preview = projects.PreviewPlateLarge
-	}
 
 	// The store waits for the result; run it aside so a call the client
 	// gave up on ends at once. A job that was still running by then is
@@ -153,30 +146,46 @@ func (s *Server) sliceProject(ctx context.Context, _ *mcp.CallToolRequest, in sl
 		return successResult(front, body), nil, nil
 	}
 	res := sliceReply(info, out.Last, out.Warnings, false)
-	if len(out.Preview) > 0 {
-		res = attachImage(res, out.Preview, "the plate preview")
-	}
 	if preview != "" && preview != "none" && out.Last != nil && len(out.Last.Plates) > 0 {
-		size := 384
-		if preview == "large" {
-			size = 1024
-		}
-		res = s.attachFirstLayer(res, out.Last.Plates[0], size)
+		res = s.attachSlicePreview(res, out.Last.Plates[0], preview)
 	}
 	return res, nil, nil
 }
 
-// attachFirstLayer adds a picture of the first layer of a sliced plate.
-func (s *Server) attachFirstLayer(res *toolResult, p projects.PlateResult, size int) *toolResult {
-	moves, _, err := layerMoves(p.GCodePath, 1, 0)
-	if err != nil || len(moves) == 0 {
+// attachSlicePreview adds what the slicer made of a plate: its toolpaths from
+// the isometric view, layer upon layer in the colour of each filament, and the
+// first layer of all objects (a plate printed by object has one per object).
+// small is 512 and 384 pixels, large 1024 and 768 (the layer picture is square).
+func (s *Server) attachSlicePreview(res *toolResult, p projects.PlateResult, preview string) *toolResult {
+	w, h, sq := 512, 384, 384
+	if preview == "large" {
+		w, h, sq = 1024, 768, 1024
+	}
+	layers, err := gcodeinfo.Layers(p.GCodePath)
+	if err != nil || len(layers) == 0 {
+		fmt.Fprintf(os.Stderr, "creality-slicer-mcp: the slice preview was left out: %v\n", err)
 		return res
 	}
-	data, err := rend.GCodeLayer(moves, rend.ByFeature, size, layerOptions(p, "FIRST LAYER"))
-	if err != nil {
-		return res
+	var all []gcodeinfo.Move
+	for _, l := range layers {
+		moves, err := gcodeinfo.LayerMoves(p.GCodePath, l)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "creality-slicer-mcp: the slice preview was left out: %v\n", err)
+			return res
+		}
+		all = append(all, moves...)
 	}
-	return attachImage(res, data, "the first layer picture")
+	if data, err := rend.GCodeIso(all, w, h, layerOptions(p, fmt.Sprintf("PLATE %d TOOLPATHS", p.Plate))); err == nil {
+		res = attachImage(res, data, "the toolpaths picture")
+	} else {
+		fmt.Fprintf(os.Stderr, "creality-slicer-mcp: the toolpaths picture was left out: %v\n", err)
+	}
+	if set, err := layersAtZ(p.GCodePath, layers, layers[0].Z); err == nil {
+		if data, err := rend.GCodeLayer(set.moves, rend.ByFeature, sq, layerOptions(p, "FIRST LAYER")); err == nil {
+			res = attachImage(res, data, "the first layer picture")
+		}
+	}
+	return res
 }
 
 // sliceReply renders a finished slice: a summary table, the tools and the
@@ -192,13 +201,18 @@ func sliceReply(info *projects.Info, last *projects.LastSlice, warnings []string
 	front.Stale = last.Revision < info.Revision
 	labels := exclusionLabels(info, last)
 	var b strings.Builder
-	fmt.Fprintf(&b, "Sliced %d plate(s) from revision %d.\n\n", len(last.Plates), last.Revision)
+	front.ElapsedS = round1(last.ElapsedS)
+	if last.ElapsedS > 0 {
+		fmt.Fprintf(&b, "Sliced %d plate(s) from revision %d in %s (%.0f s).\n\n", len(last.Plates), last.Revision, durText(int(last.ElapsedS+0.5)), last.ElapsedS)
+	} else {
+		fmt.Fprintf(&b, "Sliced %d plate(s) from revision %d.\n\n", len(last.Plates), last.Revision)
+	}
 	b.WriteString("Plates (plate | time | grams | layers | upload name | G-code path):\n")
-	var tools, objects strings.Builder
+	var tools, objects, actions strings.Builder
 	for _, p := range last.Plates {
 		front.Plates = append(front.Plates, slicePlateFront{
 			Index: p.Plate, Bytes: p.Bytes, TimeS: p.TimeSeconds, TimeText: p.TimeText,
-			FilamentG: roundAll(p.FilamentG), TotalG: round1(p.TotalG), Layers: p.Layers, Objects: len(p.ExcludeNames), Multicolour: p.Multicolour, Changes: p.Changes,
+			FilamentG: roundAll(p.FilamentG), TotalG: round2(p.TotalG), Layers: p.Layers, Objects: len(p.ExcludeNames), Multicolour: p.Multicolour, Changes: p.Changes,
 		})
 		h := handoffFront{Plate: p.Plate, GCodePath: p.GCodePath, UploadName: p.UploadName, ExcludeNames: p.ExcludeNames}
 		for _, t := range p.Tools {
@@ -206,6 +220,14 @@ func sliceReply(info *projects.Info, last *projects.LastSlice, warnings []string
 			fmt.Fprintf(&tools, "%d | T%d | %d | %s | %s | %s\n", p.Plate, t.Tool, t.Tool, pipeSafe(t.Preset), t.Type, t.Colour)
 		}
 		front.Handoff = append(front.Handoff, h)
+		for _, a := range p.Actions {
+			kind := strings.ReplaceAll(a.Kind, "_", " ")
+			if a.Found {
+				fmt.Fprintf(&actions, "%d | %s at layer %d (z %s mm) | found in the G-code at z %s mm\n", p.Plate, kind, a.Layer, num(a.Z), num(a.AtZ))
+			} else {
+				fmt.Fprintf(&actions, "%d | %s at layer %d (z %s mm) | not found in the G-code: it did nothing\n", p.Plate, kind, a.Layer, num(a.Z))
+			}
+		}
 		fmt.Fprintf(&b, "%d | %s | %.1f | %d | %s | %s\n", p.Plate, orDefault(p.TimeText, durText(p.TimeSeconds)), p.TotalG, p.Layers, p.UploadName, p.GCodePath)
 		for _, o := range info.Objects {
 			if o.Plate == p.Plate {
@@ -217,6 +239,9 @@ func sliceReply(info *projects.Info, last *projects.LastSlice, warnings []string
 	}
 	if tools.Len() > 0 {
 		b.WriteString("\nTools (plate | tool | filament index, 0-based | preset | type | colour):\n" + tools.String())
+	}
+	if actions.Len() > 0 {
+		b.WriteString("\nLayer actions (plate | action | result in the G-code):\n" + actions.String())
 	}
 	if objects.Len() > 0 {
 		b.WriteString("\nExclusion labels (plate | object | label for exclude_object):\n" + objects.String())
@@ -246,7 +271,7 @@ func dedupe(in []string) []string {
 func roundAll(in []float64) []float64 {
 	out := make([]float64, len(in))
 	for i, v := range in {
-		out[i] = round1(v)
+		out[i] = round2(v)
 	}
 	return out
 }
@@ -392,12 +417,12 @@ func noSuchJob(id string) *toolResult {
 func listJobs(bes []ProjectBackend) *toolResult {
 	var snaps []slicerSnapshot
 	for _, be := range bes {
-		if be.Jobs == nil {
+		if be.Store == nil {
 			continue
 		}
-		for _, sn := range be.Jobs.Snapshots() {
-			project, _ := sn.Tag.(string)
-			snaps = append(snaps, slicerSnapshot{id: sn.ID, project: project, state: sn.State, elapsed: sn.Elapsed})
+		// The store says how each job really ended: a crashed or failed slice is failed.
+		for _, j := range be.Store.ListJobs() {
+			snaps = append(snaps, slicerSnapshot{id: j.ID, project: j.ProjectID, state: j.State, exit: j.ExitName, elapsed: time.Duration(j.Elapsed * float64(time.Second))})
 		}
 	}
 	if len(snaps) == 0 {
@@ -413,8 +438,8 @@ func listJobs(bes []ProjectBackend) *toolResult {
 }
 
 type slicerSnapshot struct {
-	id, project, state string
-	elapsed            time.Duration
+	id, project, state, exit string
+	elapsed                  time.Duration
 }
 
 // --- get_slice_report ---
@@ -529,13 +554,62 @@ func polyBox(o gcodeinfo.Object) (x0, y0, x1, y1 float64) {
 
 // layerMoves reads the moves of a layer (1 based; or the layer at z when
 // layer is 0 and z is set) and returns the layer's index and Z.
-func layerMoves(path string, layer int, z float64) ([]gcodeinfo.Move, gcodeinfo.Layer, error) {
+// layerSet is the moves of every layer at one height. A plate printed by
+// object has a layer for each object at the same height; a plate printed by
+// layer has one.
+type layerSet struct {
+	moves    []gcodeinfo.Move
+	first    gcodeinfo.Layer // the layer asked for (or the nearest to z)
+	z        float64
+	count    int  // layers at this height
+	total    int  // layers in the G-code
+	byObject bool // the layers go back down: one object after another
+}
+
+// printsByObject says whether the layer heights go back down, which is what a
+// plate printed one object after another does.
+func printsByObject(layers []gcodeinfo.Layer) bool {
+	for i := 1; i < len(layers); i++ {
+		if layers[i].Z < layers[i-1].Z-1e-6 {
+			return true
+		}
+	}
+	return false
+}
+
+// layersAtZ reads the moves of every layer at height z (within 0.01 mm).
+func layersAtZ(path string, layers []gcodeinfo.Layer, z float64) (layerSet, error) {
+	set := layerSet{z: z, total: len(layers), byObject: printsByObject(layers)}
+	for _, l := range layers {
+		if math.Abs(l.Z-z) > 0.011 {
+			continue
+		}
+		moves, err := gcodeinfo.LayerMoves(path, l)
+		if err != nil {
+			return set, err
+		}
+		if set.count == 0 {
+			set.first = l
+		}
+		set.count++
+		set.moves = append(set.moves, moves...)
+	}
+	if set.count == 0 {
+		return set, fmt.Errorf("no layer at z %s mm", num(z))
+	}
+	return set, nil
+}
+
+// layerMoves picks a layer by its number (1 based, counted across all objects)
+// or by height and returns the moves of every layer at that height, so a plate
+// printed by object shows all its objects.
+func layerMoves(path string, layer int, z float64) (layerSet, error) {
 	layers, err := gcodeinfo.Layers(path)
 	if err != nil {
-		return nil, gcodeinfo.Layer{}, err
+		return layerSet{}, err
 	}
 	if len(layers) == 0 {
-		return nil, gcodeinfo.Layer{}, fmt.Errorf("the G-code has no layers")
+		return layerSet{}, fmt.Errorf("the G-code has no layers")
 	}
 	idx := layer - 1
 	if layer == 0 {
@@ -547,10 +621,13 @@ func layerMoves(path string, layer int, z float64) ([]gcodeinfo.Move, gcodeinfo.
 		}
 	}
 	if idx < 0 || idx >= len(layers) {
-		return nil, gcodeinfo.Layer{}, fmt.Errorf("layer %d does not exist: the G-code has %d layer(s)", layer, len(layers))
+		return layerSet{}, fmt.Errorf("layer %d does not exist: the G-code has %d layer(s)", layer, len(layers))
 	}
-	moves, err := gcodeinfo.LayerMoves(path, layers[idx])
-	return moves, layers[idx], err
+	set, err := layersAtZ(path, layers, layers[idx].Z)
+	if err == nil {
+		set.first = layers[idx]
+	}
+	return set, err
 }
 
 func layerOptions(p projects.PlateResult, title string) rend.LayerOptions {
@@ -595,6 +672,9 @@ func (s *Server) reportFromFile(ctx context.Context, be ProjectBackend, info *pr
 			minH, maxH = math.Min(minH, l.Height), math.Max(maxH, l.Height)
 		}
 		fmt.Fprintf(b, "%d layer(s). First layer: z %s mm, height %s mm. Last layer: z %s mm. Layer heights range from %s to %s mm.\n", len(layers), num(layers[0].Z), num(layers[0].Height), num(layers[len(layers)-1].Z), num(minH), num(maxH))
+		if printsByObject(layers) {
+			b.WriteString("This plate is printed by object: layers are counted across all objects, one object after another, so the same height comes up once for each object and layer N is not the Nth height.\n")
+		}
 		b.WriteString("Time per layer is not reported. Next: get_slice_report with section layer and layer N (1 to " + strconv.Itoa(len(layers)) + ") for one layer with a picture.")
 	case "layer":
 		if in.Layer == nil && in.Z == nil {
@@ -606,12 +686,17 @@ func (s *Server) reportFromFile(ctx context.Context, be ProjectBackend, info *pr
 		} else {
 			z = *in.Z
 		}
-		moves, l, err := layerMoves(p.GCodePath, layer, z)
+		set, err := layerMoves(p.GCodePath, layer, z)
 		if err != nil {
 			return invalidInput(err.Error(), "Call get_slice_report with section layers to see how many layers there are."), nil, nil
 		}
+		l, moves := set.first, set.moves
 		front.Layer, front.LayerZ = l.Index+1, num(l.Z)
-		fmt.Fprintf(b, "Layer %d at z %s mm (height %s mm).\n\n%s", l.Index+1, num(l.Z), num(l.Height), layerSummary(moves))
+		fmt.Fprintf(b, "Layer %d at z %s mm (height %s mm).\n", l.Index+1, num(l.Z), num(l.Height))
+		if set.byObject {
+			fmt.Fprintf(b, "This plate is printed by object, so its %d layers are counted across all objects and one height comes up once for each. The picture and the numbers below show all %d layer(s) at z %s mm together: pick a height with z to see every object at it.\n", set.total, set.count, num(l.Z))
+		}
+		b.WriteString("\n" + layerSummary(moves))
 		colorBy := deref(in.ColorBy)
 		if colorBy == "" {
 			colorBy = "feature"
@@ -638,7 +723,7 @@ func (s *Server) reportFromFile(ctx context.Context, be ProjectBackend, info *pr
 		if err != nil {
 			return notFound("The G-code cannot be read: "+err.Error(), "Slice again with slice_project."), nil, nil
 		}
-		b.WriteString(s.settingsDigest(ctx, info, sum))
+		b.WriteString(s.settingsDigest(ctx, be, info, sum))
 	}
 	return successResult(front, strings.TrimRight(b.String(), "\n")), nil, nil
 }
@@ -685,35 +770,46 @@ func layerSummary(moves []gcodeinfo.Move) string {
 	return b.String()
 }
 
-// settingsDigest lists the effective settings of the slice that differ from
-// the project's process preset.
-func (s *Server) settingsDigest(ctx context.Context, info *projects.Info, sum gcodeinfo.Summary) string {
-	store, err := s.env.profileStore(ctx)
+// settingsDigest lists the settings of the slice that differ from the process
+// preset, grouped by where the difference comes from: a change made in the
+// project, a rule of the app, or something the tools cannot explain.
+func (s *Server) settingsDigest(ctx context.Context, be ProjectBackend, info *projects.Info, sum gcodeinfo.Summary) string {
+	diffs, err := be.Store.ExplainSettings(info.ID, sum.Config)
 	if err != nil {
-		return "The presets cannot be read, so there is nothing to compare with: " + err.Error()
+		return "The presets cannot be read, so there is nothing to compare with: " + projects.AsError(err).Message
 	}
-	preset, err := store.Get(profiles.TypeProcess, info.Process)
-	if err != nil {
-		return fmt.Sprintf("The process preset `%s` is not available, so there is nothing to compare with.", info.Process)
-	}
-	var diffs []string
-	for key, v := range preset.Values {
-		if strings.HasSuffix(key, "_settings_id") {
-			continue // names of the presets, not settings
-		}
-		if raw, ok := sum.Config[key]; ok && !sameSetting(raw, showPresetValue(v)) {
-			diffs = append(diffs, fmt.Sprintf("%s: %s -> %s", key, showPresetValue(v), raw))
-		}
-	}
-	sort.Strings(diffs)
 	if len(diffs) == 0 {
 		return fmt.Sprintf("The slice used the settings of `%s` unchanged (compared over the settings that preset sets).", info.Process)
 	}
-	more := ""
-	if len(diffs) > 40 {
-		diffs, more = diffs[:40], fmt.Sprintf("\n... and %d more.", len(diffs)-40)
+	groups := []struct{ origin, title string }{
+		{"project", "Changed in this project (update_settings or the process changes of the file)"},
+		{"app", "Switched by rules of Creality Print, not by you"},
+		{"other", "Differences no change of this project explains (a preset of another version, or a value the slicer normalises)"},
 	}
-	return fmt.Sprintf("Settings of the slice that differ from `%s` (preset -> used), %d shown:\n%s%s", info.Process, len(diffs), "- "+strings.Join(diffs, "\n- "), more)
+	var b strings.Builder
+	fmt.Fprintf(&b, "Settings of the slice that differ from `%s` (preset -> used), %d in all. Each group says why:\n", info.Process, len(diffs))
+	shown := 0
+	for _, g := range groups {
+		var lines []string
+		for _, d := range diffs {
+			if d.Origin == g.origin {
+				lines = append(lines, fmt.Sprintf("%s: %s -> %s", d.Key, d.Preset, d.Used))
+				if g.origin == "app" {
+					lines[len(lines)-1] += " (" + strings.TrimPrefix(d.Why, "the app sets this automatically ") + ")"
+				}
+			}
+		}
+		if len(lines) == 0 {
+			continue
+		}
+		more := ""
+		if len(lines) > 30 {
+			lines, more = lines[:30], fmt.Sprintf("\n... and %d more.", len(lines)-30)
+		}
+		shown += len(lines)
+		fmt.Fprintf(&b, "\n%s:\n- %s%s\n", g.title, strings.Join(lines, "\n- "), more)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func sameSetting(a, b string) bool {

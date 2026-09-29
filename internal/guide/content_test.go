@@ -83,7 +83,7 @@ var guideTools = []string{
 	"list_presets", "get_preset", "create_project", "open_project", "list_projects", "get_project",
 	"add_model", "update_object", "remove_object", "update_settings", "set_presets", "add_modifier",
 	"set_height_ranges", "set_layer_actions", "manage_plates", "export_project", "delete_project",
-	"slice_project", "get_slice_status", "get_slice_report", "get_view",
+	"slice_project", "get_slice_status", "get_slice_report", "get_view", "remove_part",
 	// The creality-k2-mcp server.
 	"upload_gcode_file", "get_filaments", "start_print", "exclude_object", "list_printers",
 }

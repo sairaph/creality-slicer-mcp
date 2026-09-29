@@ -2,6 +2,8 @@ package mcpserver
 
 import (
 	"fmt"
+	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -26,14 +28,26 @@ func projFailure(err error) *toolResult {
 	default:
 		code = render.CodeInternal
 	}
-	re := render.Error{Code: code, Message: shortMessage(e.Message), Hint: e.Hint}
+	re := render.Error{Code: code, Message: shortMessage(dedupeKeyPrefix(e.Message)), Hint: e.Hint}
 	var tail string
+	var logLines []string
 	if len(e.Fields) > 0 {
 		fields := map[string]any{}
 		for k, v := range e.Fields {
 			if k == "output_tail" {
 				tail, _ = v.(string)
 				continue
+			}
+			if k == "log_tail" {
+				logLines, _ = v.([]string)
+				continue
+			}
+			if list, ok := v.([]string); ok {
+				clean := make([]string, len(list))
+				for i, line := range list {
+					clean[i] = dedupeKeyPrefix(line)
+				}
+				v = clean
 			}
 			fields[k] = v
 		}
@@ -42,8 +56,24 @@ func projFailure(err error) *toolResult {
 		}
 	}
 	res := render.ErrorResult(re)
-	if strings.TrimSpace(tail) != "" {
-		res.Content = append(res.Content, &mcp.TextContent{Text: "Output:\n" + textBlock(tail)})
+	// The cause, the last lines of the slicer's log and the path of the full
+	// log are the reply: the app's whole output is not repeated. Only without
+	// a log is its output used, cut to its last lines.
+	if strings.TrimSpace(tail) != "" && len(logLines) == 0 {
+		lines := strings.Split(strings.TrimRight(tail, "\n"), "\n")
+		if len(lines) > maxFailureLines {
+			lines = lines[len(lines)-maxFailureLines:]
+		}
+		res.Content = append(res.Content, &mcp.TextContent{Text: "Output:\n" + textBlock(strings.Join(lines, "\n"))})
+	}
+	if len(logLines) > 0 {
+		text := "Last lines of the slicer log:\n" + textBlock(strings.Join(logLines, "\n"))
+		if p, ok := e.Fields["log_file"].(string); ok {
+			text += "\nFull log: " + p
+		}
+		res.Content = append(res.Content, &mcp.TextContent{Text: text})
+	} else if p, ok := e.Fields["log_file"].(string); ok {
+		res.Content = append(res.Content, &mcp.TextContent{Text: "Full log: " + p})
 	}
 	return res
 }
@@ -107,10 +137,20 @@ func lastFront(st *projects.SliceStamp) *lastSliceFront {
 	if st == nil {
 		return nil
 	}
-	return &lastSliceFront{Time: st.Time.UTC().Format(time.RFC3339), Revision: st.Revision, Plates: st.Plates, TimeS: st.TimeS, TotalG: round1(st.TotalG), Stale: st.Stale}
+	return &lastSliceFront{Time: st.Time.UTC().Format(time.RFC3339), Revision: st.Revision, Plates: st.Plates, TimeS: st.TimeS, TotalG: round2(st.TotalG), Stale: st.Stale}
 }
 
-func round1(f float64) float64 { return float64(int(f*10+0.5)) / 10 }
+// maxFailureLines is how many lines of a failed slice's output or log a reply
+// shows.
+const maxFailureLines = 15
+
+// round1, round2 round for the front matter: degrees and seconds to 0.1,
+// millimetres and grams to 0.01.
+func round1(f float64) float64 { return math.Round(f*10) / 10 }
+func round2(f float64) float64 { return math.Round(f*100) / 100 }
+
+func round2v(v [3]float64) [3]float64 { return [3]float64{round2(v[0]), round2(v[1]), round2(v[2])} }
+func round1v(v [3]float64) [3]float64 { return [3]float64{round1(v[0]), round1(v[1]), round1(v[2])} }
 
 // projectBody renders the summary every project reply carries: presets,
 // filaments, plates and objects, overrides and warnings.
@@ -264,13 +304,23 @@ func labelsOf(be ProjectBackend, in *projects.Info) map[int][]string {
 // of a slice gives them (<name>_id_<n>_copy_<k>, what exclude_object takes).
 func exclusionLabels(in *projects.Info, last *projects.LastSlice) map[int][]string {
 	out := map[int][]string{}
+	// The store ties every label to its object (D5): one label per object, also
+	// when several objects share a name.
+	for _, p := range last.Plates {
+		for _, l := range p.ObjectLabels {
+			out[l.ObjectID] = append(out[l.ObjectID], l.Label)
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
 	for _, o := range in.Objects {
 		for _, p := range last.Plates {
 			if p.Plate != o.Plate {
 				continue
 			}
 			for _, name := range p.ExcludeNames {
-				if strings.HasPrefix(name, o.Name+"_id_") {
+				if strings.HasPrefix(name, projects.SanitizeInstanceName(o.Name)+"_id_") {
 					out[o.ID] = append(out[o.ID], name)
 				}
 			}
@@ -323,4 +373,20 @@ func partKindName(subtype string) string {
 		return "negative_part"
 	}
 	return subtype
+}
+
+// keyTwiceRE finds "key: key: " where a validation message repeats the key
+// the caller already put in front of it.
+var keyTwiceRE = regexp.MustCompile(`(^|; )([A-Za-z0-9_\[\]]+): ([A-Za-z0-9_\[\]]+): `)
+
+// dedupeKeyPrefix drops the second key of "sparse_infill_density:
+// sparse_infill_density: 150 is outside ..." in every part of a message.
+func dedupeKeyPrefix(msg string) string {
+	return keyTwiceRE.ReplaceAllStringFunc(msg, func(m string) string {
+		sub := keyTwiceRE.FindStringSubmatch(m)
+		if sub[2] != sub[3] {
+			return m
+		}
+		return sub[1] + sub[2] + ": "
+	})
 }

@@ -144,7 +144,7 @@ var otherWords = map[string]bool{
 var specTools = []string{
 	"get_slicer_status", "get_guide", "search_settings", "describe_setting", "browse_settings",
 	"list_presets", "get_preset", "create_project", "open_project", "list_projects", "get_project",
-	"add_model", "update_object", "remove_object", "update_settings", "set_presets", "add_modifier",
+	"add_model", "update_object", "remove_object", "remove_part", "update_settings", "set_presets", "add_modifier",
 	"set_height_ranges", "set_layer_actions", "manage_plates", "export_project", "delete_project",
 	"slice_project", "get_slice_status", "get_slice_report", "get_view",
 }

@@ -461,7 +461,7 @@ func (h *handle) warnings(in *Info, geo geometry) []Warning {
 			towered = []int{1}
 		}
 		if len(towered) > 0 {
-			add("prime_tower", "plate(s) %v print several filaments by layer: the slicer adds a prime tower with its own purge material and print time on top of the objects; every filament change also purges a flush volume (flush_volumes_matrix times flush_multiplier) into waste, often several times the tower itself (slice_project reports the tower grams and the flush per plate after slicing); print_sequence by object needs neither", towered)
+			add("prime_tower", "plate(s) %v print several filaments by layer: the slicer adds a prime tower with its own purge material and print time on top of the objects; every filament change also purges a flush volume (flush_volumes_matrix times flush_multiplier) into waste, often several times the tower itself (slice_project reports the tower grams and the flush per plate after slicing); when each object uses one filament, print_sequence by object removes the tower and most of the flush (a change between objects of different filaments still flushes)", towered)
 		}
 	}
 	// A range without layer_height crashes the slicer (found when a project with

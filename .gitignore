@@ -1,0 +1,11 @@
+# Local notes, plans, reference sources and printer snapshots
+/references/
+/dev_docs/
+
+# Go build output
+/creality-slicer-mcp
+/creality-slicer-mcp.exe
+/dist/
+
+# Project-scoped registry written by `creality-slicer-mcp add`
+/.creality-slicer-mcp/

@@ -1,0 +1,7 @@
+# Keep LF line endings in the repository and in every checkout, whatever a
+# machine's core.autocrlf says: gofmt expects LF, and install.sh must be LF
+# to run under sh.
+* text=auto eol=lf
+
+*.png binary
+*.gif binary

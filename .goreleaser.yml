@@ -1,0 +1,28 @@
+version: 2
+
+project_name: creality-slicer-mcp
+
+builds:
+  - id: creality-slicer-mcp
+    main: .
+    binary: creality-slicer-mcp
+    env: [CGO_ENABLED=0]
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [binary]
+    name_template: '{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}'
+
+checksum:
+  name_template: SHA256SUMS.txt
+
+release:
+  extra_files:
+    - glob: ./install.sh
+    - glob: ./install.ps1
+
+changelog:
+  disable: true

@@ -35,6 +35,9 @@ type ToolInfo struct {
 	Type       string
 	Colour     string
 	FilamentID string
+	// SpoolSlot is the CFS slot (T1A ..) of the spool this filament was made from
+	// (create_project or set_presets with spools), empty otherwise.
+	SpoolSlot string
 }
 
 // PlateResult is what one sliced plate produced.
@@ -542,6 +545,10 @@ func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res
 		sizes = nil
 	}
 	summaries := map[int]gcodeinfo.Summary{}
+	var spoolLinks []SpoolLink
+	if m, err := s.readMeta(id); err == nil {
+		spoolLinks = m.Spools
+	}
 	for _, file := range res.GCodeFiles {
 		plate, ok := plateOfFile(file)
 		if !ok {
@@ -569,6 +576,11 @@ func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res
 			pr.ExcludeNames = append(pr.ExcludeNames, o.Name)
 		}
 		pr.Tools = toolTable(sp, sum)
+		for i := range pr.Tools {
+			if t := pr.Tools[i].Tool; t < len(spoolLinks) && spoolLinks[t].Preset == pr.Tools[i].Preset {
+				pr.Tools[i].SpoolSlot = spoolLinks[t].Slot
+			}
+		}
 		pr.ObjectLabels = objectLabels(sp, plate, pr.ExcludeNames)
 		pr.Actions = scanActions(file, snap.layerActions(plate))
 		pr.PrimeTowerG, pr.PrimeTowerS = primeTower(file, sum)

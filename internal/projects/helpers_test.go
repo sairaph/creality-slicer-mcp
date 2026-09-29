@@ -18,12 +18,14 @@ import (
 )
 
 const (
-	testPrinter  = DefaultPrinter
-	testPrinter6 = "Creality K2 0.6 nozzle"
-	testProcess  = "0.20mm Standard @Creality K2 0.4 nozzle"
-	testPLA      = "TP-PLA @Creality K2 0.4 nozzle"
-	testPETG     = "TP-PETG @Creality K2 0.4 nozzle"
-	testOther    = "TP-PLA @Creality K2 0.6 nozzle"
+	testPrinter     = DefaultPrinter
+	testPrinter6    = "Creality K2 0.6 nozzle"
+	testProcess     = "0.20mm Standard @Creality K2 0.4 nozzle"
+	testPLA         = "TP-PLA @Creality K2 0.4 nozzle"
+	testPETG        = "TP-PETG @Creality K2 0.4 nozzle"
+	testOther       = "TP-PLA @Creality K2 0.6 nozzle"
+	testGenericPLA  = "Generic PLA @Creality K2 0.4 nozzle"
+	testGenericPETG = "Generic PETG @Creality K2 0.4 nozzle"
 )
 
 func writeFile(t *testing.T, path, content string) {
@@ -74,6 +76,8 @@ func writeBundle(t *testing.T, processExtra string) string {
 	add("filament", testPLA, fil(testPLA, "P001", "PLA", "#FFFFFF", testPrinter))
 	add("filament", testPETG, fil(testPETG, "P002", "PETG", "#000000", testPrinter))
 	add("filament", testOther, fil(testOther, "P003", "PLA", "#FFFFFF", testPrinter6))
+	add("filament", testGenericPLA, fil(testGenericPLA, "GFL99", "PLA", "#FFFFFF", testPrinter))
+	add("filament", testGenericPETG, fil(testGenericPETG, "GFG99", "PETG", "#FFFFFF", testPrinter))
 	var idx strings.Builder
 	list := func(key string, es []entry) {
 		idx.WriteString(fmt.Sprintf("%q: [", key))

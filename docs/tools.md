@@ -2,7 +2,7 @@
 
 [Back to README](../README.md) · [Installation](installation.md) · [Configuration](configuration.md)
 
-Creality Slicer MCP exposes 27 tools, grouped below by task: the first seven read the settings catalog, the guide and the installed Creality Print's presets and change nothing; the project tools change only this server's own projects store; the slicing tools run the installed Creality Print. Nothing here talks to a printer. Every tool carries a title and behaviour hints (read-only, changing, destructive) that clients use for approval prompts, and the server sends short instructions that name the rules shared by all tools: paths, the store, the printer handoff and never guessing a setting key. The `creality-slicer` guide skill (see [installation](installation.md#what-is-written-where)) holds the same pages `get_guide` serves.
+Creality Slicer MCP exposes 28 tools, grouped below by task: the first seven read the settings catalog, the guide and the installed Creality Print's presets and change nothing; the project tools change only this server's own projects store; the slicing tools run the installed Creality Print. Nothing here talks to a printer. Every tool carries a title and behaviour hints (read-only, changing, destructive) that clients use for approval prompts, and the server sends short instructions that name the rules shared by all tools: paths, the store, the printer handoff and never guessing a setting key. The `creality-slicer` guide skill (see [installation](installation.md#what-is-written-where)) holds the same pages `get_guide` serves.
 
 Conventions shared by the tools:
 
@@ -112,7 +112,8 @@ Create a project with a printer, a process and at least one filament.
 
 - `name` (string, required).
 - `printer` (string, optional, default `Creality K2 0.4 nozzle`), `process` (string, optional, default the printer's default process), `bed_type` (string, optional).
-- `filaments` (list, required, at least one): each `{preset, colour}`, colour `#RRGGBB`. One entry per colour of a multi-colour print.
+- `filaments` (list, optional when `spools` is given, otherwise at least one): each `{preset, colour}`, colour `#RRGGBB`. One entry per colour of a multi-colour print.
+- `spools` (list, optional, instead of `filaments`): CFS spools exactly as `creality-k2-mcp` `get_filaments` reports them, `{slot (T1A to T4D), catalog_id, material, colour, status, name}`; the order is the filament order. Each spool gets the preset compatible with the printer whose `filament_id` equals `catalog_id` (match `exact`), else the Generic preset of the material (match `generic`, called out in the reply), else `invalid_input` listing the compatible presets of that material. A spool with status `undefined` or `unknown`, or without a material, is refused. The colour is normalised to `#RRGGBB` (white with a note when missing). The slot, catalog id and match are kept per filament (front matter `spool_slot`, `catalog_id`, `match`, and a Spools block in the reply); `slice_project` then gives each handoff a ready `slot_map` for `start_print` when every used tool has a spool slot. `set_presets` takes the same `spools` list.
 
 The front matter has the project fields, `printer`, `process`, `filaments` (`index`, `preset`, `type`, `colour`) and `plates`. An unknown or incompatible preset is an `invalid_input` error with the compatible names. The body says what to do next (`add_model`) and reminds you to match filament types to the loaded spools.
 
@@ -122,6 +123,7 @@ Import a Creality Print or Bambu-family 3MF as a new project. The file is copied
 
 - `path` (string, required): a `.3mf` project file. A file with no project settings is an `invalid_input` error (use `create_project` and `add_model`).
 - `name` (string, optional, default the file name).
+- `into` (string, optional): the id of an existing project whose content this file replaces (a project saved in the app after `open_in_app` mode project): id, name and folder stay, the revision goes up by one, the last slice is void, spool links stay while the filament keeps its preset. `name` is ignored then.
 - `preview` (string, optional, `none` | `small`, default `none`): `small` attaches the thumbnail the app stored in the file, when it has one.
 
 The front matter has the project fields, `source_path`, `app_version`, `printer`, `process`, `filaments`, `plates`, `objects`, `painted` (objects with painted data: kept, but only the app can edit them) and `sliced_in_file`. The body summarises the project and warns about another printer than the K2 family, a file from a newer app version and presets missing on this machine.
@@ -216,6 +218,7 @@ Change the printer, process or filament presets, or the flush matrix.
 - `project` (string, required).
 - `printer`, `process` (string, optional).
 - `filaments` (list, optional): the full list in slot order, `{preset, colour}`. Shrinking is refused while objects use the removed slots.
+- `spools` (list, optional, instead of `filaments`): CFS spools as in `create_project`; they replace the filament list. Filaments given by hand drop the spool links.
 - `keep_changes` (boolean, optional, default true): keep this project's changed settings when re-basing on a new preset.
 - `flush_matrix` (list of integers, optional): N*N flush volumes in mm3, row by row, from filament to filament; omit for the automatic matrix. `flush_multiplier` (number, optional).
 - `include_screenshot` (boolean, optional, default true): attach the screenshot described in the conventions above.
@@ -260,6 +263,16 @@ Add, remove, rename, lock or unlock a plate, or set plate settings.
 - `include_screenshot` (boolean, optional, default true): attach the screenshot described in the conventions above.
 
 Removing a plate with objects is refused. Locking sets the plate's lock flag, which the app honours when it arranges; the `arrange` option of `slice_project` ignores it. The front matter has `action` and `plates`.
+
+### `open_in_app`
+
+Open a project in Creality Print, in a new window. It starts the installed app on one file and nothing else: no option is passed, no running window is contacted, and no window is ever closed, signalled or replaced. The app takes a while to start; the user closes the new window when done, and windows that were already open are untouched. It needs a supported install (7.2 or 7.3) and is refused with `unavailable` otherwise.
+
+- `project` (string, required).
+- `plate` (integer, optional, from 1, default 1).
+- `mode` (string, optional, `preview` | `project`, default `preview`): `preview` copies the G-code of that plate's slice to `view/plate<N>_r<revision>.gcode` in the project's folder and opens it in the app's Preview tab (the slice must be from the current revision, else a `conflict` that says to call `slice_project` first). `project` writes the current project to `view/<name>_r<revision>.3mf` and opens it in the 3D editor. Both open a copy, so a running app never locks the slice output or the project; older view files of the project that are not in use are removed when a new one is written.
+
+The front matter has the project fields, `mode`, `plate`, `file`, `pid` (the new process) and `app_version`. The body says what opened and that other windows are untouched. A file in the view folder that the user changed after the server wrote it (saved in the app) is never overwritten or deleted: it is listed in `saved_files` on every call until it is removed, with a line for each, "You saved changes in <file>: bring them back with open_project with {path, into}", and the app is opened on a new file, not on that one. In `project` mode it adds how to bring changes back: save in the app (File > Save Project), then call `open_project` with `path` set to the file and `into` set to the project id, which replaces that project's content and keeps its id, name and folder.
 
 ### `export_project`
 

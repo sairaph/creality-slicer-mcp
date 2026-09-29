@@ -56,6 +56,7 @@ func newServer(config Config, extra ...func(*Server)) *Server {
 	srv.registerEditTools()
 	srv.registerSliceTools()
 	srv.registerViewTools()
+	srv.registerAppTools()
 
 	for _, register := range extra {
 		register(srv)

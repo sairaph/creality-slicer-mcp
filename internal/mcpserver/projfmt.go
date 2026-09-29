@@ -102,16 +102,22 @@ func base(in *projects.Info) baseFront {
 
 // filamentFront is one filament slot in a front matter.
 type filamentFront struct {
-	Index  int    `yaml:"index"`
-	Preset string `yaml:"preset"`
-	Type   string `yaml:"type"`
-	Colour string `yaml:"colour"`
+	Index     int    `yaml:"index"`
+	Preset    string `yaml:"preset"`
+	Type      string `yaml:"type"`
+	Colour    string `yaml:"colour"`
+	SpoolSlot string `yaml:"spool_slot,omitempty"`
+	CatalogID string `yaml:"catalog_id,omitempty"`
+	Match     string `yaml:"match,omitempty"`
 }
 
 func filamentsFront(in *projects.Info) []filamentFront {
 	out := make([]filamentFront, len(in.Filaments))
 	for i, f := range in.Filaments {
 		out[i] = filamentFront{Index: f.Index, Preset: f.Preset, Type: f.Type, Colour: f.Colour}
+		if f.Spool != nil {
+			out[i].SpoolSlot, out[i].CatalogID, out[i].Match = f.Spool.Slot, f.Spool.CatalogID, f.Spool.Match
+		}
 	}
 	return out
 }
@@ -172,6 +178,7 @@ func projectBody(in *projects.Info, labels map[int][]string) string {
 	for _, f := range in.Filaments {
 		fmt.Fprintf(&b, "%d | %s | %s | %s\n", f.Index, pipeSafe(f.Preset), f.Type, f.Colour)
 	}
+	b.WriteString(spoolLines(in))
 	b.WriteString("\nPlates:\n")
 	for _, p := range in.Plates {
 		name := p.Name
@@ -410,4 +417,35 @@ func dedupeKeyPrefix(msg string) string {
 		}
 		return sub[1] + sub[2] + ": "
 	})
+}
+
+// spoolLines lists the filaments that were made from CFS spools: the slot, the
+// spool and the preset chosen, with a generic match called out.
+func spoolLines(in *projects.Info) string {
+	var b strings.Builder
+	generic := false
+	for _, f := range in.Filaments {
+		sp := f.Spool
+		if sp == nil {
+			continue
+		}
+		what := strings.TrimSpace(strings.Join([]string{sp.Material, sp.Colour, sp.Name}, " "))
+		match := "exact match on catalog id " + sp.CatalogID
+		if sp.Match == projects.MatchGeneric {
+			generic = true
+			match = "GENERIC preset of the material (no preset has catalog id " + orDash(sp.CatalogID) + ")"
+		}
+		fmt.Fprintf(&b, "filament %d <- spool %s (%s): %s, %s\n", f.Index, orDash(sp.Slot), what, pipeSafe(f.Preset), match)
+		if sp.Note != "" {
+			fmt.Fprintf(&b, "  note: %s\n", sp.Note)
+		}
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	out := "\nSpools (filament <- CFS slot, spool, chosen preset):\n" + b.String()
+	if generic {
+		out += "A generic preset carries generic temperatures and flow, not the tuned values of the spool's brand: check them, or pick a preset with set_presets filaments.\n"
+	}
+	return out
 }

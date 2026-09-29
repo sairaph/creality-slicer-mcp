@@ -54,6 +54,7 @@ func projectBundle(t *testing.T) string {
 	}
 	add("filament", tpPLA, fil(tpPLA, "P001", "PLA", "#FFFFFF"))
 	add("filament", tpPETG, fil(tpPETG, "P002", "PETG", "#000000"))
+	add("filament", "Generic PLA @Creality K2 0.4 nozzle", fil("Generic PLA @Creality K2 0.4 nozzle", "GFL99", "PLA", "#FFFFFF"))
 	var idx strings.Builder
 	idx.WriteString(`{"name":"Creality","version":"9.0.0.1","description":"synthetic"`)
 	for _, kind := range []string{"machine", "process", "filament"} {
@@ -180,13 +181,15 @@ type projFixture struct {
 	store *projects.Store
 	// builds counts the projects backends the server built.
 	builds int
+	// launcher stands in for the application launcher.
+	launcher *fakeLauncher
 	// wrap, set before the first call, wraps the store the server gets.
 	wrap func(ProjectStore) ProjectStore
 }
 
 func newProjFixture(t *testing.T, opts ...func(*Config)) *projFixture {
 	t.Helper()
-	pf := &projFixture{exec: &fakeSlicer{}}
+	pf := &projFixture{exec: &fakeSlicer{}, launcher: &fakeLauncher{}}
 	root := projectBundle(t)
 	dir := t.TempDir()
 	in := slicer.Install{
@@ -196,8 +199,9 @@ func newProjFixture(t *testing.T, opts ...func(*Config)) *projFixture {
 	}
 	fi := &fakeInstall{install: in}
 	deps := Deps{
-		Install: fi,
-		Texts:   func(string) (catalog.TextSource, error) { return fakeTexts{}, nil },
+		Install:  fi,
+		Launcher: pf.launcher,
+		Texts:    func(string) (catalog.TextSource, error) { return fakeTexts{}, nil },
 		NewProjects: func(in slicer.Install, ps ProfileStore, cat *catalog.Catalog) (ProjectBackend, error) {
 			real, ok := ps.(*profiles.Store)
 			if !ok {

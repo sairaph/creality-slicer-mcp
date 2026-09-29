@@ -16,6 +16,9 @@ type PresetsRequest struct {
 	Printer   string
 	Process   string
 	Filaments []FilamentSpec
+	// Spools replaces the filaments with ones made from CFS spools (exclusive
+	// with Filaments).
+	Spools []SpoolSpec
 	// KeepChanges keeps the project's changed settings of a preset that is
 	// replaced (those of an unchanged preset are always kept).
 	KeepChanges bool
@@ -99,6 +102,15 @@ func (s *Store) SetPresets(ref string, req PresetsRequest) (*PresetsResult, erro
 			}
 			res.Changed = append(res.Changed, fmt.Sprintf("process: %s -> %s", old.Process.Name, process.Name))
 		}
+		if len(req.Spools) > 0 && req.Filaments != nil {
+			return invalidf("give spools or filaments, not both", "spools and filaments contradict each other")
+		}
+		var links []SpoolLink
+		if len(req.Spools) > 0 {
+			if req.Filaments, links, err = s.resolveSpools(printer.Name, req.Spools); err != nil {
+				return err
+			}
+		}
 		newFil := old.Filaments
 		colours := old.Colours
 		if req.Filaments != nil {
@@ -127,6 +139,9 @@ func (s *Store) SetPresets(ref string, req PresetsRequest) (*PresetsResult, erro
 			if len(newFil) < oldN {
 				res.Changed = append(res.Changed, fmt.Sprintf("filaments: %d -> %d", oldN, len(newFil)))
 			}
+		}
+		if len(req.Spools) > 0 && !sameLinks(links, h.meta.Spools) {
+			res.Changed = append(res.Changed, "filaments follow the CFS spools")
 		}
 		if len(res.Changed) == 0 && req.FlushMultiplier == "" && req.FlushMatrix == nil && !req.AutoFlush {
 			return invalidf("give printer, process or filaments that differ from the project's", "nothing to change: the project already uses these presets")
@@ -277,6 +292,11 @@ func (s *Store) SetPresets(ref string, req PresetsRequest) (*PresetsResult, erro
 					return errf(CodeInternal, "", "%v", err)
 				}
 			}
+		}
+		if len(req.Spools) > 0 {
+			h.meta.Spools = links
+		} else if req.Filaments != nil {
+			h.meta.Spools = nil // filaments given by hand: the old spool links no longer describe them
 		}
 		if len(newFil) != oldN {
 			res.Warnings = append(res.Warnings, "the number of filaments changed: check the wipe tower and the filament of every object")

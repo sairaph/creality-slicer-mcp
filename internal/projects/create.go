@@ -32,6 +32,8 @@ type CreateRequest struct {
 	// Filaments are the slots in order; at least one, each with a colour.
 	Filaments []FilamentSpec
 	BedType   string // curr_bed_type (a plate type name); default from the catalog
+	// Spools makes the filaments from CFS spools instead (exclusive with Filaments).
+	Spools []SpoolSpec
 }
 
 // alternatives names up to n compatible presets of a type for a printer, for
@@ -155,6 +157,15 @@ func (s *Store) CreateProject(req CreateRequest) (*Info, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(req.Spools) > 0 && len(req.Filaments) > 0 {
+		return nil, invalidf("give spools or filaments, not both", "spools and filaments contradict each other")
+	}
+	var links []SpoolLink
+	if len(req.Spools) > 0 {
+		if req.Filaments, links, err = s.resolveSpools(printer.Name, req.Spools); err != nil {
+			return nil, err
+		}
+	}
 	filaments, colours, err := s.resolveFilaments(printer.Name, req.Filaments)
 	if err != nil {
 		return nil, err
@@ -191,7 +202,7 @@ func (s *Store) CreateProject(req CreateRequest) (*Info, error) {
 	if err := p.SetCustomGCodes(1, mode, nil); err != nil {
 		return fail(errf(CodeInternal, "", "%v", err))
 	}
-	m := &meta{Name: name, Created: s.now(), Updated: s.now(), Revision: 0}
+	m := &meta{Name: name, Created: s.now(), Updated: s.now(), Revision: 0, Spools: links}
 	// The first save goes through a handle so the thumbnails and the revision
 	// follow the same path as every later change.
 	if err := p.Save(filepath.Join(dir, projectFile)); err != nil {
@@ -222,6 +233,9 @@ func (s *Store) CreateProject(req CreateRequest) (*Info, error) {
 type OpenRequest struct {
 	Path string // .3mf written by Creality Print (or Bambu Studio / Orca)
 	Name string // optional; default the project title or the file name
+	// Into is an existing project id: its content is replaced by the file (a
+	// project the app saved), keeping id, name and folder. Name is ignored then.
+	Into string
 }
 
 // OpenResult reports what was imported.
@@ -282,6 +296,10 @@ func (s *Store) OpenProject(req OpenRequest) (*OpenResult, error) {
 	if !isSlicer {
 		return fail(invalidf("use create_project and add_model to import the meshes of this file into a new project",
 			"%q is a plain 3MF (no slicer settings), not a slicer project", path))
+	}
+	if req.Into != "" {
+		defer func() { _ = removeAll(dir) }()
+		return s.openInto(req.Into, path, filepath.Join(dir, projectFile))
 	}
 	if name == "" {
 		name = title
@@ -361,4 +379,92 @@ func (s *Store) sweepOpening() {
 			_ = removeAll(s.dir(e.Name()))
 		}
 	}
+}
+
+// openInto replaces the content of an existing project with a validated 3MF
+// (tmpFile, a copy of the source path): the id, name, folder and job.json data
+// stay, the revision goes up by one and every earlier slice result is dropped.
+func (s *Store) openInto(ref, source, tmpFile string) (*OpenResult, error) {
+	id, err := s.resolve(ref)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	job := s.running[id]
+	s.mu.Unlock()
+	if job != "" {
+		return nil, conflictf("cancel it with get_slice_status or wait", "project %s is being sliced (job %s)", id, job)
+	}
+	unlock, err := s.lock(id)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	if _, err := s.readMeta(id); err != nil {
+		return nil, notFoundf("call list_projects to see the projects", "project %s cannot be read: %v", id, err)
+	}
+	dst := filepath.Join(s.dir(id), projectFile)
+	old := dst + ".old"
+	// The file and job.json change together: the old file is kept aside until the
+	// metadata is written, and put back when anything fails.
+	retry := func(from, to string) (err error) {
+		for attempt := 0; attempt < 30; attempt++ {
+			if err = os.Rename(from, to); err == nil {
+				return nil
+			}
+			time.Sleep(100 * time.Millisecond) // a virus scanner can hold the file for a moment
+		}
+		return err
+	}
+	_ = os.Remove(old)
+	if err := retry(dst, old); err != nil {
+		return nil, errf(CodeInternal, "the project file may be in use by another reader; try again in a moment", "replacing the project failed: %v", err)
+	}
+	done := false
+	defer func() {
+		if done {
+			_ = os.Remove(old)
+			return
+		}
+		_ = os.Remove(dst)
+		_ = retry(old, dst)
+	}()
+	if err := retry(tmpFile, dst); err != nil {
+		return nil, errf(CodeInternal, "the project file may be in use by another reader; try again in a moment", "replacing the project failed: %v", err)
+	}
+	h, err := s.openLocked(id)
+	if err != nil {
+		return nil, err
+	}
+	defer h.close()
+	h.meta.Revision++
+	h.meta.Updated = s.now()
+	h.meta.SourcePath = source
+	h.meta.LastSlice = nil
+	h.meta.PlateRev = nil
+	h.allPlates = true
+	// A spool link stays while its filament keeps the same preset.
+	var names []string
+	if h.p.Settings != nil {
+		names = h.p.Settings.List("filament_settings_id")
+	}
+	var links []SpoolLink
+	for i, l := range h.meta.Spools {
+		if i < len(names) && names[i] == l.Preset {
+			links = append(links, l)
+		} else {
+			break // links are by position: keep only the unbroken start
+		}
+	}
+	h.meta.Spools = links
+	h.recordSaved()
+	res := &OpenResult{SourceAppVersion: h.appVersion()}
+	if res.Info, err = h.info(); err != nil {
+		return nil, err
+	}
+	if err := s.writeMeta(id, h.meta); err != nil {
+		return nil, errf(CodeInternal, "", "saving the project metadata failed: %v", err)
+	}
+	done = true
+	return res, nil
 }

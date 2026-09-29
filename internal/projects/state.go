@@ -25,6 +25,8 @@ type FilamentInfo struct {
 	Colour     string
 	FilamentID string
 	IsSupport  bool
+	// Spool is the CFS spool the filament was made from, nil for a plain filament.
+	Spool *SpoolInfo
 }
 
 // PlateInfo is one plate.
@@ -291,6 +293,13 @@ func (h *handle) info() (*Info, error) {
 				f.IsSupport = support[i] == "1"
 			}
 			in.Filaments = append(in.Filaments, f)
+		}
+		names := make([]string, len(in.Filaments))
+		for i, f := range in.Filaments {
+			names[i] = f.Preset
+		}
+		for i, sp := range h.spoolInfos(names) {
+			in.Filaments[i].Spool = sp
 		}
 		in.FlushMode = "auto"
 		if cfg.String("flush_volumes_changed") == "1" {

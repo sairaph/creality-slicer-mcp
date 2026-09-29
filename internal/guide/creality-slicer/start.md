@@ -14,9 +14,9 @@ New project from a mesh:
 {"name": "bracket", "filaments": [{"preset": "Hyper PLA @Creality K2 0.4 nozzle", "colour": "#FFFFFF"}]}
 ```
 
-Send that to create_project. The printer defaults to `Creality K2 0.4 nozzle` and the process to the printer's default (`0.20mm Standard`). At least one filament with a `#RRGGBB` colour is required. Use list_presets (type `filament`, `filament_type` "PLA") to find exact preset names.
+Send that to create_project. The printer defaults to `Creality K2 0.4 nozzle` and the process to the printer's default (`0.20mm Standard`). At least one filament with a `#RRGGBB` colour is required. On a K2 Combo the recommended flow is: get_filaments on creality-k2-mcp, then create_project with `spools` (the slots as reported) instead of `filaments`, then the steps below, then slice_project, whose reply carries a `slot_map` for start_print (see `multicolor-cfs`). Use list_presets (type `filament`, `filament_type` "PLA") to find exact preset names.
 
-Existing project: open_project with the .3mf path. The file is copied; your original is untouched. The reply lists painted objects and whether the file already holds a slice.
+To look at the result in Creality Print without leaving the flow, call open_in_app (see `gui-handoff`). Existing project: open_project with the .3mf path (or with `into` set to a project id to replace that project's content with a file saved in the app). The file is copied; your original is untouched. The reply lists painted objects and whether the file already holds a slice.
 
 ## 3. Add models
 

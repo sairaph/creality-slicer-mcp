@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/sairaph/creality-slicer-mcp/internal/applaunch"
 	"github.com/sairaph/creality-slicer-mcp/internal/catalog"
 	"github.com/sairaph/creality-slicer-mcp/internal/domain"
 	"github.com/sairaph/creality-slicer-mcp/internal/motext"
@@ -72,6 +73,9 @@ type Deps struct {
 	// with the real slicer runner (when the install is supported). Tests
 	// build one over a temporary folder with a fake slicer process.
 	NewProjects func(in slicer.Install, ps ProfileStore, cat *catalog.Catalog) (ProjectBackend, error)
+	// Launcher starts a Creality Print window on a file (open_in_app); default
+	// applaunch.Real. Tests inject a fake: the real one refuses under go test.
+	Launcher applaunch.Launcher
 }
 
 // ProjectStore is the part of *projects.Store the tools use, one method per
@@ -104,6 +108,7 @@ type ProjectStore interface {
 	StoredThumbnail(ref string, plate int) ([]byte, error)
 	SettingValue(ref, key string) (*projects.SettingValue, error)
 	View(ref string, req projects.ViewRequest) (*projects.ViewResult, error)
+	PrepareView(ref string, plate int, mode string) (*projects.ViewFile, error)
 }
 
 // ProjectBackend is the projects layer and the slice jobs it started. The
@@ -177,6 +182,9 @@ func (d Deps) withDefaults(cfg Config) Deps {
 	}
 	if d.NewProjects == nil {
 		d.NewProjects = realProjects
+	}
+	if d.Launcher == nil {
+		d.Launcher = applaunch.Real{}
 	}
 	return d
 }

@@ -15,6 +15,19 @@ Creality Print 7.2 or 7.3. Some jobs exist only in the app. Do not promise them 
 
 Painting already in a project is kept: it travels inside the file. The tools list painted objects (get_project shows `painted`) but never parse or edit the painted data.
 
+## Look at it in the app
+
+open_in_app opens a project in a new Creality Print window, so the user can look at it in the app's own views. It never closes, signals or replaces an app window: the user closes the new window when done, and windows that were already open are left alone.
+
+- `mode` `preview` (the default): call slice_project first; the plate's G-code from the current revision is copied into the project's view folder and opened in the Preview tab with its toolpaths. Without a current slice the call is refused with a hint to slice first.
+- `mode` `project`: the current project is written as a 3MF into the view folder and opened in the 3D editor, where the user can paint, cut or check it.
+
+```json
+{"project": "bracket", "plate": 1, "mode": "preview"}
+```
+
+The reply names the file, the process id and the app version. If the user saved into a file in the view folder, the reply says "You saved changes in <file>" and how to bring it back with open_project (`path` and `into`): that file is never overwritten. Tell the user a new window opens (the app takes a while to start) and what to look at.
+
 ## The round trip
 
 1. Call export_project with an absolute `path` ending in .3mf (and `overwrite` true only if replacing your own earlier export):
@@ -30,7 +43,7 @@ Painting already in a project is kept: it travels inside the file. The tools lis
 {"path": "C:/work/bracket-for-app.3mf", "name": "bracket v2"}
 ```
 
-The file is copied into the store as a new project; your earlier project stays as it was. Check the reply for warnings (a newer app version, missing presets on this machine, painted objects).
+The file is copied into the store as a new project; your earlier project stays as it was. After open_in_app with `mode` `project`, bring the changes back into the same project instead: the user saves in the app (File > Save Project) and you call open_project with `path` set to that file and `into` set to the project id. The project keeps its id, name and folder, its revision goes up by one and its last slice is no longer current, so slice again. Check the reply for warnings (a newer app version, missing presets on this machine, painted objects).
 4. Continue with add_model, update_settings or slice_project on the new project.
 
 The app does not need to be closed for slicing here; the server runs its own separate slicing process and never changes the app's own profiles or settings.

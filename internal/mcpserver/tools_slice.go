@@ -47,6 +47,7 @@ type toolFront struct {
 	Type       string `yaml:"type"`
 	Colour     string `yaml:"colour"`
 	FilamentID string `yaml:"filament_id,omitempty"`
+	SpoolSlot  string `yaml:"spool_slot,omitempty"`
 }
 
 type slicePlateFront struct {
@@ -74,6 +75,8 @@ type handoffFront struct {
 	UploadName   string      `yaml:"upload_name"`
 	Tools        []toolFront `yaml:"tools"`
 	ExcludeNames []string    `yaml:"exclude_names,omitempty"`
+	// SlotMap is ready for start_print when every tool has a stored spool slot.
+	SlotMap []slotMapFront `yaml:"slot_map,omitempty"`
 }
 
 type sliceFront struct {
@@ -219,9 +222,10 @@ func sliceReply(info *projects.Info, last *projects.LastSlice, warnings []string
 		})
 		h := handoffFront{Plate: p.Plate, GCodePath: p.GCodePath, UploadName: p.UploadName, ExcludeNames: p.ExcludeNames}
 		for _, t := range p.Tools {
-			h.Tools = append(h.Tools, toolFront{Tool: fmt.Sprintf("T%d", t.Tool), Filament: t.Tool, Preset: t.Preset, Type: t.Type, Colour: t.Colour, FilamentID: t.FilamentID})
+			h.Tools = append(h.Tools, toolFront{Tool: fmt.Sprintf("T%d", t.Tool), Filament: t.Tool, Preset: t.Preset, Type: t.Type, Colour: t.Colour, FilamentID: t.FilamentID, SpoolSlot: t.SpoolSlot})
 			fmt.Fprintf(&tools, "%d | T%d | %d | %s | %s | %s\n", p.Plate, t.Tool, t.Tool, pipeSafe(t.Preset), t.Type, t.Colour)
 		}
+		h.SlotMap = slotMap(h.Tools)
 		front.Handoff = append(front.Handoff, h)
 		for _, a := range p.Actions {
 			kind := strings.ReplaceAll(a.Kind, "_", " ")
@@ -273,7 +277,7 @@ func sliceReply(info *projects.Info, last *projects.LastSlice, warnings []string
 	if len(front.Warnings) > 0 {
 		b.WriteString("\nWarnings:\n- " + strings.Join(front.Warnings, "\n- ") + "\n")
 	}
-	b.WriteString("\n" + handoffText())
+	b.WriteString("\n" + handoffText(front.Handoff))
 	return successResult(front, strings.TrimRight(b.String(), "\n"))
 }
 
@@ -308,12 +312,27 @@ func fmtBytes(n int64) string {
 }
 
 // handoffText says how to print a slice with the creality-k2-mcp server.
-func handoffText() string {
+func handoffText(handoff []handoffFront) string {
 	var b strings.Builder
 	b.WriteString("Next, to print (the creality-k2-mcp server does that; this server never talks to the printer):\n")
-	b.WriteString("1. get_filaments: check that each tool above has a loaded spool of the same type and a close colour.\n")
+	b.WriteString("1. get_filaments: check that each tool above still has a loaded spool of the same type and a close colour.\n")
 	b.WriteString("2. upload_gcode_file with path = the G-code path and filename = the upload name.\n")
-	b.WriteString("3. start_print with filename = the upload name, source = cfs and slot_map = a list of {filament, slot}: filament is the tool's 0-based index above, slot is the CFS slot (T1A to T4D) whose spool has the same material type. Ask the user before starting.\n")
+	var maps []string
+	for _, h := range handoff {
+		if len(h.SlotMap) == 0 {
+			continue
+		}
+		var parts []string
+		for _, m := range h.SlotMap {
+			parts = append(parts, fmt.Sprintf(`{"filament": %d, "slot": "%s"}`, m.Filament, m.Slot))
+		}
+		maps = append(maps, fmt.Sprintf("plate %d: [%s]", h.Plate, strings.Join(parts, ", ")))
+	}
+	if len(maps) > 0 {
+		b.WriteString("3. start_print with filename = the upload name, source = cfs and this slot_map, ready because the project was made from those spools (" + strings.Join(maps, "; ") + "). Ask the user before starting.\n")
+	} else {
+		b.WriteString("3. start_print with filename = the upload name, source = cfs and slot_map = a list of {filament, slot}: filament is the tool's 0-based index above, slot is the CFS slot (T1A to T4D) whose spool has the same material type. Ask the user before starting.\n")
+	}
 	b.WriteString("4. During the print, exclude_object with object_name = one of the exclusion labels skips a failed object.")
 	return b.String()
 }
@@ -874,4 +893,23 @@ func purgeLine(p projects.PlateResult) string {
 		return ""
 	}
 	return strings.Join(parts, ", ")
+}
+
+// slotMapFront is one entry of start_print's slot_map.
+type slotMapFront struct {
+	Filament int    `yaml:"filament"`
+	Slot     string `yaml:"slot"`
+}
+
+// slotMap is the slot_map of a plate when every tool it uses has a stored spool
+// slot (the project was made from spools), else nil.
+func slotMap(tools []toolFront) []slotMapFront {
+	var out []slotMapFront
+	for _, t := range tools {
+		if t.SpoolSlot == "" {
+			return nil
+		}
+		out = append(out, slotMapFront{Filament: t.Filament, Slot: t.SpoolSlot})
+	}
+	return out
 }

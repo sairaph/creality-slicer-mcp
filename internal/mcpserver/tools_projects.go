@@ -13,7 +13,7 @@ import (
 )
 
 func (s *Server) registerProjectTools() {
-	addTool(s.mcpServer, "create_project", withMinItems(inputSchema[createInput](nil), "filaments", 1), s.createProject)
+	addTool(s.mcpServer, "create_project", withMinItems(withMinItems(inputSchema[createInput](nil), "filaments", 1), "spools", 1), s.createProject)
 	addTool(s.mcpServer, "open_project", withEnum(inputSchema[openInput](nil), "preview", "none", "small"), s.openProject)
 	addTool(s.mcpServer, "list_projects", withRange(inputSchema[listProjectsInput](nil), 1, 1e6, "page"), s.listProjects)
 	addTool(s.mcpServer, "get_project", inputSchema[getProjectInput](nil), s.getProject)
@@ -47,13 +47,33 @@ func filamentSpecs(in []filamentInput) []projects.FilamentSpec {
 	return out
 }
 
+// spoolInput is one CFS spool as creality-k2-mcp get_filaments reports it.
+type spoolInput struct {
+	Slot      string `json:"slot,omitempty"`
+	CatalogID string `json:"catalog_id,omitempty"`
+	Material  string `json:"material"`
+	Colour    string `json:"colour,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Name      string `json:"name,omitempty"`
+}
+
+func spoolSpecs(in []spoolInput) []projects.SpoolSpec {
+	out := make([]projects.SpoolSpec, len(in))
+	for i, s := range in {
+		out[i] = projects.SpoolSpec{Slot: strings.TrimSpace(s.Slot), CatalogID: strings.TrimSpace(s.CatalogID), Material: strings.TrimSpace(s.Material),
+			Colour: strings.TrimSpace(s.Colour), Status: strings.TrimSpace(s.Status), Name: s.Name}
+	}
+	return out
+}
+
 // --- create_project ---
 
 type createInput struct {
 	Name      string          `json:"name"`
 	Printer   *string         `json:"printer,omitempty"`
 	Process   *string         `json:"process,omitempty"`
-	Filaments []filamentInput `json:"filaments"`
+	Filaments []filamentInput `json:"filaments,omitempty"`
+	Spools    []spoolInput    `json:"spools,omitempty"`
 	BedType   *string         `json:"bed_type,omitempty"`
 }
 
@@ -72,7 +92,7 @@ func (s *Server) createProject(ctx context.Context, _ *mcp.CallToolRequest, in c
 	}
 	info, err := be.Store.CreateProject(projects.CreateRequest{
 		Name: in.Name, Printer: deref(in.Printer), Process: deref(in.Process),
-		Filaments: filamentSpecs(in.Filaments), BedType: deref(in.BedType),
+		Filaments: filamentSpecs(in.Filaments), Spools: spoolSpecs(in.Spools), BedType: deref(in.BedType),
 	})
 	if err != nil {
 		return projFailure(err), nil, nil
@@ -89,6 +109,7 @@ func (s *Server) createProject(ctx context.Context, _ *mcp.CallToolRequest, in c
 type openInput struct {
 	Path    string  `json:"path"`
 	Name    *string `json:"name,omitempty"`
+	Into    *string `json:"into,omitempty"`
 	Preview *string `json:"preview,omitempty"`
 }
 
@@ -110,7 +131,7 @@ func (s *Server) openProject(ctx context.Context, _ *mcp.CallToolRequest, in ope
 	if fail != nil {
 		return fail, nil, nil
 	}
-	res, err := be.Store.OpenProject(projects.OpenRequest{Path: in.Path, Name: deref(in.Name)})
+	res, err := be.Store.OpenProject(projects.OpenRequest{Path: in.Path, Name: deref(in.Name), Into: strings.TrimSpace(deref(in.Into))})
 	if err != nil {
 		return projFailure(err), nil, nil
 	}
@@ -120,7 +141,11 @@ func (s *Server) openProject(ctx context.Context, _ *mcp.CallToolRequest, in ope
 		Filaments: filamentsFront(info), Plates: len(info.Plates), Objects: len(info.Objects), Painted: info.Painted, SlicedInFile: info.SlicedInFile,
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Opened `%s` as a copy in this server's store; the source file is untouched.\n\n", in.Path)
+	if deref(in.Into) != "" {
+		fmt.Fprintf(&b, "Replaced the content of project `%s` with `%s` (revision %d). The id, name and folder are kept; earlier slices are void, slice_project makes a new one. The source file is untouched.\n\n", info.ID, in.Path, info.Revision)
+	} else {
+		fmt.Fprintf(&b, "Opened `%s` as a copy in this server's store; the source file is untouched.\n\n", in.Path)
+	}
 	b.WriteString(projectBody(info, nil))
 	if len(info.Painted) > 0 {
 		fmt.Fprintf(&b, "\n\nPainted data in %s is kept as it is; these tools never edit painted regions (see get_guide topic gui-handoff).", strings.Join(info.Painted, ", "))

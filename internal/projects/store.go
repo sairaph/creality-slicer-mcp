@@ -133,6 +133,13 @@ type meta struct {
 	Objects int    `json:"objects"`
 	Plates  int    `json:"plates"`
 	Printer string `json:"printer,omitempty"`
+	// Spools ties filaments to the spools they were made from (create_project
+	// and set_presets with spools), by position; see SpoolLink.
+	Spools []SpoolLink `json:"spools,omitempty"`
+	// Views records the files PrepareView wrote into the view folder (name, size,
+	// sha256), so a file the user changed by saving into it is never overwritten
+	// or deleted.
+	Views []ViewRecord `json:"views,omitempty"`
 }
 
 func (s *Store) dir(id string) string { return filepath.Join(s.cfg.Root, id) }

@@ -68,6 +68,8 @@ var (
 	annAdditive = toolAnnotation{}
 	// annChanging changes or removes something that exists.
 	annChanging = toolAnnotation{destructive: true}
+	// annOpenWorld launches another program and leaves it running.
+	annOpenWorld = toolAnnotation{openWorld: true}
 	// annIdempotent changes state, but repeating the same call leaves the
 	// same state.
 	annIdempotent = toolAnnotation{idempotent: true}
@@ -83,6 +85,9 @@ var toolAnnotations = map[string]toolAnnotation{
 	"update_settings": annChanging, "set_presets": annChanging, "add_modifier": annAdditive,
 	"set_height_ranges": annChanging, "set_layer_actions": annChanging, "manage_plates": annChanging,
 	"export_project": annChanging, "delete_project": annChanging,
+	// open_in_app writes a copy into the project's view folder and starts an
+	// application window: it changes the store and is open world.
+	"open_in_app":   annOpenWorld,
 	"slice_project": annAdditive, "get_slice_status": annIdempotent, "get_slice_report": annReadOnly,
 }
 
@@ -153,22 +158,30 @@ var toolTexts = map[string]toolText{
 	},
 	// Projects.
 	"create_project": {
-		Description: `Create a project: an empty plate with a printer, a process and one preset per filament slot. Projects live in this server's own store and become Creality Print 3MF files on export. Each filament needs a preset and a colour; a multi-colour print needs one entry per colour. Presets must fit the printer: an unknown or incompatible one returns the compatible names. Next: add_model, then update_settings if needed, then slice_project. Match the filament types to the spools loaded in the printer (get_guide topic multicolor-cfs).`,
+		Description: `Create a project: an empty plate with a printer, a process and one preset per filament slot. Projects live in this server's own store and become Creality Print 3MF files on export. Each filament needs a preset and a colour; a multi-colour print needs one entry per colour. Presets must fit the printer: an unknown or incompatible one returns the compatible names. Next: add_model, then update_settings if needed, then slice_project. Match the filament types to the spools loaded in the printer (get_guide topic multicolor-cfs), or pass spools straight from creality-k2-mcp get_filaments and let the presets be chosen.`,
 		Params: map[string]string{
-			"name":               "project name, as shown in list_projects (does not have to be unique: the id is)",
-			"printer":            "printer preset name (default Creality K2 0.4 nozzle)",
-			"process":            "process preset name (default: the printer's default process, 0.20mm Standard for the K2)",
-			"filaments":          "filament slots in order; slot 1 is tool T0. At least one",
-			"filaments[].preset": "filament preset name, as list_presets shows it, for example Hyper PLA @Creality K2 0.4 nozzle",
-			"filaments[].colour": "colour as #RRGGBB, for example #FF0000",
-			"bed_type":           "bed surface for plate 1 (default: the printer's default), for example Textured PEI Plate",
+			"name":                "project name, as shown in list_projects (does not have to be unique: the id is)",
+			"printer":             "printer preset name (default Creality K2 0.4 nozzle)",
+			"process":             "process preset name (default: the printer's default process, 0.20mm Standard for the K2)",
+			"filaments":           "filament slots in order; slot 1 is tool T0. Give filaments or spools, not both",
+			"filaments[].preset":  "filament preset name, as list_presets shows it, for example Hyper PLA @Creality K2 0.4 nozzle",
+			"filaments[].colour":  "colour as #RRGGBB, for example #FF0000",
+			"spools":              "CFS spools exactly as creality-k2-mcp get_filaments reports them, in filament order (the first is filament 1): the preset with the same catalog_id is chosen, else the Generic preset of the material; the slot is remembered so slice_project can give start_print its slot_map. Instead of filaments",
+			"spools[].slot":       "CFS slot, T1A to T4D",
+			"spools[].catalog_id": "the 5 character Creality filament id of the spool, for example 06001",
+			"spools[].material":   "filament type of the spool, for example PLA or PETG (required; a slot the printer reports as undefined or unknown is refused)",
+			"spools[].colour":     "spool colour as hex, #RRGGBB (white when missing)",
+			"spools[].status":     "defined, rfid, undefined or unknown, as the printer reports it",
+			"spools[].name":       "spool name, for the reply only",
+			"bed_type":            "bed surface for plate 1 (default: the printer's default), for example Textured PEI Plate",
 		},
 	},
 	"open_project": {
-		Description: `Import an existing Creality Print or Bambu-family 3MF project into the store as a new project. The source file is copied and never changed. Reports presets, filaments, plates, objects, objects with painted data (kept, but only the app can edit them) and warnings: another printer than the K2 family, a file from a newer app version, presets missing on this machine. A file with no project settings is refused: use create_project and add_model instead.`,
+		Description: `Import an existing Creality Print or Bambu-family 3MF project into the store as a new project. The source file is copied and never changed. Reports presets, filaments, plates, objects, objects with painted data (kept, but only the app can edit them) and warnings: another printer than the K2 family, a file from a newer app version, presets missing on this machine. A file with no project settings is refused: use create_project and add_model instead. With into set to a project id the file replaces that project instead (for a project saved in the app).`,
 		Params: map[string]string{
 			"path":    "absolute path of a .3mf project file",
-			"name":    "name for the new project (default: the file name)",
+			"name":    "name for the new project (default: the file name); ignored with into",
+			"into":    "id of an existing project to replace with this file, for a project saved in the app after open_in_app mode project: the id, name and folder stay, the revision goes up, earlier slices are void",
 			"preview": "none (default) or small: small attaches the thumbnail the app stored in the file, when it has one (there is no large one)",
 		},
 	},
@@ -179,6 +192,13 @@ var toolTexts = map[string]toolText{
 	"get_project": {
 		Description: `Show one project as text: presets, filaments, plates and objects (size, plate-relative position, rotation, filament, overrides, painted), the parts of each object (modifier, negative part, support enforcer or blocker) with kind, size and position, the settings changed from the presets, the last slice and warnings such as objects outside the bed. Objects show their exclusion label once the project was sliced. For a picture call get_view.`,
 		Params:      map[string]string{},
+	},
+	"open_in_app": {
+		Description: `Open a project in Creality Print, in a new window that the user closes when done; windows already open are never touched, replaced or closed. mode preview (default) opens the G-code of a sliced plate in the app's Preview tab: slice_project first, the slice must be from the current revision. mode project opens the current project in the app's 3D editor for painting, cutting or checking; to bring changes back the user saves it in the app (File > Save Project) and open_project is called with that file and into set to this project. Both open a copy kept in the project's view folder. The reply names the file, the process id and the app version.`,
+		Params: map[string]string{
+			"plate": "plate to show, starting at 1 (default 1); preview shows that plate's slice",
+			"mode":  "preview (default): the sliced toolpaths in the Preview tab; project: the project in the 3D editor",
+		},
 	},
 	"get_view": {
 		Description: `Draw a plate from a named camera: the bed with a grid and the plate axes (X red, Y green), the objects in their filament colours, their modifiers, negative parts, support enforcers and blockers as translucent coloured volumes with outlines, each object's id and name, and optionally its height ranges as bands. Use it to check placement, heights and modifier coverage: the Front and Right views show heights. Frame one object with focus, hide or isolate objects, and ask for a size (the frame is 4:3). Labels that would cover each other are moved or left out and listed. It reads the project and changes nothing.`,
@@ -243,16 +263,23 @@ var toolTexts = map[string]toolText{
 		},
 	},
 	"set_presets": {
-		Description: `Change the project's printer, process or filament presets, or its flush matrix. At least one of printer, process, filaments, flush_matrix or flush_multiplier. Changing a preset re-bases the project on it; keep_changes decides whether this project's own changed settings survive. Filaments is the full list in slot order; a list shorter than now is refused while objects use the removed slots. Omit flush_matrix for the automatic flush volumes.`,
+		Description: `Change the project's printer, process or filament presets, or its flush matrix. At least one of printer, process, filaments, spools, flush_matrix or flush_multiplier. Changing a preset re-bases the project on it; keep_changes decides whether this project's own changed settings survive. Filaments is the full list in slot order; a list shorter than now is refused while objects use the removed slots. Omit flush_matrix for the automatic flush volumes.`,
 		Params: map[string]string{
-			"printer":            "printer preset name",
-			"process":            "process preset name",
-			"filaments":          "the full filament list in slot order, replacing the current one",
-			"filaments[].preset": "filament preset name, as list_presets shows it",
-			"filaments[].colour": "colour as #RRGGBB",
-			"keep_changes":       "keep this project's changed settings when switching presets (default true)",
-			"flush_matrix":       "manual flush volumes in mm3: N*N numbers for N filaments, row by row, from filament to filament (default: automatic)",
-			"flush_multiplier":   "multiplier applied to the flush volumes, for example 0.8 (default: unchanged)",
+			"printer":             "printer preset name",
+			"process":             "process preset name",
+			"filaments":           "the full filament list in slot order, replacing the current one",
+			"filaments[].preset":  "filament preset name, as list_presets shows it",
+			"filaments[].colour":  "colour as #RRGGBB",
+			"spools":              "CFS spools as creality-k2-mcp get_filaments reports them, replacing the filament list (instead of filaments): matched by catalog_id, else the Generic preset of the material",
+			"spools[].slot":       "CFS slot, T1A to T4D",
+			"spools[].catalog_id": "the 5 character Creality filament id, for example 06001",
+			"spools[].material":   "filament type, for example PLA (required)",
+			"spools[].colour":     "hex colour (white when missing)",
+			"spools[].status":     "defined, rfid, undefined or unknown",
+			"spools[].name":       "spool name, for the reply only",
+			"keep_changes":        "keep this project's changed settings when switching presets (default true)",
+			"flush_matrix":        "manual flush volumes in mm3: N*N numbers for N filaments, row by row, from filament to filament (default: automatic)",
+			"flush_multiplier":    "multiplier applied to the flush volumes, for example 0.8 (default: unchanged)",
 		},
 	},
 	"add_modifier": {

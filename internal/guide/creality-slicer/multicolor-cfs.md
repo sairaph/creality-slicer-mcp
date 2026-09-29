@@ -12,7 +12,7 @@ For the K2 Combo with Creality Print 7.2 or 7.3. The CFS holds four spools; the 
 
 1. Call get_filaments on the creality-k2-mcp server. Its `slots` list what is loaded in each CFS slot (T1A to T4D): material and colour.
 2. For each colour you want, find a spool of the same type. Types must be identical: PLA and PLA-CF differ, PETG and PETG-GF differ.
-3. Build the project's filament list to match, with the real colours:
+3. Give the spools as they are: pass the slots of get_filaments to create_project (or set_presets) as `spools`, each `{slot, catalog_id, material, colour, status, name}` as reported, in project filament order (the first is filament 1, tool T0); not together with `filaments`. Each spool gets the system preset with its `catalog_id` (an exact match), else the Generic preset of its material (a generic match, called out in the reply: check temperatures and flow), else the call is refused with the presets of that material. A slot that is `undefined` or `unknown` is refused. The colour is the spool's, and the slice reply then carries a ready `slot_map` for start_print. To choose presets and colours yourself, build the list to match, with the real colours:
 
 ```json
 {"project": "logo", "filaments": [
@@ -21,7 +21,7 @@ For the K2 Combo with Creality Print 7.2 or 7.3. The CFS holds four spools; the 
 ]}
 ```
 
-Send that to set_presets, or pass the same list to create_project. Colours are not taken from the preset: always give one `#RRGGBB` per filament, close to the spool's actual colour, because the purge calculation and the previews use it.
+Send that to set_presets, or pass the same list to create_project (then you build the `slot_map` yourself, below). Colours are not taken from the preset: always give one `#RRGGBB` per filament, close to the spool's actual colour, because the purge calculation and the previews use it.
 
 Mixing materials in one print needs their temperatures to be compatible. A big temperature gap between filaments makes the slicer refuse (exit code -62, see `troubleshooting`).
 
@@ -44,7 +44,7 @@ slice_project returns a `handoff` block: `gcode_path`, `upload_name`, `tools` (e
 1. get_filaments again if time has passed: spools change.
 2. upload_gcode_file on creality-k2-mcp with `path` set to the `gcode_path` and `filename` set to `upload_name`.
 3. For each tool, pick the slot whose material is the same type (and a close colour). Show the user the tool to slot table and get their go-ahead.
-4. start_print on creality-k2-mcp with `filename` (the uploaded name), `source` `cfs` and a `slot_map`. `filament` is the file's 0-based index, `slot` is T1A to T4D:
+4. start_print on creality-k2-mcp with `filename` (the uploaded name), `source` `cfs` and a `slot_map`; when the project was made from `spools`, the slice reply already gives the `slot_map`, so use it as it is. `filament` is the file's 0-based index, `slot` is T1A to T4D:
 
 ```json
 {"filename": "logo_plate1.gcode", "source": "cfs", "slot_map": [{"filament": 0, "slot": "T1A"}, {"filament": 1, "slot": "T1C"}]}

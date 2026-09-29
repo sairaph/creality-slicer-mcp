@@ -83,7 +83,7 @@ var guideTools = []string{
 	"list_presets", "get_preset", "create_project", "open_project", "list_projects", "get_project",
 	"add_model", "update_object", "remove_object", "update_settings", "set_presets", "add_modifier",
 	"set_height_ranges", "set_layer_actions", "manage_plates", "export_project", "delete_project",
-	"slice_project", "get_slice_status", "get_slice_report", "get_view", "remove_part",
+	"slice_project", "get_slice_status", "get_slice_report", "get_view", "remove_part", "open_in_app",
 	// The creality-k2-mcp server.
 	"upload_gcode_file", "get_filaments", "start_print", "exclude_object", "list_printers",
 }
@@ -95,7 +95,7 @@ var guideParams = []string{
 	"target", "values", "allow_locked", "keep_changes", "flush_matrix", "flush_multiplier", "kind",
 	"shape", "size", "ranges", "from_z", "to_z", "actions", "action", "overwrite", "confirm", "arrange",
 	"orient", "overrides", "background", "timeout", "thumbnails", "job_id", "cancel", "section", "layer",
-	"color_by", "lay_flat", "colour", "filament", "scale", "focus", "view_name", "include_screenshot", "show_parts", "show_labels", "show_ranges", "hide", "isolate", "width", "height",
+	"spools", "into", "mode", "slot", "catalog_id", "material", "status", "color_by", "lay_flat", "colour", "filament", "scale", "focus", "view_name", "include_screenshot", "show_parts", "show_labels", "show_ranges", "hide", "isolate", "width", "height",
 	// creality-k2-mcp parameters (23 section 8).
 	"slot_map", "self_test", "object_name",
 }

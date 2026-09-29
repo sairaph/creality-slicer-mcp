@@ -169,10 +169,18 @@ func removeInstalledBinary(w io.Writer, dryRun bool) int {
 // reached through a symlink still matches; when it cannot be resolved (it
 // does not exist) it is compared as given.
 func inInstallDir(exe, installDir string) bool {
-	if resolved, err := filepath.EvalSymlinks(installDir); err == nil {
-		installDir = resolved
+	return samePath(resolvedDir(filepath.Dir(exe)), resolvedDir(installDir))
+}
+
+// resolvedDir returns dir with symlinks and Windows short (8.3) names resolved,
+// so that two spellings of the same folder compare equal (for example /var and
+// /private/var on macOS, or RUNNER~1 and runneradmin on Windows). A folder that
+// cannot be resolved is returned as given.
+func resolvedDir(dir string) string {
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		return resolved
 	}
-	return samePath(filepath.Dir(exe), installDir)
+	return dir
 }
 
 func samePath(a, b string) bool {

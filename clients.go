@@ -111,7 +111,14 @@ func isOurBinary(command string) bool {
 }
 
 func sameExecutable(a, b string) bool {
-	return a != "" && b != "" && samePath(a, b)
+	if a == "" || b == "" {
+		return false
+	}
+	if samePath(a, b) {
+		return true
+	}
+	return samePath(filepath.Join(resolvedDir(filepath.Dir(a)), filepath.Base(a)),
+		filepath.Join(resolvedDir(filepath.Dir(b)), filepath.Base(b)))
 }
 
 // entryCommand reads the command of the entry named name in a client config

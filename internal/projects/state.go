@@ -430,6 +430,23 @@ func (h *handle) warnings(in *Info, geo geometry) []Warning {
 	if h.s.cfg.Install.Dialect == "v72" && len(in.Objects) == 0 && len(in.Filaments) >= 2 && h.plateSequence(1) != "by object" {
 		add("v72_by_layer_crash", "this project has %d filaments and prints by layer: Creality Print 7.2.2 crashes when one plate uses two or more of them; update to 7.3 or set print_sequence to by object", len(in.Filaments))
 	}
+	// By layer, a plate that mixes filaments gets a prime tower: purge material
+	// and time that a single colour print does not spend. Not on 7.2, where the
+	// same plate crashes the slicer and v72_by_layer_crash is the warning.
+	if h.s.cfg.Install.Dialect != "v72" && h.p.Settings != nil && h.p.Settings.String("enable_prime_tower") == "1" {
+		var towered []int
+		for _, pl := range in.Plates {
+			if h.plateSequence(pl.Index) != "by object" && h.plateFilamentCount(pl.Index) >= 2 {
+				towered = append(towered, pl.Index)
+			}
+		}
+		if len(in.Objects) == 0 && len(in.Filaments) >= 2 && h.plateSequence(1) != "by object" {
+			towered = []int{1}
+		}
+		if len(towered) > 0 {
+			add("prime_tower", "plate(s) %v print several filaments by layer: the slicer adds a prime tower with its own purge material and print time on top of the objects (the estimate comes after slice_project, with the tower's grams in the plate report); print_sequence by object needs no tower", towered)
+		}
+	}
 	// A range without layer_height crashes the slicer (found when a project with
 	// a range from another tool is opened).
 	for _, o := range in.Objects {

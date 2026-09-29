@@ -143,6 +143,16 @@ func (s *Server) withPartScreenshot(be ProjectBackend, res *toolResult, include 
 	return s.screenshot(be, res, include, project, plate, []string{object}, true, false)
 }
 
+// withObjectScreenshot is withScreenshot for a change to one object (a move,
+// height ranges): framed on the object with context around it.
+func (s *Server) withObjectScreenshot(be ProjectBackend, res *toolResult, include *bool, project string, plate int, object string, ranges bool) *toolResult {
+	return s.screenshot(be, res, include, project, plate, []string{object}, true, ranges)
+}
+
+// contextMM is the least width and height of a picture framed on an object:
+// a small object is shown with 80 mm of its surroundings.
+const contextMM = 80.0
+
 func (s *Server) screenshot(be ProjectBackend, res *toolResult, include *bool, project string, plate int, focus []string, frame, ranges bool) *toolResult {
 	if s.config.Settings.OnlyTextFeedback || !boolOr(include, true) {
 		return res
@@ -155,7 +165,7 @@ func (s *Server) screenshot(be ProjectBackend, res *toolResult, include *bool, p
 		plate = 1
 	}
 	v, err := be.Store.View(project, projects.ViewRequest{
-		Plate: plate, View: string(render.Isometric), Focus: framed, Highlight: focus, ShowParts: true, ShowLabels: true, ShowRanges: ranges, LongEdge: 512,
+		Plate: plate, View: string(render.Isometric), Focus: framed, MinExtent: contextMM, Highlight: focus, ShowParts: true, ShowLabels: true, ShowRanges: ranges, LongEdge: 512,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "creality-slicer-mcp: the screenshot of %s was left out: %v\n", project, err)

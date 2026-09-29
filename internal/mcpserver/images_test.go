@@ -193,11 +193,11 @@ func TestPartScreenshotsAreFramedOnTheObject(t *testing.T) {
 	yellow := func(c color.NRGBA) bool { return c.R > 165 && c.G > 130 && c.B < 110 && int(c.R) > int(c.B)+90 }
 	light := func(c color.NRGBA) bool { return c.R > 190 && c.G > 190 && c.B > 190 }
 
-	whole := pngOf(t, call(t, pf.cs, "update_object", map[string]any{"project": id, "object": "cube", "position": []float64{120, 120}}))
+	whole := pngOf(t, call(t, pf.cs, "manage_plates", map[string]any{"project": id, "action": "set", "plate": 1, "values": map[string]any{"print_sequence": "by layer"}}))
 	mod := call(t, pf.cs, "add_modifier", map[string]any{"project": id, "object": "cube", "kind": "modifier", "shape": "box", "size": []float64{8, 8, 8},
 		"values": map[string]any{"wall_loops": 6}})
 	shot := pngOf(t, mod)
-	if a, b := count(shot, light), count(whole, light); a < b*4 {
+	if a, b := count(shot, light), count(whole, light); a < b*3 {
 		t.Errorf("the object fills %d light pixels framed against %d on the whole plate", a, b)
 	}
 	if count(shot, yellow) < 150 || count(shot, pink) < 60 {
@@ -220,7 +220,40 @@ func TestPartScreenshotsAreFramedOnTheObject(t *testing.T) {
 		}
 	}
 	rm := pngOf(t, call(t, pf.cs, "remove_part", map[string]any{"project": id, "object": "cube", "part": part}))
-	if count(rm, light) < count(whole, light)*4 {
+	if count(rm, light) < count(whole, light)*3 {
 		t.Error("remove_part screenshot is not framed on the object")
+	}
+}
+
+// update_object and set_height_ranges frame the object with context (at least
+// 80 mm around a small one); add_model, remove_object and manage_plates keep the
+// whole plate; the height range screenshot shows the bands.
+func TestScreenshotFramingByTool(t *testing.T) {
+	pf := newProjFixture(t)
+	id := pf.withModel(t, "Frames")
+	light := func(c color.NRGBA) bool { return c.R > 190 && c.G > 190 && c.B > 190 }
+	orange := func(c color.NRGBA) bool { return c.R > 200 && c.G > 90 && c.G < 170 && c.B < 90 }
+	whole := count(pngOf(t, call(t, pf.cs, "manage_plates", map[string]any{"project": id, "action": "set", "plate": 1, "values": map[string]any{"print_sequence": "by layer"}})), light)
+	moved := count(pngOf(t, call(t, pf.cs, "update_object", map[string]any{"project": id, "object": "cube", "position": []float64{130, 130}})), light)
+	if moved < whole*3 {
+		t.Errorf("update_object: %d light pixels, %d on the whole plate: not framed on the object", moved, whole)
+	}
+	// Context: the 20 mm cube does not fill the frame.
+	if total := 512 * 384; moved > total*30/100 {
+		t.Errorf("the cube fills %d of %d pixels: no context around it", moved, total)
+	}
+	ranges := pngOf(t, call(t, pf.cs, "set_height_ranges", map[string]any{"project": id, "object": "cube", "ranges": []map[string]any{
+		{"from_z": 4, "to_z": 12, "values": map[string]any{"wall_loops": 5}}}}))
+	if count(ranges, orange) < 200 {
+		t.Errorf("the height range band is not in the screenshot: %d orange pixels", count(ranges, orange))
+	}
+	// Whole plate: add_model and remove_object.
+	added := call(t, pf.cs, "add_model", map[string]any{"project": id, "path": pf.stl, "name": "second", "position": []float64{40, 40}})
+	if a := count(pngOf(t, added), light); a > whole*2 {
+		t.Errorf("add_model: %d light pixels against %d on the whole plate", a, whole)
+	}
+	removed := call(t, pf.cs, "remove_object", map[string]any{"project": id, "object": "second"})
+	if a := count(pngOf(t, removed), light); a > whole*2 {
+		t.Errorf("remove_object: %d light pixels against %d on the whole plate", a, whole)
 	}
 }

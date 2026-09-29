@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"regexp"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -102,6 +104,7 @@ func successResult(front any, body string) *mcp.CallToolResult {
 // shortMessage keeps the start of an error message, which says what failed,
 // within maxMessageBytes.
 func shortMessage(s string) string {
+	s = plainPaths(s)
 	if len(s) <= maxMessageBytes {
 		return s
 	}
@@ -223,4 +226,22 @@ func recovering[In any](name string, h func(context.Context, *mcp.CallToolReques
 		}()
 		return h(ctx, req, in)
 	}
+}
+
+// quotedPathRE finds an absolute path (Windows, UNC or Unix) written in double
+// quotes, as %q writes it, with every backslash doubled.
+var quotedPathRE = regexp.MustCompile(`"((?:[A-Za-z]:|\\\\\\\\|/)[^"\n]*)"`)
+
+// plainPaths writes such a path as it is, in backticks: the message of a Go
+// error quotes a path with %q, which doubles every backslash.
+func plainPaths(s string) string {
+	if !strings.Contains(s, "\"") {
+		return s
+	}
+	return quotedPathRE.ReplaceAllStringFunc(s, func(m string) string {
+		if plain, err := strconv.Unquote(m); err == nil {
+			return "`" + plain + "`"
+		}
+		return m
+	})
 }

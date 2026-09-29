@@ -190,3 +190,27 @@ func TestGCodeIsoDrawsToolpathsByFilamentWithAStrip(t *testing.T) {
 		t.Errorf("no moves: %v", err)
 	}
 }
+
+// The wipe tower footprint is named in the picture, and MinExtent keeps a small
+// focused object from filling the frame.
+func TestPrimeTowerIsLabelledAndMinExtentGivesContext(t *testing.T) {
+	s := viewScene()
+	s.WipeTower = &Rect{X0: 200, Y0: 200, X1: 240, Y1: 240}
+	white := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	with, _ := renderView(t, s, ViewOptions{View: Top, Width: 800, Height: 600})
+	s.WipeTower = nil
+	without, _ := renderView(t, s, ViewOptions{View: Top, Width: 800, Height: 600})
+	if a, b := countNear(with, white, 2), countNear(without, white, 2); a < 150 || b != 0 {
+		t.Errorf("tower label panel pixels: %d with a tower, %d without", a, b)
+	}
+	tight, _ := renderView(t, s, ViewOptions{View: Front, Focus: []int{0}, Width: 600, Height: 450})
+	ctx, _ := renderView(t, s, ViewOptions{View: Front, Focus: []int{0}, Width: 600, Height: 450, MinExtent: 80})
+	_, tb := countWhere(tight, purplish)
+	_, cb := countWhere(ctx, purplish)
+	if cb.Dx() >= tb.Dx()/2 {
+		t.Errorf("with 80 mm of context the 20 mm object spans %d px, tight it spans %d", cb.Dx(), tb.Dx())
+	}
+	if cb.Dx() < 600/8 {
+		t.Errorf("the object spans only %d px", cb.Dx())
+	}
+}

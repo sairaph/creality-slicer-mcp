@@ -86,7 +86,7 @@ func objectLabels(p *threemf.Project, plate int, names []string) []ObjectLabel {
 	return out
 }
 
-var zLineRE = regexp.MustCompile(`^;:(-?[0-9.]+)\s*$`)
+var zLineRE = regexp.MustCompile(`^;Z?:(-?[0-9.]+)\s*$`)
 var toolLineRE = regexp.MustCompile(`^T(\d+)\s*$`)
 
 // scanActions looks for the layer actions of a plate in its G-code: a pause

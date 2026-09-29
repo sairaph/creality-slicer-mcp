@@ -138,8 +138,8 @@ func (h *handle) occupied(plate, skipObject, skipInstance int) []rect {
 	return out
 }
 
-// findSpot looks for a place for a w by d footprint on a plate: bottom left
-// shelf packing over the free area of the bed (margin from the edge, gap to
+// findSpot looks for a place for a w by d footprint on a plate: the free spot
+// nearest the bed centre, spiralling outward (margin from the edge, gap to
 // the other objects, wipe tower kept free). It returns the centre.
 func (h *handle) findSpot(plate int, w, d float64, taken []rect) (cx, cy float64, ok bool) {
 	usable := h.geometry().rect()
@@ -169,43 +169,40 @@ func (h *handle) findSpot(plate int, w, d float64, taken []rect) (cx, cy float64
 		}
 		return true
 	}
-	// The first object of a plate goes to the centre of the bed when that is free.
-	if len(taken) == 0 {
-		ccx, ccy := (usable.x0+usable.x1)/2, (usable.y0+usable.y1)/2
-		c := rect{ccx - w/2, ccy - d/2, ccx + w/2, ccy + d/2}
-		free := usable.contains(c) && rodOK(c)
-		for _, o := range obstacles {
-			if c.overlaps(o.inflate(gap - 1e-6)) {
-				free = false
-			}
-		}
-		if free {
-			return ccx, ccy, true
-		}
-	}
-	xs, ys := []float64{usable.x0}, []float64{usable.y0}
+	// Candidate left and bottom edges: the bed centre, the usable edges, and
+	// the spots touching each obstacle's clearance zone on either side. Every
+	// combination is tried nearest to the bed centre first, so the first object
+	// sits at the centre and later ones spiral outward around it.
+	ccx, ccy := (usable.x0+usable.x1)/2, (usable.y0+usable.y1)/2
+	xs := []float64{ccx - w/2, usable.x0, usable.x1 - w}
+	ys := []float64{ccy - d/2, usable.y0, usable.y1 - d}
 	for _, r := range obstacles {
-		xs = append(xs, r.x1+gap)
-		ys = append(ys, r.y1+gap)
+		xs = append(xs, r.x1+gap, r.x0-gap-w)
+		ys = append(ys, r.y1+gap, r.y0-gap-d)
 	}
-	sort.Float64s(xs)
-	sort.Float64s(ys)
+	type cand struct{ x, y, dist float64 }
+	var cands []cand
 	for _, y := range ys {
 		for _, x := range xs {
 			c := rect{x, y, x + w, y + d}
 			if !usable.contains(c) {
 				continue
 			}
-			clear := rodOK(c)
-			for _, o := range obstacles {
-				if c.overlaps(o.inflate(gap - 1e-6)) {
-					clear = false
-					break
-				}
+			cands = append(cands, cand{x, y, math.Hypot(x+w/2-ccx, y+d/2-ccy)})
+		}
+	}
+	sort.SliceStable(cands, func(i, j int) bool { return cands[i].dist < cands[j].dist })
+	for _, cd := range cands {
+		c := rect{cd.x, cd.y, cd.x + w, cd.y + d}
+		clear := rodOK(c)
+		for _, o := range obstacles {
+			if c.overlaps(o.inflate(gap - 1e-6)) {
+				clear = false
+				break
 			}
-			if clear {
-				return x + w/2, y + d/2, true
-			}
+		}
+		if clear {
+			return cd.x + w/2, cd.y + d/2, true
 		}
 	}
 	return 0, 0, false

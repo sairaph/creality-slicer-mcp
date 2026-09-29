@@ -96,6 +96,10 @@ type ViewOptions struct {
 	// LongEdge is the longest edge when Width and Height are both zero; 0 means
 	// 1024. The frame is 4:3 unless a size is given.
 	LongEdge int
+	// MinExtent is the least width and height of the framed area in screen
+	// millimetres when Focus is set, so a small object is shown with context
+	// and not filling the frame; 0 frames the focus set tightly.
+	MinExtent float64
 	// Highlight lists the indexes into Scene.Objects drawn with a bright outline
 	// (the objects a change touched).
 	Highlight []int
@@ -260,6 +264,9 @@ func RenderView(s *Scene, o ViewOptions) ([]byte, ViewStats, error) {
 	if dy < 1 {
 		dy = 1
 	}
+	if len(focus) > 0 && o.MinExtent > 0 {
+		dx, dy = math.Max(dx, o.MinExtent), math.Max(dy, o.MinExtent)
+	}
 	cx, cy := (minX+maxX)/2, (minY+maxY)/2
 	minX, maxX, minY, maxY = cx-dx/2, cx+dx/2, cy-dy/2, cy+dy/2
 
@@ -345,6 +352,17 @@ func RenderView(s *Scene, o ViewOptions) ([]byte, ViewStats, error) {
 		drawText(img, x, y, scale, t.text, t.col)
 	}
 	var labelRects []image.Rectangle
+	// The wipe tower footprint is named in the picture, so it is not taken for
+	// an object: it is only printed with two or more filaments.
+	if t := s.WipeTower; t != nil && !t.Empty() {
+		sx, sy, _ := cam.project([3]float64{(t.X0 + t.X1) / 2, (t.Y0 + t.Y1) / 2, 0})
+		px, py := f.px(sx, sy)
+		if px >= 0 && py >= 0 && int(px) < c.w && int(py) < c.h {
+			r := labelRect(img, int(px)/ss, int(py)/ss, scale, "PRIME TOWER")
+			labelRects = append(labelRects, r)
+			drawLabelAt(img, r, scale, "PRIME TOWER")
+		}
+	}
 	if o.ShowLabels {
 		for _, p := range ps {
 			if p.obj.Label == "" || p.obj.Mesh == nil {

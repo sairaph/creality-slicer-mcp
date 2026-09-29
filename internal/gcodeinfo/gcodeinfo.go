@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"regexp"
 	"strconv"
@@ -93,7 +94,7 @@ type Summary struct {
 // Layer locates one layer in the file.
 type Layer struct {
 	Index  int     // 0-based
-	Z      float64 // top of the layer (the ";:<z>" line after LAYER_CHANGE)
+	Z      float64 // top of the layer (the ";:<z>" line of 7.2 or ";Z:<z>" of 7.3 after LAYER_CHANGE)
 	Height float64 // ";HEIGHT:"
 	Line   int     // 1-based line number of ;LAYER_CHANGE
 	Offset int64   // byte offset of the ;LAYER_CHANGE line
@@ -247,8 +248,9 @@ func parseReader(r io.Reader, path string, wantLayers bool) (Summary, []Layer, e
 			}
 			expectLayer = wantLayers
 			continue
-		case expectLayer && strings.HasPrefix(text, ";:"):
-			if v, ok := parseFloat([]byte(text[2:])); ok {
+		case expectLayer && (strings.HasPrefix(text, ";:") || strings.HasPrefix(text, ";Z:")):
+			// 7.2 writes ";:<z>", 7.3 writes ";Z:<z>" after ;LAYER_CHANGE.
+			if v, ok := parseFloat([]byte(text[strings.IndexByte(text, ':')+1:])); ok {
 				layers[len(layers)-1].Z = v
 			}
 			continue
@@ -545,4 +547,51 @@ func (c Config) Floats(key string, sep rune) ([]float64, error) {
 		out = append(out, v)
 	}
 	return out, nil
+}
+
+// FeatureUse is the filament and the print time of the moves of one ;TYPE:
+// feature (the prime tower, say), per tool.
+type FeatureUse struct {
+	// FilamentMM is the filament pushed per tool index (retracts not counted).
+	FilamentMM map[int]float64
+	// Seconds is the time of the feature's moves at their feed rates: the
+	// printing itself, not the tool changes and purges around it.
+	Seconds float64
+}
+
+// FeatureUsage reads a G-code file and adds up what the moves tagged with the
+// ;TYPE: name (for example "Prime tower") use. Moves without an E word or
+// outside the feature are not counted.
+func FeatureUsage(path, feature string) (FeatureUse, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return FeatureUse{}, err
+	}
+	defer f.Close()
+	use := FeatureUse{FilamentMM: map[int]float64{}}
+	state := newMotionState()
+	lr := newLineReader(f, 0)
+	for {
+		line, _, _, err := lr.next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return use, err
+		}
+		if len(line) == 0 {
+			continue
+		}
+		mv, ok := state.apply(line)
+		if !ok || mv.Feature != feature {
+			continue
+		}
+		if mv.E > 0 {
+			use.FilamentMM[mv.Tool] += mv.E
+		}
+		if mv.Speed > 0 {
+			use.Seconds += math.Hypot(mv.X1-mv.X0, mv.Y1-mv.Y0) / (mv.Speed / 60)
+		}
+	}
+	return use, nil
 }

@@ -1019,8 +1019,13 @@ func TestPlacementUsesTheNewObjectsHeight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hasWarning(res.Info, "sequence_clearance") {
-		t.Fatalf("the new object was placed too close: %+v", res.Info.Warnings)
+	// The shorts were packed at the short clearance around the bed centre; a
+	// tall neighbour raises the clearance for every pair, so a warning about the
+	// shorts is fair. The new object itself must sit far enough from both.
+	for _, w := range res.Info.Warnings {
+		if w.Code == "sequence_clearance" && strings.Contains(w.Message, `"tall"`) {
+			t.Fatalf("the new object was placed too close: %+v", w)
+		}
 	}
 }
 

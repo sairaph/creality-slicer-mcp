@@ -28,12 +28,23 @@ func projFailure(err error) *toolResult {
 	default:
 		code = render.CodeInternal
 	}
-	re := render.Error{Code: code, Message: shortMessage(dedupeKeyPrefix(e.Message)), Hint: e.Hint}
+	msg := dedupeKeyPrefix(e.Message)
+	hint := plainPaths(e.Hint)
+	// A refused change of a key Creality's presets lock: say how to override.
+	if strings.Contains(msg, "in Creality presets (the vendor fixes it)") {
+		hint = "Pass allow_locked true to override Creality's lock (the vendor fixes this setting, so change it only when you know the slicer accepts the value), or call describe_setting to see its lock and range."
+	}
+	re := render.Error{Code: code, Message: shortMessage(msg), Hint: hint}
 	var tail string
 	var logLines []string
 	if len(e.Fields) > 0 {
 		fields := map[string]any{}
 		for k, v := range e.Fields {
+			// The list of errors of a refused change is the message again:
+			// the choices of a bad enum are stated once.
+			if list, ok := v.([]string); ok && k == "errors" && dedupeKeyPrefix(strings.Join(list, "; ")) == msg {
+				continue
+			}
 			if k == "output_tail" {
 				tail, _ = v.(string)
 				continue
@@ -377,11 +388,21 @@ func partKindName(subtype string) string {
 
 // keyTwiceRE finds "key: key: " where a validation message repeats the key
 // the caller already put in front of it.
+// keyThenWordRE finds "key: key expects ...", the key repeated as the subject.
+var keyThenWordRE = regexp.MustCompile(`(^|; )([A-Za-z0-9_\[\]]+): ([A-Za-z0-9_\[\]]+) `)
+
 var keyTwiceRE = regexp.MustCompile(`(^|; )([A-Za-z0-9_\[\]]+): ([A-Za-z0-9_\[\]]+): `)
 
 // dedupeKeyPrefix drops the second key of "sparse_infill_density:
 // sparse_infill_density: 150 is outside ..." in every part of a message.
 func dedupeKeyPrefix(msg string) string {
+	msg = keyThenWordRE.ReplaceAllStringFunc(msg, func(m string) string {
+		sub := keyThenWordRE.FindStringSubmatch(m)
+		if sub[2] != sub[3] {
+			return m
+		}
+		return sub[1] + sub[2] + " "
+	})
 	return keyTwiceRE.ReplaceAllStringFunc(msg, func(m string) string {
 		sub := keyTwiceRE.FindStringSubmatch(m)
 		if sub[2] != sub[3] {

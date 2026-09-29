@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/gofrs/flock"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -65,6 +66,11 @@ type PlateResult struct {
 	Actions []ActionResult
 	// Multicolour is true when the G-code changes filament.
 	Multicolour bool
+	// PrimeTowerG and PrimeTowerS are the filament and the printing time of the
+	// prime tower (by layer, several filaments); zero without one. The time is
+	// the tower's own moves, so the real cost with the tool changes is higher.
+	PrimeTowerG float64
+	PrimeTowerS int
 }
 
 // LastSlice is the record of the last successful slice, kept in job.json.
@@ -560,6 +566,7 @@ func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res
 		pr.Tools = toolTable(sp, sum)
 		pr.ObjectLabels = objectLabels(sp, plate, pr.ExcludeNames)
 		pr.Actions = scanActions(file, snap.layerActions(plate))
+		pr.PrimeTowerG, pr.PrimeTowerS = primeTower(file, sum)
 		pr.Changes = sum.TotalFilamentChange
 		if pr.Changes == 0 {
 			uses := 0
@@ -917,4 +924,31 @@ func (s *Store) sliceGuard(id string) (unlock func(), err error) {
 		return nil, conflictf("wait for that slice to end, or use get_slice_status in the other session", "project %s is being sliced by another process", id)
 	}
 	return func() { _ = fl.Unlock() }, nil
+}
+
+// primeTower is what the prime tower of a sliced plate costs: grams (from the
+// filament diameter and density of each tool) and printing seconds.
+func primeTower(file string, sum gcodeinfo.Summary) (grams float64, seconds int) {
+	has := false
+	for _, f := range sum.Features {
+		has = has || f == "Prime tower"
+	}
+	if !has {
+		return 0, 0
+	}
+	use, err := gcodeinfo.FeatureUsage(file, "Prime tower")
+	if err != nil {
+		return 0, 0
+	}
+	for tool, mm := range use.FilamentMM {
+		d, rho := 1.75, 1.24
+		if tool < len(sum.FilamentDiameter) && sum.FilamentDiameter[tool] > 0 {
+			d = sum.FilamentDiameter[tool]
+		}
+		if tool < len(sum.FilamentDensity) && sum.FilamentDensity[tool] > 0 {
+			rho = sum.FilamentDensity[tool]
+		}
+		grams += mm * math.Pi * d * d / 4 / 1000 * rho
+	}
+	return grams, int(use.Seconds + 0.5)
 }

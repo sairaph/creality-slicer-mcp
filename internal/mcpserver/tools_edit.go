@@ -211,7 +211,7 @@ func (s *Server) updateObject(ctx context.Context, _ *mcp.CallToolRequest, in up
 	}
 	body := "Updated: " + objectLine(res.Object) + "." + warningLines(res.Warnings)
 	out := successResult(updateObjectFront{baseFront: base(res.Info), Object: objectFrontOf(res.Object)}, nextLine(body, "get_view to check the plate, or slice_project."))
-	return s.withScreenshot(be, out, in.IncludeScreenshot, in.Project, res.Object.Plate, []string{strconv.Itoa(res.Object.ID)}, false), nil, nil
+	return s.withObjectScreenshot(be, out, in.IncludeScreenshot, in.Project, res.Object.Plate, strconv.Itoa(res.Object.ID), false), nil, nil
 }
 
 // --- remove_object ---
@@ -520,7 +520,7 @@ func (s *Server) setHeightRanges(ctx context.Context, _ *mcp.CallToolRequest, in
 		b.WriteString("\nNote: " + n + ".")
 	}
 	out := successResult(heightRangesFront{baseFront: base(info), Object: in.Object, Ranges: len(in.Ranges)}, nextLine(strings.TrimRight(b.String(), "\n"), "get_view with show_ranges true to check the bands, or slice_project."))
-	return s.withScreenshot(be, out, in.IncludeScreenshot, in.Project, plateOfObject(info, in.Object, 1), []string{in.Object}, true), nil, nil
+	return s.withObjectScreenshot(be, out, in.IncludeScreenshot, in.Project, plateOfObject(info, in.Object, 1), in.Object, true), nil, nil
 }
 
 // --- set_layer_actions ---

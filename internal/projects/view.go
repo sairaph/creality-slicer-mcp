@@ -23,6 +23,8 @@ type ViewRequest struct {
 	// Highlight lists objects (ids or names) drawn with a bright outline: the
 	// ones a change touched.
 	Highlight []string
+	// MinExtent is the least width and height in mm of an area framed by Focus.
+	MinExtent float64
 	// Width and Height are pixels; both zero means a 4:3 frame with a longest
 	// edge of 1024, one given keeps the 4:3 shape. At most render.MaxSize.
 	Width, Height int
@@ -117,7 +119,7 @@ func (s *Store) View(ref string, req ViewRequest) (*ViewResult, error) {
 		if err != nil {
 			return err
 		}
-		opts := render.ViewOptions{View: name, ShowParts: req.ShowParts, ShowLabels: req.ShowLabels, ShowRanges: req.ShowRanges, Width: req.Width, Height: req.Height, LongEdge: req.LongEdge}
+		opts := render.ViewOptions{View: name, ShowParts: req.ShowParts, ShowLabels: req.ShowLabels, ShowRanges: req.ShowRanges, Width: req.Width, Height: req.Height, LongEdge: req.LongEdge, MinExtent: req.MinExtent}
 		seen := map[string]bool{}
 		for i, id := range ids {
 			if highlight[id] {
@@ -159,7 +161,7 @@ func (s *Store) View(ref string, req ViewRequest) (*ViewResult, error) {
 func viewLegend(req ViewRequest, sc *render.Scene) []string {
 	leg := []string{"grey grid: the bed (10 mm), dark outline: the bed edge", "red arrow X and green arrow Y: the plate axes at the plate origin"}
 	if sc.WipeTower != nil {
-		leg = append(leg, "blue rectangle: the wipe tower")
+		leg = append(leg, "blue rectangle (PRIME TOWER): the wipe tower footprint kept free; it is printed only with two or more filaments on a plate printed by layer")
 	}
 	leg = append(leg, "objects in their filament colour; tinted red when outside the printable area")
 	if req.ShowParts {

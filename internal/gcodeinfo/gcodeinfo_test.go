@@ -463,3 +463,97 @@ func TestMissingFile(t *testing.T) {
 		t.Error("expected an error")
 	}
 }
+
+const (
+	oneFilament73  = "testdata/cube_1filament_73.gcode"
+	twoFilaments73 = "testdata/cubes_2filaments_73.gcode"
+)
+
+// Real 7.3.0 output writes ";Z:<z>" where 7.2.2 wrote ";:<z>" after
+// ;LAYER_CHANGE. Both must give every layer its z and height.
+func TestLayersBothMarkerFormats(t *testing.T) {
+	for _, path := range []string{oneFilament, oneFilament73, twoFilaments, twoFilaments73} {
+		layers, err := Layers(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(layers) != 100 {
+			t.Fatalf("%s: %d layers", path, len(layers))
+		}
+		for i, l := range layers {
+			want := 0.2 * float64(i+1)
+			if math.Abs(l.Z-want) > 0.011 || math.Abs(l.Height-0.2) > 0.011 {
+				t.Fatalf("%s layer %d: z %v height %v, want z %v height 0.2", path, i+1, l.Z, l.Height, want)
+			}
+		}
+	}
+}
+
+func TestLayerMoves73(t *testing.T) {
+	layers, err := Layers(oneFilament73)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := LayerMoves(oneFilament73, layers[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := LayerMoves(oneFilament73, layers[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	features := map[string]bool{}
+	for _, m := range first {
+		features[m.Feature] = true
+		if m.Extruding && math.Abs(m.Z-0.2) > 0.001 {
+			t.Fatalf("layer 1 extrusion at z %v", m.Z)
+		}
+	}
+	if !features["Outer wall"] || !features["Bottom surface"] {
+		t.Errorf("layer 1 features %v", features)
+	}
+	// A layer report is one layer, not the whole file.
+	all, _ := LayerMoves(oneFilament73, Layer{Offset: 0})
+	if len(first) == 0 || len(first) >= len(all)/10 || len(second) == 0 || len(second) >= len(all)/10 {
+		t.Errorf("moves per layer %d and %d against %d in the file", len(first), len(second), len(all))
+	}
+}
+
+func TestPrimeTowerOnLayerOne73(t *testing.T) {
+	layers, err := Layers(twoFilaments73)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moves, err := LayerMoves(twoFilaments73, layers[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, towers := map[int]bool{}, 0
+	for _, m := range moves {
+		tools[m.Tool] = true
+		if m.Feature == "Prime tower" && m.Extruding {
+			towers++
+		}
+	}
+	if !tools[0] || !tools[1] || towers == 0 {
+		t.Errorf("tools %v tower moves %d", tools, towers)
+	}
+}
+
+func TestFeatureUsagePrimeTower(t *testing.T) {
+	use, err := FeatureUsage(twoFilaments73, "Prime tower")
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0.0
+	for _, mm := range use.FilamentMM {
+		total += mm
+	}
+	if total < 100 || use.Seconds <= 0 {
+		t.Fatalf("prime tower usage %+v", use)
+	}
+	none, err := FeatureUsage(oneFilament73, "Prime tower")
+	if err != nil || len(none.FilamentMM) != 0 || none.Seconds != 0 {
+		t.Fatalf("one filament: %+v %v", none, err)
+	}
+}

@@ -71,6 +71,11 @@ type PlateResult struct {
 	// the tower's own moves, so the real cost with the tool changes is higher.
 	PrimeTowerG float64
 	PrimeTowerS int
+	// FlushG is the purge of the tool changes (FlushChanges of them), from the
+	// G-code footer, or an estimate from the flush matrix when FlushEstimated.
+	FlushG         float64
+	FlushChanges   int
+	FlushEstimated bool
 }
 
 // LastSlice is the record of the last successful slice, kept in job.json.
@@ -567,6 +572,7 @@ func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res
 		pr.ObjectLabels = objectLabels(sp, plate, pr.ExcludeNames)
 		pr.Actions = scanActions(file, snap.layerActions(plate))
 		pr.PrimeTowerG, pr.PrimeTowerS = primeTower(file, sum)
+		pr.FlushG, pr.FlushChanges, pr.FlushEstimated = flushCost(file, sum, sp.Settings)
 		pr.Changes = sum.TotalFilamentChange
 		if pr.Changes == 0 {
 			uses := 0
@@ -951,4 +957,58 @@ func primeTower(file string, sum gcodeinfo.Summary) (grams float64, seconds int)
 		grams += mm * math.Pi * d * d / 4 / 1000 * rho
 	}
 	return grams, int(use.Seconds + 0.5)
+}
+
+// flushCost is the purge of the tool changes of a plate, in grams, and the
+// number of changes. Creality Print 7.3 writes no flush line of its own, but its
+// footer counts each change's purge (charged to the filament loaded) while the
+// G-code's E words do not contain it, so footer minus E words is the G-code's own
+// number. Without a usable footer it is estimated from the project's flush
+// matrix times the multiplier for each change in the T command sequence.
+func flushCost(file string, sum gcodeinfo.Summary, cfg *threemf.Config) (grams float64, changes int, estimated bool) {
+	ex, err := gcodeinfo.ReadExtrusion(file)
+	if err != nil || len(ex.ToolSeq) < 2 {
+		return 0, 0, false
+	}
+	changes = len(ex.ToolSeq) - 1
+	if n := len(sum.FilamentUsedMM); n > 0 && len(sum.FilamentUsedG) == n {
+		for tool, mm := range sum.FilamentUsedMM {
+			if extra := mm - ex.NetMM[tool]; extra > 0.5 && mm > 0 {
+				grams += extra * sum.FilamentUsedG[tool] / mm
+			}
+		}
+		return grams, changes, false // a usable footer is the answer, also when it says 0
+	}
+	if cfg == nil {
+		return 0, changes, true
+	}
+	matrix := cfg.List("flush_volumes_matrix")
+	n := int(math.Round(math.Sqrt(float64(len(matrix)))))
+	mult, err := strconv.ParseFloat(cfg.String("flush_multiplier"), 64)
+	if err != nil || n*n != len(matrix) {
+		return 0, changes, true
+	}
+	for i := 1; i < len(ex.ToolSeq); i++ {
+		from, to := ex.ToolSeq[i-1], ex.ToolSeq[i]
+		if from >= n || to >= n {
+			continue
+		}
+		v, err := strconv.ParseFloat(matrix[from*n+to], 64)
+		if err != nil {
+			continue
+		}
+		rho := 1.24
+		if to < len(sum.FilamentDensity) && sum.FilamentDensity[to] > 0 {
+			rho = sum.FilamentDensity[to]
+		}
+		// The app raises every nonzero purge to at least 100 mm3 (GCode.cpp
+		// g_min_purge_volume, v7.3.0 line 127 and 2163; not when the tower has an
+		// inner wall box, which this estimate cannot see).
+		vol := v * mult
+		if vol > 0 && vol < 100 {
+			vol = 100
+		}
+		grams += vol / 1000 * rho
+	}
+	return grams, changes, true
 }

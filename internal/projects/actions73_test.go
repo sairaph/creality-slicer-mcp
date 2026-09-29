@@ -3,8 +3,13 @@ package projects
 import (
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/sairaph/creality-slicer-mcp/internal/gcodeinfo"
+	"github.com/sairaph/creality-slicer-mcp/internal/threemf"
 )
 
 // The layer z line is ";:<z>" in 7.2 and ";Z:<z>" in 7.3; both must confirm
@@ -121,5 +126,98 @@ func TestPrimeTowerWarningNotOn72(t *testing.T) {
 	}
 	if !hasWarning(up.Info, "v72_by_layer_crash") || hasWarning(up.Info, "prime_tower") {
 		t.Fatalf("warnings %+v", up.Info.Warnings)
+	}
+}
+
+func TestFlushFromTheFooter(t *testing.T) {
+	src := "../gcodeinfo/testdata/cubes_2filaments_73.gcode"
+	sum, err := gcodeinfo.ReadSummary(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, n, est := flushCost(src, sum, nil)
+	// 56 cm3 of flush at 1.24 g/cm3, 100 changes, the G-code's own number.
+	if est || n != 100 || math.Abs(g-69.5) > 2 {
+		t.Fatalf("flush %.2f g over %d changes, estimated %v", g, n, est)
+	}
+}
+
+// Without footer usage lines the flush comes from the matrix, and says so.
+func TestFlushEstimateFromTheMatrix(t *testing.T) {
+	data, err := os.ReadFile("../gcodeinfo/testdata/cubes_2filaments_73.gcode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for _, l := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(l, "; filament used") && !strings.HasPrefix(l, "; total filament used") {
+			kept = append(kept, l)
+		}
+	}
+	file := filepath.Join(t.TempDir(), "p.gcode")
+	if err := os.WriteFile(file, []byte(strings.Join(kept, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := gcodeinfo.ReadSummary(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := threemf.NewConfig()
+	cfg.SetList("flush_volumes_matrix", "0", "190", "670", "0")
+	cfg.SetString("flush_multiplier", "1.3")
+	g, n, est := flushCost(file, sum, cfg)
+	if !est || n != 100 || math.Abs(g-69.3) > 1 {
+		t.Fatalf("estimate %.2f g over %d changes, estimated %v", g, n, est)
+	}
+}
+
+// A usable footer that shows no extra material means no flush: no estimate.
+func TestFlushNoneWhenTheFooterSaysSo(t *testing.T) {
+	data, err := os.ReadFile("../gcodeinfo/testdata/cube_1filament_73.gcode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A second T command makes a tool change; the footer still equals the E words.
+	text := strings.Replace(string(data), "\n;LAYER_CHANGE\n", "\nT0\n;LAYER_CHANGE\n", 1)
+	file := filepath.Join(t.TempDir(), "p.gcode")
+	if err := os.WriteFile(file, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := gcodeinfo.ReadSummary(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := threemf.NewConfig()
+	cfg.SetList("flush_volumes_matrix", "0", "300", "300", "0")
+	cfg.SetString("flush_multiplier", "1")
+	g, n, est := flushCost(file, sum, cfg)
+	if g != 0 || est || n < 1 {
+		t.Fatalf("flush %.2f g over %d changes, estimated %v", g, n, est)
+	}
+}
+
+// The estimate raises a small nonzero purge to the app's 100 mm3 minimum.
+func TestFlushEstimateMinimumPurge(t *testing.T) {
+	data, err := os.ReadFile("../gcodeinfo/testdata/cubes_2filaments_73.gcode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for _, l := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(l, "; filament used") && !strings.HasPrefix(l, "; total filament used") {
+			kept = append(kept, l)
+		}
+	}
+	file := filepath.Join(t.TempDir(), "p.gcode")
+	if err := os.WriteFile(file, []byte(strings.Join(kept, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum, _ := gcodeinfo.ReadSummary(file)
+	cfg := threemf.NewConfig()
+	cfg.SetList("flush_volumes_matrix", "0", "50", "50", "0")
+	cfg.SetString("flush_multiplier", "1")
+	g, n, est := flushCost(file, sum, cfg)
+	if !est || n != 100 || math.Abs(g-100*100*1.24/1000) > 0.05 {
+		t.Fatalf("estimate %.2f g over %d changes, estimated %v", g, n, est)
 	}
 }

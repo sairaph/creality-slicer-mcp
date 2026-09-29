@@ -595,3 +595,72 @@ func FeatureUsage(path, feature string) (FeatureUse, error) {
 	}
 	return use, nil
 }
+
+// Extrusion is what the G-code itself pushes, per tool, and the order of the
+// tool changes.
+type Extrusion struct {
+	// NetMM is the filament of the E words per tool index, retracts subtracted.
+	NetMM map[int]float64
+	// ToolSeq lists the T commands in order (the first one selects the first tool).
+	ToolSeq []int
+}
+
+// ReadExtrusion adds up the E words of a G-code file per tool. The footer of
+// a multi-colour file counts the purge of each tool change too, and that purge
+// is not in the E words (the printer's tool change macro does it), so the
+// footer minus NetMM is the flush.
+func ReadExtrusion(path string) (Extrusion, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return Extrusion{}, err
+	}
+	defer f.Close()
+	out := Extrusion{NetMM: map[int]float64{}}
+	tool, lastAbs, absolute := 0, 0.0, false
+	lr := newLineReader(f, 0)
+	for {
+		line, _, _, err := lr.next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return out, err
+		}
+		line = trimSpace(stripComment(line))
+		if len(line) < 2 {
+			continue
+		}
+		switch string(firstWord(line)) {
+		case "M82":
+			absolute = true
+		case "M83":
+			absolute = false
+		case "G92":
+			eachWord(line, func(l byte, v float64) {
+				if l == 'E' {
+					lastAbs = v
+				}
+			})
+		case "G0", "G1", "G2", "G3":
+			eachWord(line, func(l byte, v float64) {
+				if l != 'E' {
+					return
+				}
+				if absolute {
+					out.NetMM[tool] += v - lastAbs
+					lastAbs = v
+				} else {
+					out.NetMM[tool] += v
+				}
+			})
+		default:
+			if line[0] == 'T' {
+				if n, ok := parseUint(line[1:]); ok {
+					tool = n
+					out.ToolSeq = append(out.ToolSeq, n)
+				}
+			}
+		}
+	}
+	return out, nil
+}

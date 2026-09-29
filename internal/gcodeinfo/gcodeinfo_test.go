@@ -557,3 +557,35 @@ func TestFeatureUsagePrimeTower(t *testing.T) {
 		t.Fatalf("one filament: %+v %v", none, err)
 	}
 }
+
+// The footer of a multi-colour file counts the purge of every tool change, which
+// is not in the E words: footer minus E words is the flush (56 cm3 here, the
+// flush matrix 190 and 670 times the multiplier 1.3 times 50 changes each way).
+func TestReadExtrusionMatchesFooterOneFilament(t *testing.T) {
+	ex, err := ReadExtrusion(oneFilament73)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum, _ := ReadSummary(oneFilament73)
+	if math.Abs(ex.NetMM[0]-sum.FilamentUsedMM[0]) > 0.5 || len(ex.ToolSeq) != 1 {
+		t.Fatalf("E words %v mm, footer %v, tools %v", ex.NetMM, sum.FilamentUsedMM, ex.ToolSeq)
+	}
+}
+
+func TestReadExtrusionFlushIsFooterMinusEWords(t *testing.T) {
+	ex, err := ReadExtrusion(twoFilaments73)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum, _ := ReadSummary(twoFilaments73)
+	if len(ex.ToolSeq) != 101 || len(sum.FilamentUsedMM) != 2 {
+		t.Fatalf("tools %d, footer %v", len(ex.ToolSeq), sum.FilamentUsedMM)
+	}
+	cm3 := 0.0
+	for tool, mm := range sum.FilamentUsedMM {
+		cm3 += (mm - ex.NetMM[tool]) * math.Pi * 1.75 * 1.75 / 4 / 1000
+	}
+	if math.Abs(cm3-56.0) > 1 {
+		t.Fatalf("flush %.2f cm3, want about 56", cm3)
+	}
+}

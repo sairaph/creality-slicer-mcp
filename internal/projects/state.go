@@ -36,8 +36,11 @@ type PlateInfo struct {
 	Objects       int
 	BedType       string
 	PrintSequence string
-	Locked        bool
-	Actions       []ActionInfo
+	// BedTemps is the first layer bed temperature (C) of each filament for the
+	// plate's bed type, from the filament's <plate>_temp_initial_layer.
+	BedTemps []string
+	Locked   bool
+	Actions  []ActionInfo
 }
 
 // RangeInfo is one height range of an object.
@@ -326,6 +329,11 @@ func (h *handle) info() (*Info, error) {
 		if pi.PrintSequence == "" && cfg != nil {
 			pi.PrintSequence = cfg.String("print_sequence")
 		}
+		if cfg != nil {
+			if key := bedTempKey(pi.BedType); key != "" {
+				pi.BedTemps = cfg.List(key)
+			}
+		}
 		pi.Actions = h.layerActions(pl.Index)
 		in.Plates = append(in.Plates, pi)
 	}
@@ -551,4 +559,24 @@ func overrideCount(kv threemf.KVs) int {
 		}
 	}
 	return n
+}
+
+// bedTempKey is the filament setting that holds the first layer bed
+// temperature for a plate type ("Textured PEI Plate" is textured_plate_temp_initial_layer).
+func bedTempKey(bedType string) string {
+	switch bedType {
+	case "Cool Plate":
+		return "cool_plate_temp_initial_layer"
+	case "Engineering Plate":
+		return "eng_plate_temp_initial_layer"
+	case "High Temp Plate":
+		return "hot_plate_temp_initial_layer"
+	case "Textured PEI Plate":
+		return "textured_plate_temp_initial_layer"
+	case "Customized Plate":
+		return "customized_plate_temp_initial_layer"
+	case "Epoxy Resin Plate":
+		return "epoxy_resin_plate_temp_initial_layer"
+	}
+	return ""
 }

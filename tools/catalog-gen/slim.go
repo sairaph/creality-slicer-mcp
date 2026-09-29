@@ -20,6 +20,9 @@ type SlimFile struct {
 	Format  int          `json:"format"`
 	Source  SlimSource   `json:"source"`
 	Options []SlimOption `json:"options"`
+	// LegacyKeys are keys the application still meets in old files but renames,
+	// converts or drops on load; they are not drift.
+	LegacyKeys []SlimLegacy `json:"legacy_keys"`
 }
 
 type SlimSource struct {
@@ -95,6 +98,12 @@ func TooltipHash(msgid string) string {
 // options and G-code placeholders are not part of it.
 func (b *Build) slim(cat *Catalog) *SlimFile {
 	sf := &SlimFile{Format: SlimFormat, Source: SlimSource{Ref: b.Ref, Commit: b.Commit}}
+	if b.CfgTree != nil {
+		sf.LegacyKeys = b.legacyKeys()
+	}
+	if sf.LegacyKeys == nil {
+		sf.LegacyKeys = []SlimLegacy{}
+	}
 	for i := range cat.Options {
 		e := &cat.Options[i]
 		// SLA options have no GUI in this build and are irrelevant for FDM printers

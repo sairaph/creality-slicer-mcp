@@ -71,7 +71,7 @@ func writeBundle(t *testing.T, processExtra string) string {
 "layer_height":"0.2","initial_layer_print_height":"0.2","wall_loops":"3",%s"compatible_printers":[%q]}`, testProcess, processExtra, testPrinter))
 	fil := func(name, id, typ, colour, printer string) string {
 		return fmt.Sprintf(`{"type":"filament","name":%q,"from":"system","instantiation":"true","filament_id":%q,
-"filament_type":[%q],"default_filament_colour":[%q],"nozzle_temperature":["215"],"compatible_printers":[%q]}`, name, id, typ, colour, printer)
+"filament_type":[%q],"default_filament_colour":[%q],"nozzle_temperature":["215"],"cool_plate_temp_initial_layer":["60"],"textured_plate_temp_initial_layer":["70"],"compatible_printers":[%q]}`, name, id, typ, colour, printer)
 	}
 	add("filament", testPLA, fil(testPLA, "P001", "PLA", "#FFFFFF", testPrinter))
 	add("filament", testPETG, fil(testPETG, "P002", "PETG", "#000000", testPrinter))

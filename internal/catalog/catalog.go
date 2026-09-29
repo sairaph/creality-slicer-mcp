@@ -196,10 +196,23 @@ type Catalog struct {
 	Ref     string
 	Commit  string
 
-	opts  []*Option
-	byKey map[string]*Option
-	texts map[uint64]string // tooltip wording by hash, when attached
-	loadd bool              // WithTexts was applied
+	opts   []*Option
+	byKey  map[string]*Option
+	legacy map[string]Legacy
+	texts  map[uint64]string // tooltip wording by hash, when attached
+	loadd  bool              // WithTexts was applied
+}
+
+// Legacy is a key the application still meets in old preset files and project
+// configs but no longer defines. Kind is renamed (Replacement names the current
+// key), dropped or ignored (removed on load), or retired (the definition was
+// removed and the key is discarded as unknown). Source is file:line evidence in
+// the application source.
+type Legacy struct {
+	Key         string `json:"key"`
+	Kind        string `json:"kind"`
+	Replacement string `json:"replacement,omitempty"`
+	Source      string `json:"source,omitempty"`
 }
 
 type file struct {
@@ -208,7 +221,8 @@ type file struct {
 		Ref    string `json:"ref"`
 		Commit string `json:"commit"`
 	} `json:"source"`
-	Options []*Option `json:"options"`
+	Options    []*Option `json:"options"`
+	LegacyKeys []Legacy  `json:"legacy_keys"`
 }
 
 // Versions lists the embedded catalog versions, ascending.
@@ -305,7 +319,7 @@ func FromJSON(data []byte) (*Catalog, error) {
 	if f.Format != SupportedFormat {
 		return nil, fmt.Errorf("unsupported slim catalog format %d (this build reads %d)", f.Format, SupportedFormat)
 	}
-	c := &Catalog{Ref: f.Source.Ref, Commit: f.Source.Commit, opts: f.Options, byKey: make(map[string]*Option, len(f.Options))}
+	c := &Catalog{Ref: f.Source.Ref, Commit: f.Source.Commit, opts: f.Options, byKey: make(map[string]*Option, len(f.Options)), legacy: make(map[string]Legacy, len(f.LegacyKeys))}
 	for i, o := range c.opts {
 		if o.Key == "" {
 			return nil, fmt.Errorf("option %d has no key", i)
@@ -322,6 +336,12 @@ func FromJSON(data []byte) (*Catalog, error) {
 			o.hash = h
 		}
 		c.byKey[o.Key] = o
+	}
+	for _, l := range f.LegacyKeys {
+		if _, defined := c.byKey[l.Key]; defined {
+			return nil, fmt.Errorf("legacy key %q is also a defined option", l.Key)
+		}
+		c.legacy[l.Key] = l
 	}
 	return c, nil
 }
@@ -468,8 +488,38 @@ func (c *Catalog) CLIFlag(key string) (flag string, isBool bool, ok bool) {
 	return flag, o.ValueType == "bool", true
 }
 
+// IsLegacy reports whether key is a legacy key: one the application still
+// meets in old files but renames, converts or drops on load.
+func (c *Catalog) IsLegacy(key string) bool {
+	_, ok := c.legacy[key]
+	return ok
+}
+
+// Legacy returns the current key a legacy key is renamed to ("" when the key is
+// simply dropped or ignored) and whether key is a legacy key at all.
+func (c *Catalog) Legacy(key string) (replacement string, ok bool) {
+	l, ok := c.legacy[key]
+	return l.Replacement, ok
+}
+
+// LegacyInfo returns the full legacy record of a key.
+func (c *Catalog) LegacyInfo(key string) (Legacy, bool) {
+	l, ok := c.legacy[key]
+	return l, ok
+}
+
+// LegacyKeys lists every legacy key, sorted by key.
+func (c *Catalog) LegacyKeys() []Legacy {
+	out := make([]Legacy, 0, len(c.legacy))
+	for _, l := range c.legacy {
+		out = append(out, l)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out
+}
+
 // UnknownKeys returns, sorted and without duplicates, the keys the catalog does
-// not define. It is the drift check between the catalog (built from one source
+// not define and does not know as legacy keys. It is the drift check between the catalog (built from one source
 // version) and the presets of the installed application: a key present in the
 // installed presets but unknown here is a setting this catalog cannot describe
 // or validate.
@@ -477,7 +527,7 @@ func (c *Catalog) UnknownKeys(keys []string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, k := range keys {
-		if _, ok := c.byKey[k]; !ok && !seen[k] {
+		if _, ok := c.byKey[k]; !ok && !c.IsLegacy(k) && !seen[k] {
 			seen[k] = true
 			out = append(out, k)
 		}

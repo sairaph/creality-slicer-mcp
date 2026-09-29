@@ -14,6 +14,7 @@ type Build struct {
 	Ref, Commit               string
 	CfgCt, HppCt, TabCt, CmCt *CText
 	PresetCt, BundleCt        *CText
+	CfgTree                   *Node
 
 	EnumMaps   map[string]*EnumMap
 	Defs       *DefParser

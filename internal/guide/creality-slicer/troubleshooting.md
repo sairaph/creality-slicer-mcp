@@ -43,6 +43,10 @@ get_slicer_status says `supported` false when the installed app is neither 7.2 n
 8. A mesh looks tiny or huge: wrong units. add_model warns; use `scale`.
 9. Slicer and firmware versions drifted apart: time estimates and purge behave oddly; update both. A catalog drift note (the app sets settings the shipped catalog does not know) appears in get_slicer_status and doctor only, never on a project; those settings are not written into new projects, or into an opened project when set_presets rebuilds its settings; projects opened from the app otherwise keep them.
 
+## Purge waste and by object
+
+For a plate with two or more filaments printed by layer the slice reply has `Purge waste X g of Y g (Z%)` right after the `Sliced` line (and first in `warnings`): the grams thrown away in the tower and flush, of all the filament used, with the number of colour changes. A large share means the colours change too often or the flush matrix is heavy. When every object on the plate uses only one filament, the reply also gives the exact `update_settings` call that prints the plate by object, which removes the prime tower and most of the flush (a change between objects that use different filaments still flushes). Act on it, or ask the user whether to; do not ignore it. Printing by object needs extruder clearance between objects (see `multi-plate` and the -63 row above), and the tools warn when it is missing.
+
 ## Reading the output
 
 The attached app output is the last part of the run, kept from the end. The last lines usually name the failing step. A warning inside a successful slice is not a failure: read `warnings` in the result.

@@ -35,6 +35,10 @@ The printer matches project filaments to CFS slots by their type, and the compar
 
 `layer_height`, `wall_loops`, `sparse_infill_density`, `enable_support`, `enable_prime_tower`, `print_sequence`, `filament_type`, `filament_max_volumetric_speed`. Look each up with describe_setting before changing it; ranges are enforced.
 
+## PETG and the bed
+
+Creality's CR-PETG preset supports the Cool Plate at 70 C, which is the default bed type, and the Textured PEI plate. Many users prefer the textured PEI plate for PETG, because PETG can stick too well to a smooth plate. Replies show the plate type and the first-layer bed temperature for each filament. Set `bed_type` on create_project, or `curr_bed_type` with manage_plates `set`, to change it.
+
 ## Nozzle sizes
 
 A 0.6 or 0.8 nozzle trades detail for speed and strength. Pick the printer preset that matches the nozzle actually fitted: process and filament presets are tied to it, and set_presets refuses an incompatible combination and lists what fits.

@@ -394,6 +394,7 @@ func (s *Server) setPresets(ctx context.Context, _ *mcp.CallToolRequest, in setP
 		fmt.Fprintf(&b, "%d | %s | %s | %s\n", f.Index, pipeSafe(f.Preset), f.Type, f.Colour)
 	}
 	b.WriteString(spoolLines(info))
+	b.WriteString(bedLines(info))
 	if len(info.Filaments) > 1 {
 		fmt.Fprintf(&b, "\nFlush matrix: %s (multiplier %s). It is the purge volume in mm3 from each filament (row) to each other (column); dark to light needs the most. Give flush_matrix to set it by hand.\n", info.FlushMode, orDash(info.FlushMultiplier))
 		b.WriteString("For the K2 CFS, each filament's type must match a loaded spool: call get_guide with {\"topic\": \"multicolor-cfs\"}.\n")

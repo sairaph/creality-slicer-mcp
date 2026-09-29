@@ -5,6 +5,7 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -124,18 +125,19 @@ func filamentsFront(in *projects.Info) []filamentFront {
 
 // plateFront is one plate in a front matter.
 type plateFront struct {
-	Index         int    `yaml:"index"`
-	Name          string `yaml:"name,omitempty"`
-	Objects       int    `yaml:"objects"`
-	BedType       string `yaml:"bed_type,omitempty"`
-	PrintSequence string `yaml:"print_sequence,omitempty"`
-	Locked        bool   `yaml:"locked"`
+	Index         int      `yaml:"index"`
+	Name          string   `yaml:"name,omitempty"`
+	Objects       int      `yaml:"objects"`
+	BedType       string   `yaml:"bed_type,omitempty"`
+	BedTemps      []string `yaml:"first_layer_bed_c,omitempty"`
+	PrintSequence string   `yaml:"print_sequence,omitempty"`
+	Locked        bool     `yaml:"locked"`
 }
 
 func platesFront(in *projects.Info) []plateFront {
 	out := make([]plateFront, len(in.Plates))
 	for i, p := range in.Plates {
-		out[i] = plateFront{Index: p.Index, Name: p.Name, Objects: p.Objects, BedType: p.BedType, PrintSequence: p.PrintSequence, Locked: p.Locked}
+		out[i] = plateFront{Index: p.Index, Name: p.Name, Objects: p.Objects, BedType: p.BedType, BedTemps: p.BedTemps, PrintSequence: p.PrintSequence, Locked: p.Locked}
 	}
 	return out
 }
@@ -179,6 +181,7 @@ func projectBody(in *projects.Info, labels map[int][]string) string {
 		fmt.Fprintf(&b, "%d | %s | %s | %s\n", f.Index, pipeSafe(f.Preset), f.Type, f.Colour)
 	}
 	b.WriteString(spoolLines(in))
+	b.WriteString(bedLines(in))
 	b.WriteString("\nPlates:\n")
 	for _, p := range in.Plates {
 		name := p.Name
@@ -448,4 +451,31 @@ func spoolLines(in *projects.Info) string {
 		out += "A generic preset carries generic temperatures and flow, not the tuned values of the spool's brand: check them, or pick a preset with set_presets filaments.\n"
 	}
 	return out
+}
+
+// bedLines shows, for each plate, the bed type and the first layer bed
+// temperature every filament asks for on it, so the choice of plate type is visible.
+func bedLines(in *projects.Info) string {
+	var b strings.Builder
+	for _, p := range in.Plates {
+		if p.BedType == "" || len(p.BedTemps) == 0 {
+			continue
+		}
+		var parts []string
+		for i, t := range p.BedTemps {
+			if i >= len(in.Filaments) {
+				continue
+			}
+			if v, err := strconv.ParseFloat(strings.TrimSpace(t), 64); err == nil && v <= 0 {
+				parts = append(parts, fmt.Sprintf("filament %d: this plate type is not supported by its preset", i+1))
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("filament %d: %s C", i+1, t))
+		}
+		fmt.Fprintf(&b, "plate %d: %s, first layer bed temperature: %s\n", p.Index, p.BedType, strings.Join(parts, ", "))
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return "\nBed (plate: type, first layer temperature per filament; update_settings curr_bed_type or the plate's bed_type changes it):\n" + b.String()
 }

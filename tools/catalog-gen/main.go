@@ -134,7 +134,7 @@ func generate(repo, ref, outPath, slimPath string) error {
 
 	b := &Build{
 		Ref: ref, Commit: src.Commit,
-		CfgCt: cfgCt, HppCt: hppCt, TabCt: tabCt, CmCt: cmCt, PresetCt: presetCt, BundleCt: bundleCt,
+		CfgCt: cfgCt, CfgTree: cfgTree, HppCt: hppCt, TabCt: tabCt, CmCt: cmCt, PresetCt: presetCt, BundleCt: bundleCt,
 	}
 
 	// --- definitions

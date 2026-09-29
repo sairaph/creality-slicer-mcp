@@ -386,3 +386,126 @@ func TestSpoolSlotsAreValidated(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func purgeGCode(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile("../gcodeinfo/testdata/cubes_2filaments_73.gcode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// Two filaments by layer, one filament per object: the note names the waste
+// and the by-object way out with its clearance.
+func TestPurgeWarningSingleFilamentObjects(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Comb")
+	e.addBox(t, info.ID, "a", 20, 20, 10)
+	if _, err := e.st.AddModel(info.ID, AddModelRequest{Path: writeSTL(t, "b", 20, 20, 10), Filament: 2}); err != nil {
+		t.Fatal(err)
+	}
+	g := purgeGCode(t)
+	e.exec.gcode = func(int) string { return g }
+	res, err := e.st.Slice(info.ID, SliceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := res.Last.Plates[0]
+	for _, want := range []string{"Purge waste ", "prime tower ", "flush ", "over 100 filament changes", "Each object here uses one filament", `"print_sequence":"by object"`, "slice_project with arrange true", "mm between objects"} {
+		if !strings.Contains(p.PurgeWarning, want) {
+			t.Errorf("%q lacks %q", p.PurgeWarning, want)
+		}
+	}
+	if len(res.Last.Warnings) == 0 || res.Last.Warnings[0] != p.PurgeWarning {
+		t.Errorf("the note is not the first warning: %v", res.Last.Warnings)
+	}
+}
+
+// An object whose walls go to the other filament: by object would not help.
+func TestPurgeWarningMixedFilaments(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Mixed")
+	e.addBox(t, info.ID, "a", 20, 20, 10)
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "object", Target: "a", Values: map[string]any{"wall_filament": 2}}); err != nil {
+		t.Fatal(err)
+	}
+	g := purgeGCode(t)
+	e.exec.gcode = func(int) string { return g }
+	res, err := e.st.Slice(info.ID, SliceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := res.Last.Plates[0].PurgeWarning
+	if !strings.Contains(w, "Purge waste ") || !strings.Contains(w, "mix filaments") || strings.Contains(w, "Each object here") {
+		t.Fatalf("warning %q", w)
+	}
+}
+
+func TestPlateObjectsUseOneFilament(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "One")
+	e.addBox(t, info.ID, "a", 20, 20, 10)
+	check := func(want bool, why string) {
+		t.Helper()
+		if err := e.st.read(info.ID, func(h *handle) error {
+			if got := h.plateObjectsUseOneFilament(1); got != want {
+				t.Errorf("%s: %v, want %v", why, got, want)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check(true, "one object one filament")
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "object", Target: "a", Values: map[string]any{"sparse_infill_filament": 2}}); err != nil {
+		t.Fatal(err)
+	}
+	check(false, "infill on the other filament")
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "object", Target: "a", Values: map[string]any{"sparse_infill_filament": nil}}); err != nil {
+		t.Fatal(err)
+	}
+	check(true, "role filament removed")
+}
+
+// A single colour by-layer plate has nothing to warn about.
+func TestNoPurgeWarningForOneFilament(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Plain", FilamentSpec{Preset: testPLA, Colour: "#FFFFFF"})
+	e.addBox(t, info.ID, "a", 20, 20, 10)
+	one, err := os.ReadFile("../gcodeinfo/testdata/cube_1filament_73.gcode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.exec.gcode = func(int) string { return string(one) }
+	res, err := e.st.Slice(info.ID, SliceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := res.Last.Plates[0].PurgeWarning; w != "" {
+		t.Fatalf("warning %q", w)
+	}
+}
+
+func TestPlateBedTemperaturesPerFilament(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Bed")
+	got, err := e.st.GetProject(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl := got.Plates[0]
+	if pl.BedType == "" || len(pl.BedTemps) != 2 {
+		t.Fatalf("plate %+v", pl)
+	}
+	up, err := e.st.UpdateSettings(info.ID, SettingsRequest{Values: map[string]any{"curr_bed_type": "Textured PEI Plate"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bt := up.Info.Plates[0]; bt.BedType != "Textured PEI Plate" || bt.BedTemps[0] != "70" {
+		t.Fatalf("textured: %+v", bt)
+	}
+	if k := bedTempKey("Cool Plate"); k != "cool_plate_temp_initial_layer" {
+		t.Errorf("key %q", k)
+	}
+}

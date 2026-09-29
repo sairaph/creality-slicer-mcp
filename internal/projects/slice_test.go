@@ -479,7 +479,13 @@ func TestSliceRetriesNewerFileCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e.exec.count() != 2 || len(out.Last.Warnings) != 1 || !strings.Contains(out.Last.Warnings[0], "newer") {
+	newer := 0
+	for _, w := range out.Last.Warnings {
+		if strings.Contains(w, "newer") {
+			newer++
+		}
+	}
+	if e.exec.count() != 2 || newer != 1 {
 		t.Fatalf("calls %d warnings %v", e.exec.count(), out.Last.Warnings)
 	}
 }

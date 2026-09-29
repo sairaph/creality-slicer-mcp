@@ -103,3 +103,19 @@ from the file of the version in use (43 settings changed between 7.2 and 7.3).
 `go test -timeout 5m -p 2 -count=1 ./...` in this directory. The tests use
 invented C++ snippets only. The module cannot import the main module's
 `testhome`, so `TestMain` isolates `HOME` itself.
+
+## Legacy keys
+
+The slim catalog also carries `legacy_keys`: keys that old presets and projects
+may still contain but the application no longer defines. They are not drift.
+Each entry has `key`, `kind`, `replacement` (renamed only) and `source`
+(`file:line`). Sources:
+
+- `renamed` / `dropped`: the if-else chain of `PrintConfigDef::handle_legacy`
+  (`opt_key = "new"` renames, `opt_key = ""` erases);
+- `ignored`: the `ignore` set at the end of `handle_legacy`;
+- `retired`: definitions commented out in `PrintConfig.cpp` and keys commented
+  out of the preset key lists in `Preset.cpp`.
+
+A key that is a defined print option is never legacy. `catalog.UnknownKeys`
+skips legacy keys; `IsLegacy`, `Legacy` and `LegacyInfo` look them up.

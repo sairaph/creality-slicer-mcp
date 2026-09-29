@@ -79,6 +79,9 @@ type PlateResult struct {
 	FlushG         float64
 	FlushChanges   int
 	FlushEstimated bool
+	// PurgeWarning is the note about the purge waste of a multi-filament by-layer
+	// plate (see purgeWarning); empty when there is none.
+	PurgeWarning string
 }
 
 // LastSlice is the record of the last successful slice, kept in job.json.
@@ -585,6 +588,7 @@ func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res
 		pr.Actions = scanActions(file, snap.layerActions(plate))
 		pr.PrimeTowerG, pr.PrimeTowerS = primeTower(file, sum)
 		pr.FlushG, pr.FlushChanges, pr.FlushEstimated = flushCost(file, sum, sp.Settings)
+		pr.PurgeWarning = snap.purgeWarning(plate, pr)
 		pr.Changes = sum.TotalFilamentChange
 		if pr.Changes == 0 {
 			uses := 0
@@ -596,6 +600,9 @@ func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res
 		last.Plates = append(last.Plates, pr)
 	}
 	sort.Slice(last.Plates, func(i, j int) bool { return last.Plates[i].Plate < last.Plates[j].Plate })
+	// The purge waste of multi-filament by-layer plates goes first: it is the
+	// number the owner pays for.
+	last.Warnings = append(last.PurgeNotes(), last.Warnings...)
 	for _, w := range wanted {
 		found := false
 		for _, p := range last.Plates {

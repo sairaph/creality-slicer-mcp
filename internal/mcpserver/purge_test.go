@@ -100,3 +100,46 @@ func TestBedBlockSaysUnsupported(t *testing.T) {
 		t.Fatalf("bed block:\n%s", got)
 	}
 }
+
+func TestSetLayerActionsToolChangeAndColourChange(t *testing.T) {
+	pf := newProjFixture(t)
+	id := pf.withModel(t, "Stripes")
+	out := pf.ok(t, "set_layer_actions", map[string]any{"project": id, "actions": []map[string]any{
+		{"layer": 2, "type": "tool_change", "filament": 2},
+	}})
+	contains(t, "tool_change", out, "tool_change to filament 2 (#000000)")
+	if strings.Contains(out, "CFS filament change") {
+		t.Errorf("the colour change line appears for a plain tool change:\n%s", out)
+	}
+	out = pf.ok(t, "set_layer_actions", map[string]any{"project": id, "actions": []map[string]any{
+		{"layer": 2, "type": "color_change", "filament": 2},
+	}})
+	contains(t, "color_change", out, "tool_change to filament 2 (#000000)",
+		"On this printer a colour change is a CFS filament change: it is stored as tool_change and the printer switches spools by itself.")
+	// A tool change needs its filament, within the project.
+	e := pf.errText(t, "set_layer_actions", map[string]any{"project": id, "actions": []map[string]any{{"layer": 2, "type": "tool_change"}}})
+	contains(t, "no filament", e, "needs filament")
+	e = pf.errText(t, "set_layer_actions", map[string]any{"project": id, "actions": []map[string]any{{"layer": 2, "type": "tool_change", "filament": 5}}})
+	contains(t, "filament 5", e, "filament 5 does not exist")
+}
+
+func TestOpenProjectReportsRestoredSlots(t *testing.T) {
+	pf := newProjFixture(t)
+	out := pf.ok(t, "create_project", map[string]any{"name": "Slots", "spools": []map[string]any{
+		{"slot": "T2C", "catalog_id": "P001", "material": "PLA", "colour": "#FFFFFF", "status": "defined"},
+		{"slot": "T1A", "catalog_id": "P002", "material": "PETG", "colour": "#000000", "status": "defined"},
+	}})
+	id := frontOf(t, out)["project"].(string)
+	file := filepath.Join(t.TempDir(), "slots.3mf")
+	pf.ok(t, "export_project", map[string]any{"project": id, "path": file})
+	got := pf.ok(t, "open_project", map[string]any{"path": file, "name": "Again"})
+	contains(t, "open_project", got, "CFS slots restored from the file: filament 1 -> T2C, filament 2 -> T1A", "spool_slot: T2C")
+}
+
+func TestSetLayerActionsRepliesWithTheIgnoredWarning(t *testing.T) {
+	pf := newProjFixture(t)
+	id := pf.withModel(t, "Two")
+	pf.ok(t, "add_model", map[string]any{"project": id, "path": pf.stl, "filament": 2})
+	out := pf.ok(t, "set_layer_actions", map[string]any{"project": id, "actions": []map[string]any{{"layer": 2, "type": "tool_change", "filament": 2}}})
+	contains(t, "mixed", out, "Warnings:", "have no effect", "every object on the plate prints with one filament")
+}

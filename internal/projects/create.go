@@ -243,6 +243,10 @@ type OpenResult struct {
 	Info *Info
 	// SourceAppVersion is the application version the file was written by.
 	SourceAppVersion string
+	// SpoolsFrom says where the CFS spool slots of the filaments came from:
+	// "the file" (an export of this server left them in it) or "project <id>,
+	// which exported it" (the file was re-saved by the app). Empty when none.
+	SpoolsFrom string
 }
 
 // OpenProject copies a 3MF into the store (the source is never touched) and
@@ -288,8 +292,10 @@ func (s *Store) OpenProject(req OpenRequest) (*OpenResult, error) {
 	}
 	isSlicer := p.IsSlicerProject
 	nObjects, nPlates, printerName := len(p.Objects), len(p.Plates), ""
+	var presets []string
 	if p.Settings != nil {
 		printerName = p.Settings.String("printer_settings_id")
+		presets = p.Settings.List("filament_settings_id")
 	}
 	title := strings.TrimSpace(p.Metadata.Value("Title"))
 	p.Close()
@@ -300,6 +306,19 @@ func (s *Store) OpenProject(req OpenRequest) (*OpenResult, error) {
 	if req.Into != "" {
 		defer func() { _ = removeAll(dir) }()
 		return s.openInto(req.Into, path, filepath.Join(dir, projectFile))
+	}
+	// The CFS spool slots: from the member an export left in the file, else from
+	// the project that exported this path (the app drops the member when it saves).
+	emb := embeddedSpools(filepath.Join(dir, projectFile))
+	links, from := leadingLinks(emb, presets), ""
+	if len(links) > 0 {
+		from = "the file"
+	} else if emb == nil {
+		if srcID, srcLinks := s.exportedBy(path); srcID != "" {
+			if links = leadingLinks(srcLinks, presets); len(links) > 0 {
+				from = "project " + srcID + ", which exported it"
+			}
+		}
 	}
 	if name == "" {
 		name = title
@@ -318,11 +337,11 @@ func (s *Store) OpenProject(req OpenRequest) (*OpenResult, error) {
 		return fail(errf(CodeInternal, "", "could not place the project: %v", err))
 	}
 	dir = s.dir(id)
-	m := &meta{Name: name, Created: s.now(), Updated: s.now(), Revision: 1, SourcePath: path, Objects: nObjects, Plates: nPlates, Printer: printerName}
+	m := &meta{Name: name, Created: s.now(), Updated: s.now(), Revision: 1, SourcePath: path, Objects: nObjects, Plates: nPlates, Printer: printerName, Spools: links}
 	if err := s.writeMeta(id, m); err != nil {
 		return fail(errf(CodeInternal, "", "%v", err))
 	}
-	res := &OpenResult{}
+	res := &OpenResult{SpoolsFrom: from}
 	err = s.read(id, func(h *handle) error {
 		var ierr error
 		res.SourceAppVersion = h.appVersion()
@@ -448,17 +467,18 @@ func (s *Store) openInto(ref, source, tmpFile string) (*OpenResult, error) {
 	if h.p.Settings != nil {
 		names = h.p.Settings.List("filament_settings_id")
 	}
-	var links []SpoolLink
-	for i, l := range h.meta.Spools {
-		if i < len(names) && names[i] == l.Preset {
-			links = append(links, l)
-		} else {
-			break // links are by position: keep only the unbroken start
+	// Links are by position: only the unbroken start stays. When none of the
+	// target's remain, the ones the file carries (an export of this server) apply.
+	links := leadingLinks(h.meta.Spools, names)
+	from := ""
+	if len(links) == 0 {
+		if links = leadingLinks(embeddedSpools(dst), names); len(links) > 0 {
+			from = "the file"
 		}
 	}
 	h.meta.Spools = links
 	h.recordSaved()
-	res := &OpenResult{SourceAppVersion: h.appVersion()}
+	res := &OpenResult{SourceAppVersion: h.appVersion(), SpoolsFrom: from}
 	if res.Info, err = h.info(); err != nil {
 		return nil, err
 	}

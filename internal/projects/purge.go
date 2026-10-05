@@ -2,6 +2,7 @@ package projects
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -114,4 +115,92 @@ func (l *LastSlice) PurgeNotes() []string {
 		out = append(out, note)
 	}
 	return out
+}
+
+// plateExtruders lists the filaments (1 based) the objects of a plate print
+// with, the way Print::object_extruders collects them (Print.cpp:1352): the
+// filament of each object, part and height range, and, per region, the wall
+// filament when it prints walls (wall_loops > 0, or a brim), the sparse infill
+// filament when the infill density is above 0 and the solid infill filament
+// when there are top or bottom shell layers (PrintRegion.cpp:47). A role
+// filament of 0 is the region's own filament. Supports are not counted: they go
+// through support_material_extruders, which the layer tool change code does not
+// consult. painted is true when colour painting adds filaments the file does not
+// name; painting of seams, supports, fuzzy skin or faces adds none.
+func (h *handle) plateExtruders(plate int) (filaments []int, painted bool) {
+	pl := h.p.Plate(plate)
+	if pl == nil {
+		return nil, false
+	}
+	set := map[int]bool{}
+	global := func(key string) string {
+		if h.p.Settings == nil {
+			return ""
+		}
+		return h.p.Settings.String(key)
+	}
+	seen := map[int]bool{}
+	for _, in := range pl.Instances {
+		o := h.p.Object(in.ObjectID)
+		if o == nil || seen[o.ID] {
+			continue
+		}
+		seen[o.ID] = true
+		objExt := max(o.Extruder(), 1)
+		set[objExt] = true
+		painted = painted || o.Painted().Color
+		// region reads the effective value of a key: the first of the layers
+		// that sets it, else the project.
+		region := func(layers ...threemf.KVs) {
+			look := func(key string) string {
+				for _, kv := range layers {
+					if v, ok := kv.Get(key); ok && strings.TrimSpace(v) != "" {
+						return v
+					}
+				}
+				return global(key)
+			}
+			own := objExt
+			if n := atoi0(look("extruder")); n > 0 {
+				own = n
+				set[n] = true
+			}
+			role := func(key string) {
+				if n := atoi0(look(key)); n > 0 {
+					set[n] = true
+				} else {
+					set[own] = true
+				}
+			}
+			num := func(key string) float64 {
+				f, _ := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(look(key)), "%"), 64)
+				return f
+			}
+			brim := look("raft_layers") != "" && atoi0(look("raft_layers")) > 0
+			brim = !brim && ((look("brim_type") != "no_brim" && look("brim_type") != "" && num("brim_width") > 0) || look("brim_type") == "auto_brim")
+			if num("wall_loops") > 0 || brim {
+				role("wall_filament")
+			}
+			if num("sparse_infill_density") > 0 {
+				role("sparse_infill_filament")
+			}
+			if num("top_shell_layers") > 0 || num("bottom_shell_layers") > 0 {
+				role("solid_infill_filament")
+			}
+		}
+		region(o.Config)
+		for _, p := range o.Parts {
+			if len(p.Config) > 0 {
+				region(p.Config, o.Config)
+			}
+		}
+		for _, r := range o.LayerRanges {
+			region(r.Options, o.Config)
+		}
+	}
+	for n := range set {
+		filaments = append(filaments, n)
+	}
+	sort.Ints(filaments)
+	return filaments, painted
 }

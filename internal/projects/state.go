@@ -488,9 +488,36 @@ func (h *handle) warnings(in *Info, geo geometry) []Warning {
 				add("action_above_model", "the %s at layer %d (z %.2f mm) on plate %d is above the top of its objects (%.2f mm) and does nothing", strings.ReplaceAll(a.Kind, "_", " "), a.Layer, a.Z, pl.Index, top)
 			}
 			if a.Kind == ActionColorChange && (h.p.Settings == nil || h.p.Settings.String("color_change_gcode") == "") {
-				add("color_change_no_gcode", "the colour change at layer %d on plate %d writes nothing: the printer preset has no colour change G-code; use a tool_change to the filament slot instead", a.Layer, pl.Index)
+				add("color_change_no_gcode", "the colour change at layer %d on plate %d writes nothing: the printer preset has no colour change G-code; call set_layer_actions again with the same actions to store it as a filament (tool) change", a.Layer, pl.Index)
 			}
 		}
+	}
+	// Creality Print applies layer filament changes only when every object of the
+	// plate prints with one filament (ToolOrdering.cpp: object_extruders().size()
+	// == 1 before custom_tool_changes); with more they are dropped silently.
+	for _, pl := range in.Plates {
+		var layers []string
+		for _, a := range pl.Actions {
+			if a.Kind == ActionToolChange {
+				layers = append(layers, strconv.Itoa(a.Layer))
+			}
+		}
+		if len(layers) == 0 {
+			continue
+		}
+		fils, painted := h.plateExtruders(pl.Index)
+		if len(fils) < 2 && !painted {
+			continue
+		}
+		var names []string
+		for _, f := range fils {
+			names = append(names, strconv.Itoa(f))
+		}
+		here := "filaments " + strings.Join(names, ", ")
+		if painted {
+			here += " and painted colours"
+		}
+		add("layer_tool_change_ignored", "the tool changes at layer(s) %s on plate %d have no effect: Creality Print applies layer filament changes only when every object on the plate prints with one filament (here: %s); put the objects that change filament on their own plate, or give them all the same filament", strings.Join(layers, ", "), pl.Index, here)
 	}
 	if in.LastSlice != nil && in.LastSlice.Stale {
 		add("stale_slice", "plate(s) %s changed after they were sliced (the project is at revision %d): slice them again", intList(in.LastSlice.StalePlates), in.Revision)

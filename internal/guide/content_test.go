@@ -108,7 +108,7 @@ var guideWords = []string{
 	// Exit code names, in capitals in the text; and spelled-out words.
 	"multi_material",
 	// Values of enum parameters (kind, action type, support style, seam).
-	"layer_range", "negative_part", "support_enforcer", "support_blocker", "color_change",
+	"layer_range", "negative_part", "support_enforcer", "support_blocker", "color_change", "tool_change",
 	"tree_slim", "tree_strong", "tree_hybrid", "aligned_back",
 }
 

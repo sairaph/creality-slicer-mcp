@@ -27,7 +27,7 @@ Mixing materials in one print needs their temperatures to be compatible. A big t
 
 ## Assigning colours to objects
 
-add_model takes `filament` (1-based) for a whole object, and update_object changes it later. Colour inside one object (painting, colour OBJ import, gradients) is done in the app: see `gui-handoff`. Use `set_layer_actions` with type `color_change` and a `filament` to switch colour at a height.
+add_model takes `filament` (1-based) for a whole object, and update_object changes it later. Colour inside one object (painting, colour OBJ import, gradients) is done in the app: see `gui-handoff`. `set_layer_actions` `color_change` (stored as a tool change on the K2) with a `filament` switches colour at a height.
 
 ## Flush and the prime tower
 

@@ -306,14 +306,14 @@ var toolTexts = map[string]toolText{
 		},
 	},
 	"set_layer_actions": {
-		Description: `Replace the actions of a plate: a pause, a colour change to a filament slot, or custom G-code, each at a height. The list replaces the current one. Give z in mm or a layer number (starting at 1, converted with the project's layer heights). A colour change needs a second filament slot in the project.`,
+		Description: `Replace the actions of a plate: a pause, a colour change or tool change to a filament slot, or custom G-code, each at a height. The list replaces the current one. Give z in mm or a layer number (starting at 1, converted with the project's layer heights). A colour change switches to another filament slot, so it needs a second filament in the project; on printers without colour change G-code (the K2 with the CFS) it is written as a tool change that the printer performs by itself. Creality Print applies layer filament changes only when every object on the plate prints with one filament; otherwise they are dropped and the reply warns.`,
 		Params: map[string]string{
 			"plate":              "plate, starting at 1 (default 1)",
 			"actions":            "the full list of actions, replacing the current one",
 			"actions[].z":        "height in mm where the action happens; give z or layer",
 			"actions[].layer":    "layer number, starting at 1; give layer or z",
-			"actions[].type":     "pause, color_change or custom",
-			"actions[].filament": "filament slot to change to, starting at 1; for color_change",
+			"actions[].type":     "pause, color_change, tool_change or custom",
+			"actions[].filament": "filament slot to change to, starting at 1; for color_change and tool_change",
 			"actions[].gcode":    "G-code lines to insert; for custom",
 		},
 	},

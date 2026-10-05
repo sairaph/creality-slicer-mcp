@@ -338,6 +338,21 @@ func (s *Store) SetLayerActions(ref string, plate int, actions []LayerAction) (*
 			return notFoundf("call get_project to see the plates", "project %s has no plate %d", h.id, plate)
 		}
 		nfil := len(cfg.List("filament_settings_id"))
+		// A printer without colour change G-code (the K2 with the CFS) changes colour
+		// by switching to another filament: M600 would write nothing.
+		noColourGCode := strings.TrimSpace(cfg.String("color_change_gcode")) == ""
+		filColour := func(slot int, fallback string) string {
+			if l := cfg.List("filament_colour"); slot >= 1 && slot <= len(l) {
+				if c, ok := normColour(l[slot-1]); ok {
+					return c
+				}
+			}
+			if c, ok := normColour(fallback); ok {
+				return c
+			}
+			return ""
+		}
+		hasToolChange := false
 		var items []threemf.GCodeItem
 		for i, a := range actions {
 			typ, ok := actionTypes[a.Kind]
@@ -359,6 +374,18 @@ func (s *Store) SetLayerActions(ref string, plate int, actions []LayerAction) (*
 			it := threemf.GCodeItem{TopZ: z, Type: typ}
 			switch a.Kind {
 			case ActionColorChange:
+				if noColourGCode {
+					if nfil < 2 {
+						return invalidf("the K2 changes colour by switching to another CFS filament: add a filament with set_presets, then use color_change or tool_change to it",
+							"action %d: this printer has no colour change G-code (M600), so a colour change needs a second filament slot", i+1)
+					}
+					slot := max(a.Filament, 1)
+					if slot > nfil {
+						return invalidf(fmt.Sprintf("use a filament from 1 to %d", nfil), "action %d: filament %d does not exist", i+1, slot)
+					}
+					it.Type, it.Extruder, it.Color = threemf.GCodeToolChange, slot, filColour(slot, a.Colour)
+					break
+				}
 				if !colourRE.MatchString(a.Colour) {
 					return invalidf("write the colour as #RRGGBB", "action %d: a color_change needs the new colour, got %q", i+1, a.Colour)
 				}
@@ -368,7 +395,7 @@ func (s *Store) SetLayerActions(ref string, plate int, actions []LayerAction) (*
 				if a.Filament < 1 || a.Filament > nfil {
 					return invalidf(fmt.Sprintf("use a filament from 1 to %d", nfil), "action %d: filament %d does not exist", i+1, a.Filament)
 				}
-				it.Extruder = a.Filament
+				it.Extruder, it.Color = a.Filament, filColour(a.Filament, a.Colour)
 			case ActionCustom:
 				if strings.TrimSpace(a.GCode) == "" {
 					return invalidf("give gcode", "action %d: a custom action needs G-code text", i+1)
@@ -382,11 +409,16 @@ func (s *Store) SetLayerActions(ref string, plate int, actions []LayerAction) (*
 			if a.Kind == ActionColorChange && it.Extruder > nfil {
 				return invalidf(fmt.Sprintf("use a filament from 1 to %d", nfil), "action %d: filament %d does not exist", i+1, it.Extruder)
 			}
+			hasToolChange = hasToolChange || it.Type == threemf.GCodeToolChange
 			items = append(items, it)
 		}
 		mode := h.p.CustomGCodes(plate).Mode
 		if mode == "" {
 			mode = threemf.ModeSingleExtruder
+		}
+		// A tool change needs the multi extruder mode (the app writes it so).
+		if hasToolChange && nfil >= 2 && mode == threemf.ModeSingleExtruder {
+			mode = threemf.ModeMultiExtruder
 		}
 		if err := h.p.SetCustomGCodes(plate, mode, items); err != nil {
 			return invalidf("", "%v", err)

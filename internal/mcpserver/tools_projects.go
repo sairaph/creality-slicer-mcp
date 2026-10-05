@@ -147,6 +147,15 @@ func (s *Server) openProject(ctx context.Context, _ *mcp.CallToolRequest, in ope
 		fmt.Fprintf(&b, "Opened `%s` as a copy in this server's store; the source file is untouched.\n\n", in.Path)
 	}
 	b.WriteString(projectBody(info, nil))
+	if res.SpoolsFrom != "" {
+		var slots []string
+		for _, f := range info.Filaments {
+			if f.Spool != nil && f.Spool.Slot != "" {
+				slots = append(slots, fmt.Sprintf("filament %d -> %s", f.Index, f.Spool.Slot))
+			}
+		}
+		fmt.Fprintf(&b, "\n\nCFS slots restored from %s: %s. The slice handoff gives start_print its slot_map.", res.SpoolsFrom, strings.Join(slots, ", "))
+	}
 	if len(info.Painted) > 0 {
 		fmt.Fprintf(&b, "\n\nPainted data in %s is kept as it is; these tools never edit painted regions (see get_guide topic gui-handoff).", strings.Join(info.Painted, ", "))
 	}

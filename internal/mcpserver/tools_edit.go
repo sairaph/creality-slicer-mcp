@@ -571,11 +571,14 @@ func (s *Server) setLayerActions(ctx context.Context, _ *mcp.CallToolRequest, in
 			act.Filament = *a.Filament
 		}
 		switch a.Type {
-		case projects.ActionPause, projects.ActionColorChange, projects.ActionCustom:
+		case projects.ActionPause, projects.ActionColorChange, projects.ActionToolChange, projects.ActionCustom:
 		default:
-			return invalidInput(fmt.Sprintf("Action %d: unknown type %q", i+1, a.Type), "Use type pause, color_change or custom."), nil, nil
+			return invalidInput(fmt.Sprintf("Action %d: unknown type %q", i+1, a.Type), "Use type pause, color_change, tool_change or custom."), nil, nil
 		}
-		if a.Type == projects.ActionColorChange {
+		if a.Type == projects.ActionToolChange && a.Filament == nil {
+			return invalidInput(fmt.Sprintf("Action %d: a tool_change needs filament", i+1), "Give filament, the slot to change to (1 to the number of filaments)."), nil, nil
+		}
+		if a.Type == projects.ActionColorChange || a.Type == projects.ActionToolChange {
 			// The new colour is the colour of the filament the print changes to.
 			if info == nil {
 				var err error
@@ -584,8 +587,8 @@ func (s *Server) setLayerActions(ctx context.Context, _ *mcp.CallToolRequest, in
 				}
 			}
 			slot := max(act.Filament, 1)
-			if slot > len(info.Filaments) {
-				return invalidInput(fmt.Sprintf("Action %d: filament %d does not exist", i+1, slot), fmt.Sprintf("Use a filament from 1 to %d.", len(info.Filaments))), nil, nil
+			if slot > len(info.Filaments) || (a.Type == projects.ActionToolChange && act.Filament < 1) {
+				return invalidInput(fmt.Sprintf("Action %d: filament %d does not exist", i+1, act.Filament), fmt.Sprintf("Use a filament from 1 to %d.", len(info.Filaments))), nil, nil
 			}
 			act.Filament, act.Colour = slot, info.Filaments[slot-1].Colour
 		}
@@ -608,7 +611,7 @@ func (s *Server) setLayerActions(ctx context.Context, _ *mcp.CallToolRequest, in
 		for _, a := range p.Actions {
 			extra := ""
 			switch a.Kind {
-			case projects.ActionColorChange:
+			case projects.ActionColorChange, projects.ActionToolChange:
 				extra = fmt.Sprintf(" to filament %d (%s)", a.Filament, a.Colour)
 			case projects.ActionCustom:
 				extra = " with your G-code"
@@ -620,6 +623,35 @@ func (s *Server) setLayerActions(ctx context.Context, _ *mcp.CallToolRequest, in
 	if b.Len() == 0 {
 		b.WriteString("Layer actions updated.")
 	}
+	// A colour change the printer cannot do with G-code comes back stored as a
+	// tool change: more tool changes than the request asked for.
+	asked, stored := 0, 0
+	for _, a := range in.Actions {
+		if a.Type == projects.ActionToolChange {
+			asked++
+		}
+	}
+	for _, p := range res.Plates {
+		if p.Index == plate {
+			for _, a := range p.Actions {
+				if a.Kind == projects.ActionToolChange {
+					stored++
+				}
+			}
+		}
+	}
+	if stored > asked {
+		b.WriteString("\nOn this printer a colour change is a CFS filament change: it is stored as tool_change and the printer switches spools by itself.")
+	}
+	// Nothing is refused for these: the warnings say what would not work.
+	var ws []string
+	for _, w := range res.Warnings {
+		switch w.Code {
+		case "layer_tool_change_ignored", "action_above_model", "color_change_no_gcode":
+			ws = append(ws, w.Message)
+		}
+	}
+	b.WriteString(warningLines(ws))
 	return successResult(layerActionsFront{baseFront: base(res), Plate: plate, Actions: len(actions)}, nextLine(strings.TrimRight(b.String(), "\n"), "get_project to check the plate, or slice_project.")), nil, nil
 }
 

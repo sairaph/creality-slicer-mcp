@@ -349,7 +349,7 @@ func TestLayerActions(t *testing.T) {
 		t.Fatalf("actions: %+v", acts)
 	}
 	// layer 10 = 0.2 + 9 * 0.2 = 2.0
-	if math.Abs(acts[0].Z-2.0) > 1e-9 || acts[0].Layer != 10 || acts[0].Kind != ActionColorChange || acts[0].Colour != "#FF0000" {
+	if math.Abs(acts[0].Z-2.0) > 1e-9 || acts[0].Layer != 10 || acts[0].Kind != ActionToolChange || acts[0].Filament != 1 || acts[0].Colour != "#FFFFFF" {
 		t.Fatalf("first action: %+v", acts[0])
 	}
 	if acts[1].Kind != ActionPause || math.Abs(acts[1].Z-3.2) > 1e-9 || acts[1].Layer != 16 {
@@ -364,7 +364,6 @@ func TestLayerActions(t *testing.T) {
 		{{Layer: 5, Kind: "dance"}},
 		{{Kind: ActionPause}},
 		{{Layer: 5, Z: 1, Kind: ActionPause}},
-		{{Layer: 5, Kind: ActionColorChange, Colour: "red"}},
 		{{Layer: 5, Kind: ActionToolChange, Filament: 7}},
 		{{Layer: 5, Kind: ActionCustom}},
 	} {

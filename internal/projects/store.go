@@ -142,6 +142,10 @@ type meta struct {
 	// sha256), so a file the user changed by saving into it is never overwritten
 	// or deleted.
 	Views []ViewRecord `json:"views,omitempty"`
+	// Exports lists the files export_project wrote (cleaned absolute paths), so
+	// open_project of such a file, re-saved by the app without our member, still
+	// finds the spool links of this project.
+	Exports []string `json:"exports,omitempty"`
 }
 
 func (s *Store) dir(id string) string { return filepath.Join(s.cfg.Root, id) }
@@ -575,7 +579,13 @@ func (s *Store) Export(ref, path string, overwrite bool) (*ExportResult, error) 
 		return nil, invalidf("use a .3mf file name", "%q does not end in .3mf", path)
 	}
 	var res *ExportResult
-	err := s.read(ref, func(h *handle) error {
+	// The write lock: the export is recorded in job.json (no new revision).
+	h, err := s.open(ref, true)
+	if err != nil {
+		return nil, err
+	}
+	defer h.close()
+	err = func() error {
 		if info, err := os.Stat(path); err == nil {
 			if info.IsDir() {
 				return invalidf("give a file path", "%q is a folder", path)
@@ -588,6 +598,11 @@ func (s *Store) Export(ref, path string, overwrite bool) (*ExportResult, error) 
 		if err != nil {
 			return errf(CodeInternal, "", "%v", err)
 		}
+		// The copy carries the spool links (and never a stale member of an earlier
+		// export); the store's own file stays as it is.
+		if data, err = withSpoolMember(data, h.meta.Spools); err != nil {
+			return errf(CodeInternal, "", "preparing the export failed: %v", err)
+		}
 		created := false
 		if _, err := os.Stat(filepath.Dir(path)); os.IsNotExist(err) {
 			created = true
@@ -596,8 +611,12 @@ func (s *Store) Export(ref, path string, overwrite bool) (*ExportResult, error) 
 			return errf(CodeInvalidInput, "check that the folder is writable", "could not write %q: %v", path, err)
 		}
 		res = &ExportResult{ProjectID: h.id, File: path, Bytes: int64(len(data)), CreatedFolder: created}
+		h.meta.addExport(path)
+		if err := s.writeMeta(h.id, h.meta); err != nil {
+			return errf(CodeInternal, "", "saving the project metadata failed: %v", err)
+		}
 		return nil
-	})
+	}()
 	return res, err
 }
 

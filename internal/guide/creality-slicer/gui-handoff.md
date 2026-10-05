@@ -37,7 +37,7 @@ The reply names the file, the process id and the app version. If the user saved 
 ```
 
 2. Tell the user exactly what to do in the app: open the file, do the painting or check, and save with Ctrl+S (keep the same file name and place).
-3. When they say it is done, call open_project on that file:
+3. When they say it is done, call open_project on that file (spool slots of a project made from spools come back on their own):
 
 ```json
 {"path": "C:/work/bracket-for-app.3mf", "name": "bracket v2"}

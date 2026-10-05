@@ -157,7 +157,7 @@ var k2Tools = []string{
 	// Fields of the slice result the guide names.
 	"gcode_path", "upload_name", "exclude_names", "time_s", "time_text", "total_g", "slicer_error",
 	// Values of enum parameters and an example object label.
-	"layer_range", "negative_part", "support_enforcer", "support_blocker", "color_change",
+	"layer_range", "negative_part", "support_enforcer", "support_blocker", "color_change", "tool_change",
 	"logo_plate1", "part_id_0_copy_0", "catalog_id", "spool_slot", "tree_slim", "tree_strong", "tree_hybrid", "aligned_back", "stl_id_0_copy_0", "multi_material",
 }
 

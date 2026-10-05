@@ -51,7 +51,7 @@ One line per term, grouped; every line starts with the term in bold. Facts are f
 - **Negative part** - a shape subtracted from the object when slicing.
 - **Support enforcer** - a region that forces supports; a blocker forbids them.
 - **Height range** - a Z band of an object with its own settings, such as another layer height.
-- **Layer action** - pause, colour change or custom G-code at a height.
+- **Layer action** - pause, colour or tool change to a filament slot, or custom G-code at a height.
 - **Lay flat** - rotate an object so its largest flat face sits on the bed.
 - **Print sequence** - by layer (objects together) or by object (one after another).
 - **Bed type** - the plate surface: Cool Plate, Textured PEI Plate and others.

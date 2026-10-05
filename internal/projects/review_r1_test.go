@@ -347,9 +347,19 @@ func TestLayerActionWarningsAndCustomText(t *testing.T) {
 	res, err := e.st.SetLayerActions(info.ID, 1, []LayerAction{
 		{Layer: 3, Kind: ActionCustom, GCode: "M117 hello"},
 		{Layer: 200, Kind: ActionPause},
-		{Layer: 4, Kind: ActionColorChange, Colour: "#FF0000"},
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	// A colour change (type 0) from an opened file: the printer has no G-code for it.
+	if err := e.st.write(info.ID, func(h *handle) error {
+		items := append(h.p.CustomGCodes(1).Items, threemf.GCodeItem{TopZ: 0.8, Type: threemf.GCodeColorChange, Extruder: 2, Color: "#FF0000"})
+		h.touchPlate(1)
+		return h.p.SetCustomGCodes(1, h.p.CustomGCodes(1).Mode, items)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if res, err = e.st.GetProject(info.ID); err != nil {
 		t.Fatal(err)
 	}
 	gc := openSaved(t, e, info.ID).CustomGCodes(1)
@@ -794,11 +804,16 @@ func TestSliceReportsLayerActionsFound(t *testing.T) {
 	if len(acts) != 4 {
 		t.Fatalf("actions %+v", acts)
 	}
-	found := map[string]bool{}
+	// The colour change at layer 9 is stored as a tool change to filament 1 (the
+	// printer has no colour change G-code) and the G-code has no T0 after it.
+	found := map[int]bool{}
 	for _, a := range acts {
-		found[a.Kind] = a.Found
+		found[a.Layer] = a.Found
+		if a.Kind == ActionColorChange {
+			t.Fatalf("a colour change was stored as such: %+v", a)
+		}
 	}
-	if !found[ActionPause] || !found[ActionCustom] || !found[ActionToolChange] || found[ActionColorChange] {
+	if !found[3] || !found[5] || !found[7] || found[9] {
 		t.Fatalf("found %+v", acts)
 	}
 	for _, a := range acts {

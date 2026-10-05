@@ -247,10 +247,10 @@ The front matter has `object` and `ranges` (the count). The body notes each rang
 
 ### `set_layer_actions`
 
-Replace the actions of a plate: a pause, a colour change or custom G-code at a height.
+Replace the actions of a plate: a pause, a colour change or tool change to a filament slot, or custom G-code at a height.
 
 - `project` (string, required), `plate` (integer, optional, default 1).
-- `actions` (list, required): each `{z or layer, type, filament, gcode}` with `type` `pause` | `color_change` | `custom`. A layer number (from 1) is converted to a height with the project's layer heights. `filament` is the slot to change to; `gcode` is for `custom`. The list replaces the current one.
+- `actions` (list, required): each `{z or layer, type, filament, gcode}` with `type` `pause` | `color_change` | `tool_change` | `custom`. A layer number (from 1) is converted to a height with the project's layer heights. `filament` is the slot to change to (required for `tool_change`, 1 to the number of filaments); `gcode` is for `custom`. A printer without colour change G-code (the K2 with the CFS) cannot write M600, so a `color_change` there is stored as a `tool_change` to that filament (with the filament's colour, the plate set to the multi extruder mode) and the reply says so; with fewer than two filaments it is refused. Where the printer preset has colour change G-code, `color_change` stays a colour change. Creality Print applies layer filament changes only when every object on the plate prints with one filament (ToolOrdering: one object extruder in total); on a plate whose objects use more, nothing is refused but the reply and `get_project` carry the warning `layer_tool_change_ignored`: put the objects that change filament on their own plate, or give them all the same filament. The list replaces the current one.
 
 The front matter has `plate` and `actions` (the count).
 
@@ -281,7 +281,7 @@ Write the project as a Creality Print 3MF, for painting or checks in the app.
 - `project`, `path` (string, required): an absolute `.3mf` path; missing folders are created.
 - `overwrite` (boolean, optional, default false).
 
-The front matter has `file` and `bytes`. The file is not linked to the store: after saving changes in the app, call `open_project` on it.
+The front matter has `file` and `bytes`. The file is not linked to the store: after saving changes in the app, call `open_project` on it. When the project was made from CFS spools, the copy carries the spool links in an extra member (`Metadata/creality_slicer_mcp.json`; an older one is always dropped), and the project remembers the exported path in its metadata (no new revision). Opening that file again restores the slots from the member, or, when the app dropped the member by saving, from the project that exported the path; only the links from the first filament on whose preset is unchanged are kept. The reply says where they came from (`CFS slots restored from ...`), and the slice handoff then has its `slot_map`.
 
 ### `delete_project`
 

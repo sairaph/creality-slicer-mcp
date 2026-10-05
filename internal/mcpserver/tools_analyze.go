@@ -164,24 +164,50 @@ func (s *Server) analyzeToolpaths(ctx context.Context, _ *mcp.CallToolRequest, i
 		head.WriteString("\nThis plate is printed by object: a layer number is the layer within its object (each object counts from 1), and the layer below is the object's own.")
 	}
 	if len(an.Objects) == 0 {
-		head.WriteString("\nNo object matched. Names are the ones get_project shows; the objects in the G-code are " + strings.Join(an.AllLabels, ", ") + ".")
+		head.WriteString("\nNo object matched. Names are the ones get_project shows; the objects in the G-code are " + strings.Join(objectNames(an.AllLabels), ", ") + ".")
 	}
-	rows := analysisRows(an, opt, detail == "per_layer")
+	var empty []string
+	var shown []section
+	total := 0
+	for _, sc := range analysisSections(an, opt, detail == "per_layer") {
+		if len(sc.rows) == 0 {
+			empty = append(empty, sc.measure)
+			continue
+		}
+		total += len(sc.rows)
+		shown = append(shown, sc)
+	}
 	page := 1
 	if in.Page != nil {
 		page = *in.Page
 	}
-	window, meta, next, err := paginatePage(rows, page, func(w []string) (string, error) { return strings.Join(w, "\n"), nil })
-	if err != nil {
-		return failure(ctx, "page the analysis", err, ""), nil, nil
+	if page < 1 {
+		page = 1
 	}
-	if len(window) == 0 && len(rows) > 0 {
-		return invalidInput(fmt.Sprintf("Page %d is past the end: %d page(s)", meta.Page, meta.TotalPages), "Ask for a smaller page number."), nil, nil
+	text, pages := pageOfSections(shown, page)
+	if len(shown) > 0 && page > pages {
+		return invalidInput(fmt.Sprintf("Page %d is past the end: %d page(s)", page, pages), "Ask for a smaller page number."), nil, nil
 	}
-	front.pageFront = pageFront{Page: meta.Page, Total: meta.Total, TotalPages: meta.TotalPages}
-	body := head.String() + "\n\n" + strings.Join(window, "\n")
-	body += "\n" + strings.TrimSpace(next)
-	body += "\nNext: narrow with objects, layers, z, features or one measure; detail per_layer lists every layer."
+	front.pageFront = pageFront{Page: page, Total: total, TotalPages: pages}
+	body := head.String() + "\n\n" + text
+	// a measure whose sections are all empty has no findings
+	var noFind []string
+	for _, m := range dedupeStr(empty) {
+		had := false
+		for _, sc := range shown {
+			had = had || sc.measure == m
+		}
+		if !had {
+			noFind = append(noFind, m)
+		}
+	}
+	if len(noFind) > 0 {
+		body += "no findings: " + strings.Join(noFind, ", ") + "\n"
+	}
+	if pages > page {
+		body += fmt.Sprintf("Next: page=%d of %d.\n", page+1, pages)
+	}
+	body += "Next: narrow with objects, layers, z, features or one measure; detail per_layer lists every layer."
 	return successResult(front, strings.TrimRight(body, "\n")), nil, nil
 }
 
@@ -214,76 +240,85 @@ func ints(l []int) string {
 	return strings.Join(parts, ", ")
 }
 
-// analysisRows renders the measures as lines (headings, table rows, blanks) so
-// that the paging can cut between any two of them.
-func analysisRows(an *gcodeinfo.Analysis, opt gcodeinfo.AnalyzeOptions, perLayer bool) []string {
-	var rows []string
-	add := func(format string, a ...any) { rows = append(rows, fmt.Sprintf(format, a...)) }
+func dedupeStr(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, v := range in {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// objectNames turns G-code labels (name_id_N_copy_K) into the names get_project
+// shows, each once.
+func objectNames(labels []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, l := range labels {
+		n := l
+		if i := strings.LastIndex(l, "_id_"); i >= 0 {
+			n = l[:i]
+		}
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// section is one table of the answer: a measure, its heading and its data rows.
+type section struct {
+	measure string
+	heading string
+	rows    []string
+	foot    string // printed under the last page of the section
+}
+
+// analysisSections renders the measures as tables, findings first.
+func analysisSections(an *gcodeinfo.Analysis, opt gcodeinfo.AnalyzeOptions, perLayer bool) []section {
 	on := map[string]bool{}
 	for _, m := range opt.Measures {
 		on[m] = true
 	}
-	if on[gcodeinfo.MeasureFirstLayers] {
-		add("## first_layers (object | feature | first layer | last layer)")
-		for _, r := range an.FirstLayers {
-			for _, f := range r.Features {
-				add("%s | %s | %d | %d", pipeSafe(r.Object), pipeSafe(f.Feature), f.First, f.Last)
-			}
-		}
-		add("")
-		add("Layers with no extrusion inside an object's range (object | range | gap layers):")
-		for _, r := range an.FirstLayers {
-			add("%s | %d-%d | %s", pipeSafe(r.Object), r.FirstLayer, r.LastLayer, ints(r.Gaps))
-		}
-		add("")
+	var out []section
+	add := func(measure, heading string, rows []string, foot string) {
+		out = append(out, section{measure: measure, heading: heading, rows: rows, foot: foot})
 	}
-	if on[gcodeinfo.MeasureBounds] {
-		add("## bounds in mm (object | feature | layer | z | x min | x max | y min | y max | span x | span y)")
-		for _, r := range an.Bounds {
-			if r.Layer == 0 || perLayer {
-				layer, z := "all", "-"
-				if r.Layer > 0 {
-					layer, z = fmt.Sprint(r.Layer), f2(r.Z)
-				}
-				add("%s | %s | %s | %s | %s | %s | %s | %s | %s | %s", pipeSafe(r.Object), pipeSafe(r.Feature), layer, z, f2(r.MinX), f2(r.MaxX), f2(r.MinY), f2(r.MaxY), f2(r.MaxX-r.MinX), f2(r.MaxY-r.MinY))
-			}
+	layerCell := func(l int) string {
+		if l > 0 {
+			return fmt.Sprint(l)
 		}
-		add("")
+		return "all"
 	}
-	if on[gcodeinfo.MeasureFlow] {
-		add("## flow (object | feature | layer | segments | length mm | E mm | E per mm | ratio median | p01 | p99 | max); ratio 1 is the flow the width and height ask for")
-		for _, r := range an.Flow {
-			layer := "all"
-			if r.Layer > 0 {
-				layer = fmt.Sprint(r.Layer)
-			}
-			add("%s | %s | %s | %d | %.1f | %.2f | %s | %s | %s | %s | %s", pipeSafe(r.Object), pipeSafe(r.Feature), layer, r.Segments, r.LengthMM, r.EMM, f3(r.EPerMM), f3(r.Median), f3(r.P01), f3(r.P99), f3(r.Max))
+	if on[gcodeinfo.MeasureUnsupportedStart] {
+		var rows []string
+		for _, r := range an.UnsupportedStarts {
+			rows = append(rows, fmt.Sprintf("%s | %d | %s | %s | %s | %s | %s | %s | %.1f | %.0f", pipeSafe(r.Object), r.Layer, f2(r.Z), pipeSafe(strings.Join(r.Features, ", ")), f2(r.MinX), f2(r.MaxX), f2(r.MinY), f2(r.MaxY), r.AreaMM2, r.SupportedPercent))
 		}
-		add("")
+		add(gcodeinfo.MeasureUnsupportedStart, "unsupported_starts: extrusion that starts where the layer below has under 10% extrusion, bridges excluded (object | layer | z | feature | x min | x max | y min | y max | area mm2 | supported %)", rows, "")
 	}
-	if on[gcodeinfo.MeasureRadius] {
-		c := opt.Center
-		add("## radius from (%s, %s) in mm (object | feature | layer | min | max)", f2(c[0]), f2(c[1]))
-		for _, r := range an.Radius {
-			if r.Layer == 0 || perLayer {
-				layer := "all"
-				if r.Layer > 0 {
-					layer = fmt.Sprint(r.Layer)
-				}
-				add("%s | %s | %s | %s | %s", pipeSafe(r.Object), pipeSafe(r.Feature), layer, f2(r.Min), f2(r.Max))
-			}
+	if on[gcodeinfo.MeasureSupportContacts] {
+		var rows []string
+		for _, r := range an.SupportContacts {
+			rows = append(rows, fmt.Sprintf("%s | %s | %d | %s | %s | %s | %s | %s | %.1f | %s", pipeSafe(r.Object), pipeSafe(r.Feature), r.Layer, f2(r.Z), f2(r.MinX), f2(r.MaxX), f2(r.MinY), f2(r.MaxY), r.AreaMM2, pipeSafe(orDash(strings.Join(r.Above, ", ")))))
 		}
-		add("")
+		add(gcodeinfo.MeasureSupportContacts, "support_contacts (object | feature | layer | z | x min | x max | y min | y max | area mm2 | printed on it by the next layer)", rows, "")
 	}
 	if on[gcodeinfo.MeasureShortRuns] {
 		minRun := opt.MinRun
 		if minRun <= 0 {
 			minRun = 1
 		}
-		add("## short_runs: runs shorter than %s mm (object | layer | z | runs | short | end positions x,y)", num(minRun))
+		var rows []string
+		short := 0
 		for _, r := range an.ShortRuns {
 			if r.Layer == 0 {
-				add("%s | all | - | %d | %d | -", pipeSafe(r.Object), r.Runs, r.Short)
+				short += r.Short
+				rows = append(rows, fmt.Sprintf("%s | all | - | %d | %d | -", pipeSafe(r.Object), r.Runs, r.Short))
 			} else if perLayer {
 				var ends []string
 				for _, e := range r.Ends {
@@ -293,40 +328,122 @@ func analysisRows(an *gcodeinfo.Analysis, opt gcodeinfo.AnalyzeOptions, perLayer
 				if r.Short > len(r.Ends) {
 					more = fmt.Sprintf(" and %d more", r.Short-len(r.Ends))
 				}
-				add("%s | %d | %s | %d | %d | %s%s", pipeSafe(r.Object), r.Layer, f2(r.Z), r.Runs, r.Short, strings.Join(ends, "; "), more)
+				rows = append(rows, fmt.Sprintf("%s | %d | %s | %d | %d | %s%s", pipeSafe(r.Object), r.Layer, f2(r.Z), r.Runs, r.Short, strings.Join(ends, "; "), more))
 			}
 		}
+		foot := ""
 		if !perLayer {
-			add("(detail per_layer lists the layers and the end positions)")
+			foot = "(detail per_layer lists the layers and the end positions)"
 		}
-		add("")
+		if short == 0 {
+			rows = nil // every object has a total row; only a short run is a finding
+		}
+		add(gcodeinfo.MeasureShortRuns, fmt.Sprintf("short_runs: runs shorter than %s mm (object | layer | z | runs | short | end positions x,y)", num(minRun)), rows, foot)
 	}
-	if on[gcodeinfo.MeasureUnsupportedStart] {
-		add("## unsupported_starts: extrusion that starts where the layer below has under 10%% extrusion, bridges excluded (object | layer | z | feature | x min | x max | y min | y max | area mm2 | supported %%)")
-		for _, r := range an.UnsupportedStarts {
-			add("%s | %d | %s | %s | %s | %s | %s | %s | %.1f | %.0f", pipeSafe(r.Object), r.Layer, f2(r.Z), pipeSafe(strings.Join(r.Features, ", ")), f2(r.MinX), f2(r.MaxX), f2(r.MinY), f2(r.MaxY), r.AreaMM2, r.SupportedPercent)
+	if on[gcodeinfo.MeasureFirstLayers] {
+		var rows, gaps []string
+		for _, r := range an.FirstLayers {
+			for _, f := range r.Features {
+				rows = append(rows, fmt.Sprintf("%s | %s | %d | %d", pipeSafe(r.Object), pipeSafe(f.Feature), f.First, f.Last))
+			}
+			gaps = append(gaps, fmt.Sprintf("%s | %d-%d | %s", pipeSafe(r.Object), r.FirstLayer, r.LastLayer, ints(r.Gaps)))
 		}
-		if len(an.UnsupportedStarts) == 0 {
-			add("none")
-		}
-		add("")
+		add(gcodeinfo.MeasureFirstLayers, "first_layers (object | feature | first layer | last layer)", rows, "")
+		add(gcodeinfo.MeasureFirstLayers, "first_layers, layers with no extrusion inside an object's range (object | range | gap layers)", gaps, "")
 	}
-	if on[gcodeinfo.MeasureSupportContacts] {
-		add("## support_contacts (object | feature | layer | z | x min | x max | y min | y max | area mm2 | printed on it by the next layer)")
-		for _, r := range an.SupportContacts {
-			add("%s | %s | %d | %s | %s | %s | %s | %s | %.1f | %s", pipeSafe(r.Object), pipeSafe(r.Feature), r.Layer, f2(r.Z), f2(r.MinX), f2(r.MaxX), f2(r.MinY), f2(r.MaxY), r.AreaMM2, pipeSafe(orDash(strings.Join(r.Above, ", "))))
+	if on[gcodeinfo.MeasureBounds] {
+		var rows []string
+		for _, r := range an.Bounds {
+			if r.Layer == 0 || perLayer {
+				z := "-"
+				if r.Layer > 0 {
+					z = f2(r.Z)
+				}
+				rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s | %s | %s | %s | %s | %s", pipeSafe(r.Object), pipeSafe(r.Feature), layerCell(r.Layer), z, f2(r.MinX), f2(r.MaxX), f2(r.MinY), f2(r.MaxY), f2(r.MaxX-r.MinX), f2(r.MaxY-r.MinY)))
+			}
 		}
-		if len(an.SupportContacts) == 0 {
-			add("none")
+		add(gcodeinfo.MeasureBounds, "bounds in mm (object | feature | layer | z | x min | x max | y min | y max | span x | span y)", rows, "")
+	}
+	if on[gcodeinfo.MeasureFlow] {
+		var rows []string
+		for _, r := range an.Flow {
+			rows = append(rows, fmt.Sprintf("%s | %s | %s | %d | %.1f | %.2f | %s | %s | %s | %s | %s", pipeSafe(r.Object), pipeSafe(r.Feature), layerCell(r.Layer), r.Segments, r.LengthMM, r.EMM, f3(r.EPerMM), f3(r.Median), f3(r.P01), f3(r.P99), f3(r.Max)))
 		}
-		add("")
+		add(gcodeinfo.MeasureFlow, "flow (object | feature | layer | segments | length mm | E mm | E per mm | ratio median | p01 | p99 | max); ratio 1 is the flow the width and height ask for", rows, "")
+	}
+	if on[gcodeinfo.MeasureRadius] {
+		c := opt.Center
+		var rows []string
+		for _, r := range an.Radius {
+			if r.Layer == 0 || perLayer {
+				rows = append(rows, fmt.Sprintf("%s | %s | %s | %s | %s", pipeSafe(r.Object), pipeSafe(r.Feature), layerCell(r.Layer), f2(r.Min), f2(r.Max)))
+			}
+		}
+		add(gcodeinfo.MeasureRadius, fmt.Sprintf("radius from (%s, %s) in mm (object | feature | layer | min | max)", f2(c[0]), f2(c[1])), rows, "")
 	}
 	if on[gcodeinfo.MeasureWallOrder] {
-		add("## wall_order (object | layers outer wall first | layers inner wall first | those layers)")
+		var rows []string
 		for _, r := range an.WallOrder {
-			add("%s | %d | %d | %s", pipeSafe(r.Object), r.OuterFirst, r.InnerFirst, ints(r.InnerFirstLayers))
+			rows = append(rows, fmt.Sprintf("%s | %d | %d | %s", pipeSafe(r.Object), r.OuterFirst, r.InnerFirst, ints(r.InnerFirstLayers)))
 		}
-		add("")
+		add(gcodeinfo.MeasureWallOrder, "wall_order (object | layers outer wall first | layers inner wall first | those layers)", rows, "")
 	}
-	return rows
+	return out
+}
+
+// pageBudget is the size of a page in characters, shared by the measures that
+// still have rows.
+const pageBudget = 9000
+
+// sectionTake is how many rows of s, from index from, fit in a share.
+func sectionTake(s section, from, share int) int {
+	used := len(s.heading) + 40
+	to := from
+	for to < len(s.rows) && (to == from || used+len(s.rows[to])+1 <= share) {
+		used += len(s.rows[to]) + 1
+		to++
+	}
+	return to
+}
+
+// pageOfSections cuts page n (from 1) out of the sections. Every page gives each
+// section that still has rows an equal share of the budget (at least one row), so
+// no measure waits behind another. It returns the text of the page n and the
+// number of pages.
+func pageOfSections(secs []section, n int) (string, int) {
+	cursor := make([]int, len(secs))
+	var text string
+	pages := 0
+	for p := 1; ; p++ {
+		active := 0
+		for i, s := range secs {
+			if cursor[i] < len(s.rows) {
+				active++
+			}
+		}
+		if active == 0 {
+			return text, pages
+		}
+		pages = p
+		share := pageBudget / active
+		var b strings.Builder
+		for i, s := range secs {
+			if cursor[i] >= len(s.rows) {
+				continue
+			}
+			from := cursor[i]
+			to := sectionTake(s, from, share)
+			cursor[i] = to
+			if p == n {
+				fmt.Fprintf(&b, "## %s\nrows %d-%d of %d\n%s\n", s.heading, from+1, to, len(s.rows), strings.Join(s.rows[from:to], "\n"))
+				if to == len(s.rows) && s.foot != "" {
+					b.WriteString(s.foot + "\n")
+				}
+				b.WriteString("\n")
+			}
+		}
+		if p == n {
+			text = b.String()
+		}
+	}
 }

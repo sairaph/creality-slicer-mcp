@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -250,5 +251,131 @@ func TestAnalyzeToolpathsNoObjectMatchedListsTheLabels(t *testing.T) {
 	id := namedModel(t, pf, "", "Cube", 1)
 	pf.ok(t, "slice_project", map[string]any{"project": id, "preview": "none", "background": false})
 	out := pf.ok(t, "analyze_toolpaths", map[string]any{"project": id, "objects": []string{"nothing"}})
-	contains(t, "no match", out, "No object matched", "Cube_id_0_copy_0")
+	contains(t, "no match", out, "No object matched", "in the G-code are Cube.")
+	if strings.Contains(out, "_id_0_copy_0") {
+		t.Errorf("the hint shows the G-code label: %s", out)
+	}
+}
+
+// Every page shows every measure that still has rows, findings first, and says
+// which rows it holds.
+func TestPageOfSectionsSharesTheBudget(t *testing.T) {
+	long := func(prefix string, n int) []string {
+		var rows []string
+		for i := 0; i < n; i++ {
+			rows = append(rows, fmt.Sprintf("%s row %d %s", prefix, i, strings.Repeat("x", 80)))
+		}
+		return rows
+	}
+	secs := []section{
+		{measure: "unsupported_starts", heading: "unsupported_starts", rows: long("find", 120)},
+		{measure: "first_layers", heading: "first_layers", rows: long("first", 400)},
+		{measure: "bounds", heading: "bounds", rows: long("bounds", 60)},
+	}
+	text, pages := pageOfSections(secs, 1)
+	if pages < 2 {
+		t.Fatalf("pages %d", pages)
+	}
+	for _, want := range []string{"## unsupported_starts", "## first_layers", "## bounds", "find row 0", "first row 0", "bounds row 0", "rows 1-", "of 120", "of 400", "of 60"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("page 1 lacks %q", want)
+		}
+	}
+	if strings.Index(text, "## unsupported_starts") > strings.Index(text, "## first_layers") {
+		t.Error("findings are not first")
+	}
+	// the last page still has the long measure and has no heading of a finished one
+	last, n := pageOfSections(secs, pages)
+	if n != pages || !strings.Contains(last, "## first_layers") || strings.Contains(last, "## bounds") {
+		t.Errorf("last page:\n%.300s", last)
+	}
+	// every row is shown exactly once over the pages
+	seen := 0
+	for p := 1; p <= pages; p++ {
+		tx, _ := pageOfSections(secs, p)
+		seen += strings.Count(tx, " row ")
+	}
+	if seen != 580 {
+		t.Errorf("%d rows over %d pages, want 580", seen, pages)
+	}
+}
+
+// v0.3.1: a change that introduces a warning says so in its own reply, once.
+func TestChangeRepliesListTheWarningsTheyIntroduce(t *testing.T) {
+	pf := newProjFixture(t)
+	id := namedModel(t, pf, "", "A", 1)
+	pf.ok(t, "set_layer_actions", map[string]any{"project": id, "actions": []map[string]any{{"layer": 2, "type": "tool_change", "filament": 2}}})
+	// A second object on filament 2 makes the tool change ignored: add_model says so.
+	out := pf.ok(t, "add_model", map[string]any{"project": id, "path": pf.stl, "name": "B", "filament": 2, "include_screenshot": false})
+	contains(t, "add_model", out, "Warnings:", "have no effect")
+	// The next change does not introduce it again.
+	again := pf.ok(t, "add_model", map[string]any{"project": id, "path": pf.stl, "name": "C", "filament": 2, "include_screenshot": false})
+	if strings.Contains(again, "have no effect") {
+		t.Errorf("the old warning is repeated:\n%s", again)
+	}
+	// Removing the cause and changing a setting does not list it either; update_object
+	// moving B back to filament 1 clears it, and putting it back introduces it again.
+	pf.ok(t, "update_object", map[string]any{"project": id, "object": "B", "filament": 1, "include_screenshot": false})
+	pf.ok(t, "update_object", map[string]any{"project": id, "object": "C", "filament": 1, "include_screenshot": false})
+	back := pf.ok(t, "update_object", map[string]any{"project": id, "object": "C", "filament": 2, "include_screenshot": false})
+	contains(t, "update_object", back, "have no effect")
+}
+
+func TestSliceReplySaysIgnoredToolChanges(t *testing.T) {
+	pf := newProjFixture(t)
+	id := namedModel(t, pf, "", "A", 1)
+	namedModel(t, pf, id, "B", 2)
+	pf.ok(t, "set_layer_actions", map[string]any{"project": id, "actions": []map[string]any{{"layer": 2, "type": "tool_change", "filament": 2}}})
+	res := call(t, pf.cs, "slice_project", map[string]any{"project": id, "preview": "none", "background": false})
+	out := text(t, res)
+	if res.IsError {
+		t.Fatalf("slice failed:\n%s", out)
+	}
+	contains(t, "slice_project", out, "ignored by Creality Print: the plate's objects use several filaments", "have no effect")
+	if strings.Contains(out, "found in the G-code") && strings.Contains(out, "tool change at layer 2") && !strings.Contains(out, "ignored by Creality Print") {
+		t.Errorf("found: %s", out)
+	}
+	rep := pf.ok(t, "get_slice_report", map[string]any{"project": id})
+	contains(t, "report", rep, "is ignored by Creality Print: the plate's objects use several filaments")
+}
+
+func TestPlainVectorAndTargetLines(t *testing.T) {
+	for in, want := range map[string]string{"[60]": "60", "[60,60]": "60", "[60, 40]": "[60, 40]", "60": "60", "[]": "[]", "[a]": "a"} {
+		if got := plainVector(in); got != want {
+			t.Errorf("plainVector(%q) = %q, want %q", in, got, want)
+		}
+	}
+	pf := newProjFixture(t)
+	id := namedModel(t, pf, "", "One", 1)
+	namedModel(t, pf, id, "Two", 1)
+	out := pf.ok(t, "update_settings", map[string]any{"project": id, "scope": "object", "targets": []string{"One", "Two"}, "values": map[string]any{"wall_loops": 6}})
+	fm := frontOf(t, out)
+	changed, _ := fm["changed"].([]any)
+	if len(changed) != 2 || !strings.HasPrefix(changed[0].(string), "One: wall_loops") || !strings.HasPrefix(changed[1].(string), "Two: wall_loops") {
+		t.Errorf("front changed %v", fm["changed"])
+	}
+}
+
+func TestLayerReportShowsFilamentPerTool(t *testing.T) {
+	pf := newProjFixture(t)
+	pf.exec.gcode = analyzeG
+	id := namedModel(t, pf, "", "Cube", 1)
+	pf.ok(t, "slice_project", map[string]any{"project": id, "preview": "none", "background": false})
+	out := pf.ok(t, "get_slice_report", map[string]any{"project": id, "section": "layer", "layer": 1, "preview": "none"})
+	contains(t, "layer", out, "Filament in this layer, path extrusion only; flush and purge are not in it (tool | mm of filament | grams):", "T0 | 0.8")
+}
+
+func TestAnalyzeNoFindingsLine(t *testing.T) {
+	pf := newProjFixture(t)
+	pf.exec.gcode = analyzeG
+	id := namedModel(t, pf, "", "Cube", 1)
+	pf.ok(t, "slice_project", map[string]any{"project": id, "preview": "none", "background": false})
+	out := pf.ok(t, "analyze_toolpaths", map[string]any{"project": id, "measure": []string{"unsupported_starts", "support_contacts", "short_runs", "first_layers"}})
+	contains(t, "findings first", out, "no findings: support_contacts, short_runs", "rows 1-")
+	if strings.Index(out, "## unsupported_starts") > strings.Index(out, "## first_layers") {
+		t.Error("findings are not first")
+	}
+	if strings.Contains(out, "## support_contacts") || strings.Contains(out, "## short_runs") {
+		t.Errorf("empty sections are shown:\n%s", out)
+	}
 }

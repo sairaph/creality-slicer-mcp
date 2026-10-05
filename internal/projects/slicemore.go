@@ -35,6 +35,10 @@ type ActionResult struct {
 	Z     float64
 	Found bool
 	AtZ   float64
+	// Ignored is true for a layer tool change that Creality Print drops because
+	// the objects of the plate use several filaments (see layer_tool_change_ignored):
+	// the T lines the G-code has at that height are the objects' own swaps.
+	Ignored bool
 }
 
 // labelRE parses <name>_id_<n>_copy_<k>.

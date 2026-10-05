@@ -131,6 +131,7 @@ func (s *Server) addModel(ctx context.Context, _ *mcp.CallToolRequest, in addMod
 	if fail != nil {
 		return fail, nil, nil
 	}
+	before := warnCodesBefore(be, in.Project)
 	req := projects.AddModelRequest{Path: in.Path, Name: deref(in.Name), Rotation: rot3(in.Rotation), LayFlat: false, Objects: in.Objects, Names: in.Names, KeepPositions: boolOr(in.KeepPositions, false)}
 	req.X, req.Y, req.Z = xyz(in.Position)
 	if in.Plate != nil {
@@ -158,7 +159,7 @@ func (s *Server) addModel(ctx context.Context, _ *mcp.CallToolRequest, in addMod
 		front.Added = append(front.Added, objectFrontOf(o))
 		fmt.Fprintf(&b, "- %s\n", objectLine(o))
 	}
-	b.WriteString(warningLines(res.Warnings))
+	b.WriteString(warningLines(withIntroduced(res.Warnings, before, res.Info)))
 	b.WriteString("\nNext: get_view to look at the plate from another side, update_settings to change settings, or slice_project.")
 	var focus []string
 	for _, o := range res.Added {
@@ -196,6 +197,7 @@ func (s *Server) updateObject(ctx context.Context, _ *mcp.CallToolRequest, in up
 	if fail != nil {
 		return fail, nil, nil
 	}
+	before := warnCodesBefore(be, in.Project)
 	req := projects.UpdateObjectRequest{Object: in.Object, Name: in.Name, Filament: in.Filament, Plate: in.Plate, LayFlat: boolOr(in.LayFlat, false)}
 	req.X, req.Y, req.Z = xyz(in.Position)
 	if len(in.Rotation) == 3 {
@@ -212,7 +214,7 @@ func (s *Server) updateObject(ctx context.Context, _ *mcp.CallToolRequest, in up
 	if err != nil {
 		return projFailure(err), nil, nil
 	}
-	body := "Updated: " + objectLine(res.Object) + "." + warningLines(res.Warnings)
+	body := "Updated: " + objectLine(res.Object) + "." + warningLines(withIntroduced(res.Warnings, before, res.Info))
 	out := successResult(updateObjectFront{baseFront: base(res.Info), Object: objectFrontOf(res.Object)}, nextLine(body, "get_view to check the plate, or slice_project."))
 	return s.withObjectScreenshot(be, out, in.IncludeScreenshot, in.Project, res.Object.Plate, strconv.Itoa(res.Object.ID), false), nil, nil
 }
@@ -268,9 +270,27 @@ type updateSettingsFront struct {
 
 func settingChangeText(c projects.Change) string {
 	if c.Removed {
-		return fmt.Sprintf("%s: %s -> (override removed)", c.Key, orDash(c.Old))
+		return fmt.Sprintf("%s: %s -> (override removed)", c.Key, orDash(plainVector(c.Old)))
 	}
-	return fmt.Sprintf("%s: %s -> %s", c.Key, orDash(c.Old), orDash(c.New))
+	return fmt.Sprintf("%s: %s -> %s", c.Key, orDash(plainVector(c.Old)), orDash(plainVector(c.New)))
+}
+
+// plainVector shows a vector value whose entries are all equal (a single
+// filament's value, or the same value for every filament) as that value:
+// "[60]" and "[60,60]" read "60".
+func plainVector(v string) string {
+	t := strings.TrimSpace(v)
+	if len(t) < 3 || t[0] != '[' || t[len(t)-1] != ']' {
+		return v
+	}
+	parts := strings.Split(t[1:len(t)-1], ",")
+	first := strings.TrimSpace(parts[0])
+	for _, p := range parts[1:] {
+		if strings.TrimSpace(p) != first {
+			return v
+		}
+	}
+	return first
 }
 
 func (s *Server) updateSettings(ctx context.Context, _ *mcp.CallToolRequest, in updateSettingsInput) (*mcp.CallToolResult, any, error) {
@@ -278,6 +298,7 @@ func (s *Server) updateSettings(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if fail != nil {
 		return fail, nil, nil
 	}
+	before := warnCodesBefore(be, in.Project)
 	scope := strings.TrimSpace(deref(in.Scope))
 	if scope == "" {
 		scope = "project"
@@ -320,7 +341,7 @@ func (s *Server) updateSettings(ctx context.Context, _ *mcp.CallToolRequest, in 
 			}
 			last = t
 			for _, c := range byTarget[t] {
-				front.Changed = append(front.Changed, settingChangeText(c))
+				front.Changed = append(front.Changed, changeLine(c, len(in.Targets) > 1))
 				label := ""
 				if c.Label != "" && c.Label != c.Key {
 					label = " (" + c.Label + ")"
@@ -347,7 +368,7 @@ func (s *Server) updateSettings(ctx context.Context, _ *mcp.CallToolRequest, in 
 			fmt.Fprintf(&b, "- %s%s\n", settingChangeText(c), note)
 		}
 	}
-	b.WriteString(warningLines(res.Warnings))
+	b.WriteString(warningLines(withIntroduced(res.Warnings, before, res.Info)))
 	return successResult(front, nextLine(strings.TrimRight(b.String(), "\n"), "update_settings for more changes, add_model, or slice_project.")), nil, nil
 }
 
@@ -379,6 +400,7 @@ func (s *Server) setPresets(ctx context.Context, _ *mcp.CallToolRequest, in setP
 	if fail != nil {
 		return fail, nil, nil
 	}
+	before := warnCodesBefore(be, in.Project)
 	if deref(in.Printer) == "" && deref(in.Process) == "" && len(in.Filaments) == 0 && len(in.Spools) == 0 && len(in.FlushMatrix) == 0 && in.FlushMultiplier == nil {
 		return invalidInput("Nothing to change: give at least one of printer, process, filaments, spools, flush_matrix or flush_multiplier",
 			"Call set_presets with the presets to change, for example {\"project\": \"<id>\", \"process\": \"0.28mm Standard @Creality K2 0.4 nozzle\"}."), nil, nil
@@ -419,7 +441,7 @@ func (s *Server) setPresets(ctx context.Context, _ *mcp.CallToolRequest, in setP
 		fmt.Fprintf(&b, "\nFlush matrix: %s (multiplier %s). It is the purge volume in mm3 from each filament (row) to each other (column); dark to light needs the most. Give flush_matrix to set it by hand.\n", info.FlushMode, orDash(info.FlushMultiplier))
 		b.WriteString("For the K2 CFS, each filament's type must match a loaded spool: call get_guide with {\"topic\": \"multicolor-cfs\"}.\n")
 	}
-	b.WriteString(warningLines(res.Warnings))
+	b.WriteString(warningLines(withIntroduced(res.Warnings, before, info)))
 	out := successResult(front, nextLine(strings.TrimRight(b.String(), "\n"), "update_settings or add_model, or slice_project."))
 	if len(in.Filaments) > 0 || len(in.Spools) > 0 {
 		out = s.withScreenshot(be, out, in.IncludeScreenshot, in.Project, 1, nil, false)
@@ -453,6 +475,7 @@ func (s *Server) addModifier(ctx context.Context, _ *mcp.CallToolRequest, in add
 	if fail != nil {
 		return fail, nil, nil
 	}
+	before := warnCodesBefore(be, in.Project)
 	req := projects.ModifierRequest{Object: in.Object, Subtype: in.Kind, Name: deref(in.Name), Shape: in.Shape, Settings: in.Values}
 	copy(req.Size[:], in.Size)
 	copy(req.Rotation[:], in.Rotation)
@@ -478,6 +501,7 @@ func (s *Server) addModifier(ctx context.Context, _ *mcp.CallToolRequest, in add
 			body += " Its settings apply where it overlaps the object."
 		}
 	}
+	body += warningLines(withIntroduced(nil, before, res.Info))
 	out := successResult(addModifierFront{baseFront: base(res.Info), Part: res.PartID, Kind: in.Kind}, nextLine(body, "get_view with the object as focus and the Front or Right view to check it, or slice_project."))
 	return s.withPartScreenshot(be, out, in.IncludeScreenshot, in.Project, plateOfObject(res.Info, in.Object, 1), in.Object), nil, nil
 }
@@ -508,6 +532,7 @@ func (s *Server) setHeightRanges(ctx context.Context, _ *mcp.CallToolRequest, in
 	if fail != nil {
 		return fail, nil, nil
 	}
+	before := warnCodesBefore(be, in.Project)
 	specs := make([]projects.RangeSpec, len(in.Ranges))
 	for i, r := range in.Ranges {
 		specs[i] = projects.RangeSpec{From: r.FromZ, To: r.ToZ, Settings: r.Values}
@@ -542,6 +567,7 @@ func (s *Server) setHeightRanges(ctx context.Context, _ *mcp.CallToolRequest, in
 	for _, n := range hr.Notes {
 		b.WriteString("\nNote: " + n + ".")
 	}
+	b.WriteString(warningLines(withIntroduced(nil, before, info)))
 	out := successResult(heightRangesFront{baseFront: base(info), Object: in.Object, Ranges: len(in.Ranges)}, nextLine(strings.TrimRight(b.String(), "\n"), "get_view with show_ranges true to check the bands, or slice_project."))
 	return s.withObjectScreenshot(be, out, in.IncludeScreenshot, in.Project, plateOfObject(info, in.Object, 1), in.Object, true), nil, nil
 }
@@ -573,6 +599,7 @@ func (s *Server) setLayerActions(ctx context.Context, _ *mcp.CallToolRequest, in
 	if fail != nil {
 		return fail, nil, nil
 	}
+	before := warnCodesBefore(be, in.Project)
 	plate := 1
 	if in.Plate != nil {
 		plate = *in.Plate
@@ -671,7 +698,7 @@ func (s *Server) setLayerActions(ctx context.Context, _ *mcp.CallToolRequest, in
 			ws = append(ws, w.Message)
 		}
 	}
-	b.WriteString(warningLines(ws))
+	b.WriteString(warningLines(withIntroduced(ws, before, res)))
 	return successResult(layerActionsFront{baseFront: base(res), Plate: plate, Actions: len(actions)}, nextLine(strings.TrimRight(b.String(), "\n"), "get_project to check the plate, or slice_project.")), nil, nil
 }
 
@@ -697,6 +724,7 @@ func (s *Server) managePlates(ctx context.Context, _ *mcp.CallToolRequest, in ma
 	if fail != nil {
 		return fail, nil, nil
 	}
+	before := warnCodesBefore(be, in.Project)
 	plate := 0
 	if in.Plate != nil {
 		plate = *in.Plate
@@ -728,7 +756,7 @@ func (s *Server) managePlates(ctx context.Context, _ *mcp.CallToolRequest, in ma
 		}
 		fmt.Fprintf(&b, "- plate %d `%s`: %d object(s), bed %s, sequence %s%s\n", p.Index, orDash(p.Name), p.Objects, orDash(p.BedType), orDash(p.PrintSequence), lock)
 	}
-	b.WriteString(warningLines(warnings))
+	b.WriteString(warningLines(withIntroduced(warnings, before, info)))
 	out := successResult(managePlatesFront{baseFront: base(info), Action: in.Action, Plates: platesFront(info)}, nextLine(strings.TrimRight(b.String(), "\n"), "add_model with a plate, get_view to look at a plate, or slice_project."))
 	switch in.Action {
 	case "add", "remove", "set":
@@ -780,4 +808,49 @@ func (s *Server) removePart(ctx context.Context, _ *mcp.CallToolRequest, in remo
 	out := successResult(removePartFront{baseFront: base(res.Info), Object: res.Object, Removed: res.Removed, Kind: res.Part.Subtype, Parts: parts},
 		nextLine(fmt.Sprintf("Removed the %s `%s` from object `%s`. The object has %d part(s) left.", kind, res.Removed, res.Object, parts), "get_project to see the parts, add_modifier to add another, or slice_project."))
 	return s.withPartScreenshot(be, out, in.IncludeScreenshot, in.Project, plateOfObject(res.Info, in.Object, 1), in.Object), nil, nil
+}
+
+// warnCodesBefore is the set of warning codes a project has before a change, so
+// the reply can name the ones the change introduced.
+func warnCodesBefore(be ProjectBackend, ref string) map[string]bool {
+	info, err := be.Store.GetProject(ref)
+	if err != nil || info == nil {
+		return nil
+	}
+	codes := map[string]bool{}
+	for _, w := range info.Warnings {
+		codes[w.Code] = true
+	}
+	return codes
+}
+
+// withIntroduced adds to a reply's own warnings the project warnings this call
+// introduced: present after, absent before, by code. A message the reply shows
+// already is not repeated. Without a "before" (the project could not be read)
+// nothing is added.
+func withIntroduced(own []string, before map[string]bool, after *projects.Info) []string {
+	if before == nil || after == nil {
+		return own
+	}
+	out := append([]string(nil), own...)
+	shown := map[string]bool{}
+	for _, w := range own {
+		shown[w] = true
+	}
+	for _, w := range after.Warnings {
+		if !before[w.Code] && !shown[w.Message] {
+			shown[w.Message] = true
+			out = append(out, w.Message)
+		}
+	}
+	return out
+}
+
+// changeLine is the front matter line of a change; with several targets it names
+// the target.
+func changeLine(c projects.Change, withTarget bool) string {
+	if withTarget && c.Target != "" {
+		return c.Target + ": " + settingChangeText(c)
+	}
+	return settingChangeText(c)
 }

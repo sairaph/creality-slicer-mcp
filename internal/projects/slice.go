@@ -589,6 +589,14 @@ func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res
 		}
 		pr.ObjectLabels = objectLabels(sp, plate, pr.ExcludeNames)
 		pr.Actions = scanActions(file, snap.layerActions(plate))
+		// Evaluated on the sliced project, with the same rule as the warning.
+		if fils, painted := snap.plateExtruders(plate); len(fils) >= 2 || painted {
+			for i := range pr.Actions {
+				if pr.Actions[i].Kind == ActionToolChange {
+					pr.Actions[i].Found, pr.Actions[i].Ignored = false, true
+				}
+			}
+		}
 		pr.PrimeTowerG, pr.PrimeTowerS = primeTower(file, sum)
 		pr.FlushG, pr.FlushChanges, pr.FlushEstimated = flushCost(file, sum, sp.Settings)
 		pr.PurgeWarning = snap.purgeWarning(plate, pr)
@@ -690,6 +698,8 @@ func toolTable(p *threemf.Project, sum gcodeinfo.Summary) []ToolInfo {
 		}
 		out = append(out, ti)
 	}
+	// By tool index, not by first use: a grouped object can start with T1.
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Tool < out[j].Tool })
 	return out
 }
 

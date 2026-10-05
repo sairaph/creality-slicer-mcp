@@ -406,7 +406,9 @@ func (h *handle) objectInfo(o *threemf.Object, geo geometry) ObjectInfo {
 	}
 	rel := h.itemT(o.ID, 0)
 	for i, part := range o.Parts {
-		if part.Subtype == threemf.SubtypeNormal {
+		// A normal part is listed (with its filament) only when it has one of its
+		// own, and then it needs its size and place like a modifier does.
+		if part.Subtype == threemf.SubtypeNormal && oi.Parts[i].Filament == 0 {
 			continue
 		}
 		if m, err := h.p.LoadMesh(part); err == nil && m != nil {
@@ -460,14 +462,27 @@ func (h *handle) warnings(in *Info, geo geometry) []Warning {
 	// and time that a single colour print does not spend. Not on 7.2, where the
 	// same plate crashes the slicer and v72_by_layer_crash is the warning.
 	if h.s.cfg.Install.Dialect != "v72" && h.p.Settings != nil && h.p.Settings.String("enable_prime_tower") == "1" {
-		var towered []int
+		var towered, byActions []int
 		for _, pl := range in.Plates {
-			if h.plateSequence(pl.Index) != "by object" && h.plateFilamentCount(pl.Index) >= 2 {
+			if h.plateSequence(pl.Index) == "by object" {
+				continue
+			}
+			// One object whose filament changes are layer actions: by object does
+			// not apply, fewer changes or a smaller flush do.
+			oneObject := h.p.Plate(pl.Index) != nil && len(h.p.Plate(pl.Index).Instances) == 1
+			actions := h.layerFilamentChanges(pl.Index) > 0
+			switch {
+			case oneObject && actions && len(in.Filaments) >= 2:
+				byActions = append(byActions, pl.Index)
+			case h.plateFilamentCount(pl.Index) >= 2:
 				towered = append(towered, pl.Index)
 			}
 		}
 		if len(in.Objects) == 0 && len(in.Filaments) >= 2 && h.plateSequence(1) != "by object" {
 			towered = []int{1}
+		}
+		if len(byActions) > 0 {
+			add("prime_tower", "plate(s) %v change filament with layer actions: the slicer adds a prime tower with its own purge material and print time, and every change purges a flush volume (flush_volumes_matrix times flush_multiplier) into waste; fewer changes or a smaller flush reduce it (slice_project reports the tower grams and the flush per plate after slicing)", byActions)
 		}
 		if len(towered) > 0 {
 			add("prime_tower", "plate(s) %v print several filaments by layer: the slicer adds a prime tower with its own purge material and print time on top of the objects; every filament change also purges a flush volume (flush_volumes_matrix times flush_multiplier) into waste, often several times the tower itself (slice_project reports the tower grams and the flush per plate after slicing); when each object uses one filament, print_sequence by object removes the tower and most of the flush (a change between objects of different filaments still flushes)", towered)

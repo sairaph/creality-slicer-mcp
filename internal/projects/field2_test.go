@@ -664,3 +664,148 @@ func TestOverridesWithAnEmptySliceList(t *testing.T) {
 		t.Fatal("no error from Report for a slice without plates")
 	}
 }
+
+// v0.3.1: a layer tool change on a plate whose objects use several filaments is
+// ignored by the app; the slice result says so instead of "found".
+func TestIgnoredLayerToolChangeIsNotFound(t *testing.T) {
+	data := purgeGCode(t)
+	e := newEnv(t)
+	info := e.newProject(t, "IgnoredResult")
+	e.addBox(t, info.ID, "a", 20, 20, 20)
+	if _, err := e.st.AddModel(info.ID, AddModelRequest{Path: writeSTL(t, "b", 20, 20, 20), Filament: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.SetLayerActions(info.ID, 1, []LayerAction{{Layer: 5, Kind: ActionToolChange, Filament: 2}, {Layer: 8, Kind: ActionPause}}); err != nil {
+		t.Fatal(err)
+	}
+	e.exec.gcode = func(int) string { return data }
+	res, err := e.st.Slice(info.ID, SliceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range res.Last.Plates[0].Actions {
+		if a.Kind == ActionToolChange && (a.Found || !a.Ignored) {
+			t.Errorf("tool change %+v, want ignored and not found", a)
+		}
+		if a.Kind == ActionPause && a.Ignored {
+			t.Errorf("a pause is never ignored: %+v", a)
+		}
+	}
+	// the same plate with one filament: found as before
+	one := e.newProject(t, "FoundResult")
+	e.addBox(t, one.ID, "a", 20, 20, 20)
+	if _, err := e.st.SetLayerActions(one.ID, 1, []LayerAction{{Layer: 5, Kind: ActionToolChange, Filament: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	res, err = e.st.Slice(one.ID, SliceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range res.Last.Plates[0].Actions {
+		if a.Ignored {
+			t.Errorf("single filament plate: %+v", a)
+		}
+	}
+}
+
+// The generic prime tower note for one object whose changes are layer actions
+// carries no by-object clause.
+func TestPrimeTowerWarningForLayerActionsOnOneObject(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "ActionsTower")
+	e.addBox(t, info.ID, "a", 20, 20, 20)
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Values: map[string]any{"enable_prime_tower": true}}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.st.SetLayerActions(info.ID, 1, []LayerAction{{Layer: 5, Kind: ActionColorChange, Filament: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg string
+	for _, w := range res.Warnings {
+		if w.Code == "prime_tower" {
+			msg = w.Message
+		}
+	}
+	if !strings.Contains(msg, "fewer changes or a smaller flush reduce it") || strings.Contains(msg, "by object") {
+		t.Fatalf("prime tower warning %q", msg)
+	}
+}
+
+func TestExtruderRefusedWithOneFilamentSaysHowToAddOne(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "OneFilament", FilamentSpec{Preset: testPLA, Colour: "#FFFFFF"})
+	e.addBox(t, info.ID, "a", 20, 20, 20)
+	_, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "object", Target: "a", Values: map[string]any{"extruder": 2}})
+	ae := wantCode(t, err, CodeInvalidInput)
+	if !strings.Contains(ae.Message, "add a filament with set_presets first") {
+		t.Fatalf("message %q hint %q", ae.Message, ae.Hint)
+	}
+}
+
+// A single normal part with a filament shows its size and place, also in an
+// object opened from a file.
+func TestNormalPartWithFilamentHasBounds(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "PartBounds")
+	e.addBox(t, info.ID, "base", 20, 20, 10)
+	if _, err := e.st.AddModel(info.ID, AddModelRequest{Path: writeSTL(t, "p", 30, 10, 8), Name: "second", Filament: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.GroupObjects(info.ID, GroupRequest{Objects: []string{"base", "second"}}); err != nil {
+		t.Fatal(err)
+	}
+	check := func(id string) {
+		t.Helper()
+		got, err := e.st.GetProject(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, p := range got.Objects[0].Parts {
+			if p.Filament == 0 {
+				continue
+			}
+			n++
+			if p.Size[0] <= 0 || p.Size[1] <= 0 || p.Size[2] <= 0 || p.Center == [3]float64{} {
+				t.Errorf("part %q has filament %d but size %v centre %v", p.Name, p.Filament, p.Size, p.Center)
+			}
+			if p.Overrides != 0 {
+				t.Errorf("the filament is counted as an override: %+v", p)
+			}
+		}
+		if n == 0 {
+			t.Fatal("no part with a filament")
+		}
+	}
+	check(info.ID)
+	file := filepath.Join(t.TempDir(), "group.3mf")
+	if _, err := e.st.Export(info.ID, file, false); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := e.st.OpenProject(OpenRequest{Path: file, Name: "Reopened"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(opened.Info.ID)
+}
+
+func TestToolsAreSortedByIndex(t *testing.T) {
+	data := purgeGCode(t)
+	// the file starts with T1: first use is not index order
+	data = strings.Replace(data, "\nT0\n", "\nT1\n", 1)
+	e := newEnv(t)
+	info := e.newProject(t, "ToolOrder")
+	e.addBox(t, info.ID, "a", 20, 20, 20)
+	e.exec.gcode = func(int) string { return data }
+	res, err := e.st.Slice(info.ID, SliceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := res.Last.Plates[0].Tools
+	for i := 1; i < len(tools); i++ {
+		if tools[i-1].Tool > tools[i].Tool {
+			t.Fatalf("tools not sorted: %+v", tools)
+		}
+	}
+}

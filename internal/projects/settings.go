@@ -284,6 +284,9 @@ func (h *handle) checkExtruder(key string, opt *catalog.Option, v any, min int, 
 	}
 	if n, err := strconv.Atoi(objectValue(opt, v)); err != nil || n < min || n > nfil {
 		hint := fmt.Sprintf("the project has %d filament(s); use a number from %d to %d", nfil, min, nfil)
+		if nfil == 1 {
+			hint = "the project has 1 filament: add a filament with set_presets first, then use its number"
+		}
 		if min == 0 {
 			hint += " (0 is the object's own filament)"
 		}

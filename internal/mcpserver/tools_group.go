@@ -38,6 +38,7 @@ func (s *Server) groupObjects(ctx context.Context, _ *mcp.CallToolRequest, in gr
 	if fail != nil {
 		return fail, nil, nil
 	}
+	before := warnCodesBefore(be, in.Project)
 	objects := make([]string, len(in.Objects))
 	for i, o := range in.Objects {
 		objects[i] = strings.TrimSpace(o)
@@ -53,7 +54,7 @@ func (s *Server) groupObjects(ctx context.Context, _ *mcp.CallToolRequest, in gr
 		front.Parts = append(front.Parts, groupPartFront{Name: p.Name, Kind: partKindName(p.Subtype), Filament: p.Filament})
 		fmt.Fprintf(&b, "%s | %s | %d\n", pipeSafe(p.Name), partKindName(p.Subtype), p.Filament)
 	}
-	b.WriteString(warningLines(res.Warnings))
+	b.WriteString(warningLines(withIntroduced(res.Warnings, before, res.Info)))
 	out := successResult(front, nextLine(b.String(), "update_settings with scope part to tune one part, get_view to check, or slice_project."))
 	return s.withObjectScreenshot(be, out, in.IncludeScreenshot, in.Project, res.Object.Plate, strconv.Itoa(res.Object.ID), false), nil, nil
 }

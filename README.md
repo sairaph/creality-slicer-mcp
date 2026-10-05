@@ -20,6 +20,8 @@ It is a single self-contained binary.
 - "Reinforce this hinge with denser infill around the pin hole only."
 - "Print the same part three times on a second plate and slice both plates."
 - "Show me the front view of the hinge with the modifier, then layer 40 coloured by speed."
+- "Make the screw's markings white: join the marking parts to the screw and give them filament 2."
+- "Check the sliced plate: does any thin tine start printing in mid-air?"
 - "Slice it, then upload it to the printer and start the print."
 
 ## Quick start

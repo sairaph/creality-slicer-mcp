@@ -54,6 +54,7 @@ func newServer(config Config, extra ...func(*Server)) *Server {
 	srv.registerPresetTools()
 	srv.registerProjectTools()
 	srv.registerEditTools()
+	srv.registerAnalyzeTools()
 	srv.registerSliceTools()
 	srv.registerViewTools()
 	srv.registerAppTools()

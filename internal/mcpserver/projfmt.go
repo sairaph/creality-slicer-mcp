@@ -373,14 +373,46 @@ func writeParts(b *strings.Builder, in *projects.Info) {
 	first := true
 	for _, o := range in.Objects {
 		for _, p := range o.Parts {
-			if p.Subtype == threemf.SubtypeNormal {
+			// A normal part is listed when it has a filament of its own.
+			if p.Subtype == threemf.SubtypeNormal && p.Filament == 0 {
 				continue
 			}
 			if first {
-				b.WriteString("\nParts (object | part id | kind | name | size mm | centre x,y,z | overrides):\n")
+				b.WriteString("\nParts (object | part id | kind | name | size mm | centre x,y,z | overrides | filament):\n")
 				first = false
 			}
-			fmt.Fprintf(b, "%s | %d | %s | %s | %s | %s | %d\n", pipeSafe(o.Name), p.ID, partKindName(p.Subtype), orDash(p.Name), vec3(p.Size), vec3(p.Center), p.Overrides)
+			fil := "-"
+			if p.Filament > 0 {
+				fil = strconv.Itoa(p.Filament)
+			}
+			fmt.Fprintf(b, "%s | %d | %s | %s | %s | %s | %d | %s\n", pipeSafe(o.Name), p.ID, partKindName(p.Subtype), orDash(p.Name), vec3(p.Size), vec3(p.Center), p.Overrides, fil)
+		}
+	}
+	writeRanges(b, in)
+}
+
+// writeRanges lists the height ranges of the objects: the heights, the filament
+// of the range (- = the object's own) and the other settings it sets.
+func writeRanges(b *strings.Builder, in *projects.Info) {
+	first := true
+	for _, o := range in.Objects {
+		for i, r := range o.HeightRanges {
+			if first {
+				b.WriteString("\nHeight ranges (object | range | from-to mm | filament | other settings):\n")
+				first = false
+			}
+			fil := "-"
+			if r.Filament > 0 {
+				fil = strconv.Itoa(r.Filament)
+			}
+			var keys []string
+			for k := range r.Settings {
+				if k != "extruder" {
+					keys = append(keys, k+"="+r.Settings[k])
+				}
+			}
+			sort.Strings(keys)
+			fmt.Fprintf(b, "%s | %d | %s-%s | %s | %s\n", pipeSafe(o.Name), i+1, num(r.From), num(r.To), fil, orDash(strings.Join(keys, ", ")))
 		}
 	}
 }

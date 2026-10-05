@@ -143,3 +143,112 @@ func TestSetLayerActionsRepliesWithTheIgnoredWarning(t *testing.T) {
 	out := pf.ok(t, "set_layer_actions", map[string]any{"project": id, "actions": []map[string]any{{"layer": 2, "type": "tool_change", "filament": 2}}})
 	contains(t, "mixed", out, "Warnings:", "have no effect", "every object on the plate prints with one filament")
 }
+
+func namedModel(t *testing.T, pf *projFixture, project, name string, filament int) string {
+	t.Helper()
+	args := map[string]any{"path": pf.stl, "name": name, "filament": filament}
+	if project == "" {
+		project = pf.create(t, "Proj")
+	}
+	args["project"] = project
+	pf.ok(t, "add_model", args)
+	return project
+}
+
+func TestSettingsReportListsOverrides(t *testing.T) {
+	pf := newProjFixture(t)
+	id := namedModel(t, pf, "", "Over", 1)
+	pf.ok(t, "update_settings", map[string]any{"project": id, "scope": "object", "target": "Over", "values": map[string]any{"wall_loops": 6}})
+	pf.ok(t, "slice_project", map[string]any{"project": id, "preview": "none", "background": false})
+	out := pf.ok(t, "get_slice_report", map[string]any{"project": id, "section": "settings"})
+	contains(t, "settings", out, "Settings below the project level on plate 1", "Object `Over`", "wall_loops: 6")
+}
+
+func TestGroupObjectsThroughTheTool(t *testing.T) {
+	pf := newProjFixture(t)
+	id := namedModel(t, pf, "", "First", 1)
+	namedModel(t, pf, id, "Second", 2)
+	out := pf.ok(t, "group_objects", map[string]any{"project": id, "objects": []string{"First", "Second"}, "name": "Pair", "include_screenshot": false})
+	contains(t, "group_objects", out, "Grouped 2 objects", "Second | ", "| 2")
+	e := pf.errText(t, "group_objects", map[string]any{"project": id, "objects": []string{"Pair"}})
+	if e == "" {
+		t.Fatal("one object accepted")
+	}
+}
+
+func TestUpdateSettingsTargetsThroughTheTool(t *testing.T) {
+	pf := newProjFixture(t)
+	id := namedModel(t, pf, "", "One", 1)
+	namedModel(t, pf, id, "Two", 1)
+	out := pf.ok(t, "update_settings", map[string]any{"project": id, "scope": "object", "targets": []string{"One", "Two"}, "values": map[string]any{"wall_loops": 5}})
+	contains(t, "targets", out, "One:", "Two:", "wall_loops")
+}
+
+// analyzeG is a small plate G-code: one object printed on three layers, the
+// inner wall of layer 2 starting in mid air at (80, 80).
+const analyzeG = `; filament_diameter: 1.75
+M83
+;LAYER_CHANGE
+;Z:0.2
+;HEIGHT:0.2
+; OBJECT_ID: 1
+EXCLUDE_OBJECT_START NAME=Cube_id_0_copy_0
+;TYPE:Outer wall
+;WIDTH:0.45
+G1 X10 Y10 F30000
+G1 X20 Y10 E.4 F3600
+G1 X20 Y20 E.4
+EXCLUDE_OBJECT_END NAME=Cube_id_0_copy_0
+;LAYER_CHANGE
+;Z:0.4
+;HEIGHT:0.2
+EXCLUDE_OBJECT_START NAME=Cube_id_0_copy_0
+;TYPE:Outer wall
+;WIDTH:0.45
+G1 X10 Y10 F30000
+G1 X20 Y10 E.4 F3600
+;TYPE:Inner wall
+G1 X80 Y80 F30000
+G1 X83 Y80 E.12 F3600
+EXCLUDE_OBJECT_END NAME=Cube_id_0_copy_0
+`
+
+func TestAnalyzeToolpathsTool(t *testing.T) {
+	pf := newProjFixture(t)
+	pf.exec.gcode = analyzeG
+	id := namedModel(t, pf, "", "Cube", 1)
+	pf.ok(t, "slice_project", map[string]any{"project": id, "preview": "none", "background": false})
+	out := pf.ok(t, "analyze_toolpaths", map[string]any{"project": id})
+	contains(t, "default", out, "first_layers (object", "Cube | Outer wall | 1 | 2", "Cube | Inner wall | 2 | 2", "bounds in mm", "Cube | Outer wall | all")
+	out = pf.ok(t, "analyze_toolpaths", map[string]any{"project": id, "measure": []string{"unsupported_starts", "flow"}, "objects": []string{"cube"}, "features": []string{"inner wall"}})
+	contains(t, "findings", out, "unsupported_starts", "Cube | 2 | 0.40 | Inner wall", "flow (object")
+	fm := frontOf(t, out)
+	if fm["unsupported_starts"] != 1 {
+		t.Errorf("front unsupported_starts = %v", fm["unsupported_starts"])
+	}
+	// parameter errors are results with hints
+	for name, args := range map[string]map[string]any{
+		"bad measure":    {"project": id, "measure": []string{"speed"}},
+		"layers and z":   {"project": id, "layers": []int{1, 2}, "z": []float64{0, 1}},
+		"radius":         {"project": id, "measure": []string{"radius"}},
+		"layers reverse": {"project": id, "layers": []int{3, 1}},
+		"bad detail":     {"project": id, "detail": "all"},
+	} {
+		if pf.errText(t, "analyze_toolpaths", args) == "" {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	// a changed project marks the answer stale
+	pf.ok(t, "update_settings", map[string]any{"project": id, "scope": "object", "target": "Cube", "values": map[string]any{"wall_loops": 5}})
+	stale := pf.ok(t, "analyze_toolpaths", map[string]any{"project": id, "detail": "per_layer", "layers": []int{2, 2}})
+	contains(t, "stale", stale, "this is the old toolpath", "stale: true")
+}
+
+func TestAnalyzeToolpathsNoObjectMatchedListsTheLabels(t *testing.T) {
+	pf := newProjFixture(t)
+	pf.exec.gcode = analyzeG
+	id := namedModel(t, pf, "", "Cube", 1)
+	pf.ok(t, "slice_project", map[string]any{"project": id, "preview": "none", "background": false})
+	out := pf.ok(t, "analyze_toolpaths", map[string]any{"project": id, "objects": []string{"nothing"}})
+	contains(t, "no match", out, "No object matched", "Cube_id_0_copy_0")
+}

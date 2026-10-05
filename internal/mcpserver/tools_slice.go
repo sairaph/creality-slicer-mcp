@@ -782,6 +782,7 @@ func (s *Server) reportFromFile(ctx context.Context, be ProjectBackend, info *pr
 			return notFound("The G-code cannot be read: "+err.Error(), "Slice again with slice_project."), nil, nil
 		}
 		b.WriteString(s.settingsDigest(ctx, be, info, sum))
+		b.WriteString(overridesDigest(be, info.ID, p.Plate))
 	}
 	return successResult(front, strings.TrimRight(b.String(), "\n")), nil, nil
 }
@@ -927,4 +928,75 @@ func slotMap(tools []toolFront) []slotMapFront {
 		out = append(out, slotMapFront{Filament: t.Filament, Slot: t.SpoolSlot})
 	}
 	return out
+}
+
+// overridesDigest lists what is set below the project level for the objects of
+// the plate: plate settings, then each object with its settings, parts and
+// modifiers (with their filament) and height ranges.
+func overridesDigest(be ProjectBackend, id string, plate int) string {
+	rep, err := be.Store.Overrides(id, plate)
+	if err != nil {
+		return "\n\nPlate, object, part and height range settings cannot be read: " + projects.AsError(err).Message
+	}
+	line := func(l projects.OverrideLine) string {
+		if l.Label != "" && l.Label != l.Key {
+			return fmt.Sprintf("%s: %s (%s)", l.Key, l.Value, l.Label)
+		}
+		return fmt.Sprintf("%s: %s", l.Key, l.Value)
+	}
+	fil := func(n int) string {
+		if n > 0 {
+			return fmt.Sprintf(", filament %d", n)
+		}
+		return ""
+	}
+	var b strings.Builder
+	src := "the project file the slice read"
+	if !rep.FromSlice {
+		src = "the current project (the file of that slice is no longer kept, and the project may have changed since)"
+	} else if rep.Stale {
+		src = "the project file the slice read (the plate has changed since)"
+	}
+	fmt.Fprintf(&b, "\n\nSettings below the project level on plate %d, from %s:\n", rep.Plate, src)
+	found := false
+	for _, l := range rep.PlateLines {
+		fmt.Fprintf(&b, "Plate setting %s\n", line(l))
+		found = true
+	}
+	for _, o := range rep.Objects {
+		fmt.Fprintf(&b, "Object %s (id %d, filament %d):\n", "`"+o.Name+"`", o.ID, o.Filament)
+		for _, l := range o.Lines {
+			fmt.Fprintf(&b, "- %s\n", line(l))
+			found = true
+		}
+		for _, p := range o.Parts {
+			fmt.Fprintf(&b, "- %s %s%s:", p.Kind, "`"+p.Name+"`", fil(p.Filament))
+			if len(p.Lines) == 0 {
+				b.WriteString(" no settings")
+			}
+			for i, l := range p.Lines {
+				if i > 0 {
+					b.WriteString(";")
+				}
+				b.WriteString(" " + line(l))
+			}
+			b.WriteString("\n")
+			found = true
+		}
+		for i, r := range o.Ranges {
+			fmt.Fprintf(&b, "- height range %d (%s to %s mm)%s:", i+1, num(r.From), num(r.To), fil(r.Filament))
+			for j, l := range r.Lines {
+				if j > 0 {
+					b.WriteString(";")
+				}
+				b.WriteString(" " + line(l))
+			}
+			b.WriteString("\n")
+			found = true
+		}
+	}
+	if !found {
+		b.WriteString("None: no plate, object, part or height range overrides the project settings.\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }

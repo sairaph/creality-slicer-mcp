@@ -180,6 +180,7 @@ var topicSummaries = map[string]string{
 	"supports":             "when and how to enable supports",
 	"strength":             "walls, infill and where to spend material",
 	"surface-quality":      "layer height, seams, ironing, fuzzy skin",
+	"thin-features":        "tines, teeth and tips: wall choice, mid-air starts, tip dots, field results",
 	"speed-vs-quality":     "trading time for quality",
 	"modifiers-and-ranges": "per-object, per-part and per-height settings, layer actions",
 	"multi-plate":          "several plates in one project",

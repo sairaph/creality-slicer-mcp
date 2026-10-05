@@ -98,9 +98,13 @@ func (s *Server) createProject(ctx context.Context, _ *mcp.CallToolRequest, in c
 		return projFailure(err), nil, nil
 	}
 	front := createFront{baseFront: base(info), Printer: info.Printer, Process: info.Process, Filaments: filamentsFront(info), Plates: len(info.Plates)}
-	body := "Created the project.\n\n" + projectBody(info, nil) +
+	body := "Created the project.\n\n" + projectBody(info, nil)
+	if info.BedTypeFromApp && len(info.Plates) > 0 {
+		body += fmt.Sprintf("\n\nBed type: %s (the bed Creality Print last used for this printer). Pass bed_type to choose another.", info.Plates[0].BedType)
+	}
+	body +=
 		"\n\nNext: add_model with {\"project\": \"" + info.ID + "\", \"path\": \"<absolute path of an .stl, .obj or .3mf>\"}." +
-		"\nFor a multi-colour print, each filament's type must match a spool loaded in the CFS: call get_guide with {\"topic\": \"multicolor-cfs\"}."
+			"\nFor a multi-colour print, each filament's type must match a spool loaded in the CFS: call get_guide with {\"topic\": \"multicolor-cfs\"}."
 	return successResult(front, body), nil, nil
 }
 

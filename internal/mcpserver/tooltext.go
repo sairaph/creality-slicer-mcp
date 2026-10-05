@@ -81,14 +81,14 @@ var toolAnnotations = map[string]toolAnnotation{
 	"search_settings": annReadOnly, "describe_setting": annReadOnly, "browse_settings": annReadOnly,
 	"list_presets": annReadOnly, "get_preset": annReadOnly,
 	"create_project": annAdditive, "open_project": annAdditive, "list_projects": annReadOnly, "get_project": annReadOnly, "get_view": annReadOnly,
-	"add_model": annAdditive, "update_object": annChanging, "remove_object": annChanging, "remove_part": annChanging,
+	"add_model": annAdditive, "update_object": annChanging, "group_objects": annChanging, "remove_object": annChanging, "remove_part": annChanging,
 	"update_settings": annChanging, "set_presets": annChanging, "add_modifier": annAdditive,
 	"set_height_ranges": annChanging, "set_layer_actions": annChanging, "manage_plates": annChanging,
 	"export_project": annChanging, "delete_project": annChanging,
 	// open_in_app writes a copy into the project's view folder and starts an
 	// application window: it changes the store and is open world.
 	"open_in_app":   annOpenWorld,
-	"slice_project": annAdditive, "get_slice_status": annIdempotent, "get_slice_report": annReadOnly,
+	"slice_project": annAdditive, "get_slice_status": annIdempotent, "get_slice_report": annReadOnly, "analyze_toolpaths": annReadOnly,
 }
 
 // sharedParams are the descriptions of parameters that mean the same in every
@@ -108,7 +108,7 @@ var toolTexts = map[string]toolText{
 		Params:      map[string]string{"refresh": "detect Creality Print again and reload presets and descriptions (default false: use the result cached since the server started)"},
 	},
 	"get_guide": {
-		Description: `Read the guide: our own written workflows for slicing on a K2 or K2 Combo. Without arguments it lists the topics. Pass topic for a page: start (the whole flow with calls), k2-combo, multicolor-cfs (spool matching, flush, handoff to the printer), supports, strength, surface-quality, speed-vs-quality, modifiers-and-ranges, multi-plate, calibration, troubleshooting (exit codes), gui-handoff (work only the app can do), glossary. Pass term alone to look a word up in the glossary. The same pages are installed as a skill.`,
+		Description: `Read the guide: our own written workflows for slicing on a K2 or K2 Combo. Without arguments it lists the topics. Pass topic for a page: start (the whole flow with calls), k2-combo, multicolor-cfs (spool matching, flush, handoff to the printer), supports, strength, surface-quality, thin-features (tines, teeth, tips), speed-vs-quality, modifiers-and-ranges, multi-plate, calibration, troubleshooting (exit codes), gui-handoff (work only the app can do), glossary. Pass term alone to look a word up in the glossary. The same pages are installed as a skill.`,
 		Params: map[string]string{
 			"topic": "topic name from the index (default: list the topics)",
 			"term":  "glossary word to look up; every entry whose term contains it is returned, ignoring case; use alone or with topic glossary",
@@ -173,7 +173,7 @@ var toolTexts = map[string]toolText{
 			"spools[].colour":     "spool colour as hex, #RRGGBB (white when missing)",
 			"spools[].status":     "defined, rfid, undefined or unknown, as the printer reports it",
 			"spools[].name":       "spool name, for the reply only",
-			"bed_type":            "bed surface for plate 1 (default: the printer's default), for example Textured PEI Plate",
+			"bed_type":            "bed surface for plate 1, for example Textured PEI Plate (default: the bed Creality Print last used for this printer, else the printer's default)",
 		},
 	},
 	"open_project": {
@@ -216,17 +216,19 @@ var toolTexts = map[string]toolText{
 		},
 	},
 	"add_model": {
-		Description: `Add a model file to a plate. Without position it is placed automatically in free space; scale, rotation, copies and filament apply to every copy. Reports where each copy went, its size and whether it fits, and warns when the size looks like the wrong unit. A model that does not fit fails with the free area. Unit hint: STL files carry no units, and the slicer reads them as millimetres.`,
+		Description: `Add a model file to a plate. Without position it is placed automatically in free space; with keep_positions every object stays where the file has it (for a file laid out on the bed, like a FreeCAD export). Scale, rotation, copies and filament apply to every copy. Reports where each copy went, its size and whether it fits, and warns when the size looks like the wrong unit. A model that does not fit fails with the free area. Unit hint: STL files carry no units, and the slicer reads them as millimetres.`,
 		Params: map[string]string{
-			"path":     "absolute path of a .stl, .obj or .3mf file; a .3mf adds all of its objects unless objects names some",
-			"objects":  "names of the objects to take from a .3mf (default: all of them); an unknown name lists the names in the file",
-			"plate":    "plate to add to, starting at 1 (default 1)",
-			"position": "[x, y] or [x, y, z] in mm of the model's centre, measured from the corner of its own plate (default: automatic placement)",
-			"rotation": "[x, y, z] degrees (default none)",
-			"scale":    "one number for every axis, or [x, y, z] (default 1); must be above 0",
-			"filament": "filament slot for the object, starting at 1 (default 1)",
-			"name":     "object name (default: the file name); copies get a number appended",
-			"copies":   "how many copies to add (default 1)",
+			"path":           "absolute path of a .stl, .obj or .3mf file; a .3mf adds all of its objects unless objects names some",
+			"objects":        "names of the objects to take from a .3mf (default: all of them); an unknown name lists the names in the file",
+			"plate":          "plate to add to, starting at 1 (default 1)",
+			"position":       "[x, y] or [x, y, z] in mm of the model's centre, measured from the corner of its own plate (default: automatic placement)",
+			"rotation":       "[x, y, z] degrees (default none)",
+			"scale":          "one number for every axis, or [x, y, z] (default 1); must be above 0",
+			"filament":       "filament slot for the object, starting at 1 (default 1)",
+			"name":           "object name (default: the file name); copies get a number appended",
+			"names":          "one name per object taken from the file, in file order (after objects); the count must match; wins over the file's names. A file without names gives <file name> 1, <file name> 2 ...",
+			"keep_positions": "true keeps the file's XY: each object's centre is placed where the file has it (the file origin is the plate corner; for a Creality or Bambu project each object's own plate corner); no automatic placement, Z drops to the bed. A slicer project is usually better opened with open_project. Objects outside the bed are added with a warning. Not with position or copies above 1 (default false)",
+			"copies":         "how many copies to add (default 1)",
 		},
 	},
 	"update_object": {
@@ -242,6 +244,18 @@ var toolTexts = map[string]toolText{
 			"lay_flat": "true rotates the object so its largest flat face is down (default false)",
 		},
 	},
+	"group_objects": {
+		Description: `Merge objects into one object with several parts. Use it to give the parts of one object different filaments or settings (update_settings scope part), or to treat a set as one object.
+- The first object is the base: it keeps its id, settings, height ranges and place.
+- Every other object becomes parts of the base. Each part keeps its position and shape, is named after its old object, and prints with the filament that object used.
+- A merged object's settings that are valid on a part move to its parts; the others, and its height ranges, are dropped and listed as warnings. Painted data is not carried.
+- Refused: fewer than 2 objects, the same object twice, an object with several instances, objects on different plates. One change, one revision.
+Returns the part list (name, filament), the warnings and a screenshot.`,
+		Params: map[string]string{
+			"objects": "ids or names, at least 2; the first is the base",
+			"name":    "new name for the grouped object (default: the base's name)",
+		},
+	},
 	"remove_object": {
 		Description: `Remove one object, with its parts, modifiers and height ranges, from the project. Objects on other plates are not affected. Returns the remaining objects.`,
 		Params:      map[string]string{"object": "object id or unique name, as get_project shows it"},
@@ -254,10 +268,11 @@ var toolTexts = map[string]toolText{
 		},
 	},
 	"update_settings": {
-		Description: `Change settings at one scope: the whole project (default), an object, a part, a layer range or a plate. Every key and value is checked against Creality's catalog first (unknown key, type, choice, range, scope, vendor lock) and nothing changes unless all pass. Reports each change as old to new, warns about settings that do nothing until another is on, and applies the side effects the app would apply. For a per-filament key (a filament preset setting) a list is one value per filament slot and a single value applies to every slot; a list key of the printer takes the whole list, as describe_setting shows. Find keys with search_settings.`,
+		Description: `Change settings at one scope: the whole project (default), an object, a part, a layer range or a plate. Every key and value is checked against Creality's catalog first (unknown key, type, choice, range, scope, vendor lock) and nothing changes unless all pass. Reports each change as old to new, warns about settings that do nothing until another is on, and applies the side effects the app would apply. For a per-filament key (a filament preset setting) a list is one value per filament slot and a single value applies to every slot; a list key of the printer takes the whole list, as describe_setting shows. Find keys with search_settings. For the same change on several objects, parts, ranges or plates give targets (a list) instead of target: one call, one revision.`,
 		Params: map[string]string{
 			"scope":        "project (default), object, part, layer_range or plate",
 			"target":       "what to change: object id or name; part as object/part; plate number; not used for project scope",
+			"targets":      "the same for several objects, parts, height ranges or plates in one call, instead of target; all are checked first and nothing changes unless all pass",
 			"values":       "setting key to value; a value is a string, number, boolean or list (vector keys); null removes the override and goes back to the preset value; positions such as wipe_tower_x are in mm from the corner of the plate",
 			"allow_locked": "true allows keys that Creality's system presets lock (default false)",
 		},
@@ -361,8 +376,33 @@ var toolTexts = map[string]toolText{
 			"cancel": "true stops the job (default false)",
 		},
 	},
+	"analyze_toolpaths": {
+		Description: `Measure what the slicer really printed, from the plate G-code of the last slice. Reads only. A stale slice is answered and marked stale.
+Measures (measure, a list; default first_layers and bounds):
+- first_layers: first and last layer of each feature per object; layers with no extrusion inside an object's range.
+- bounds: XY min, max and span of the paths per object, feature, layer.
+- flow: length, E, E per mm and flow ratio (1 = the flow width and height ask for).
+- radius: distance of the paths from center.
+- short_runs: runs of extrusion shorter than min_run.
+- unsupported_starts: extrusion that starts in mid air.
+- support_contacts: support patches and what prints on them.
+- wall_order: outer or inner wall first.
+Narrow with objects, layers or z, features. Long answers are paged.`,
+		Params: map[string]string{
+			"plate":    "plate, starting at 1 (default 1)",
+			"objects":  "object names as get_project shows them (default: every object on the plate)",
+			"layers":   "[from, to] layer numbers, starting at 1; not with z",
+			"z":        "[from, to] heights in mm; not with layers",
+			"features": "G-code feature names, for example Outer wall, Overhang wall, Support interface (default: all)",
+			"measure":  "measures to run: first_layers, bounds, flow, radius, short_runs, unsupported_starts, support_contacts, wall_order (default first_layers and bounds)",
+			"center":   "[x, y] in plate mm; for radius",
+			"min_run":  "run length in mm under which a run is short; for short_runs (default 1)",
+			"detail":   "summary (default): one row per object and feature; per_layer: every layer too",
+			"page":     "page number, starting at 1 (default 1)",
+		},
+	},
 	"get_slice_report": {
-		Description: `Read the result of the last slice of a plate: summary, filaments (grams, mm, cm3 per tool), objects (labels and boxes), layers (count and heights), one layer (extrusion by feature, with a picture) or settings (values that differ from the process preset). A report older than the project says so. Slice first with slice_project.`,
+		Description: `Read the result of the last slice of a plate: summary, filaments (grams, mm, cm3 per tool), objects (labels and boxes), layers (count and heights), one layer (extrusion by feature, with a picture) or settings (values that differ from the process preset, then the plate, object, part and height range settings as they were when sliced). A report older than the project says so. Slice first with slice_project.`,
 		Params: map[string]string{
 			"plate":    "plate, starting at 1 (default 1)",
 			"section":  "summary (default), filaments, objects, layers, layer or settings",

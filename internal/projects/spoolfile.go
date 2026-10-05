@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // spoolMember is the 3MF member an export carries the CFS spool links in, so
@@ -40,7 +41,7 @@ func withSpoolMember(data []byte, links []SpoolLink) ([]byte, error) {
 		}
 	}
 	if len(links) > 0 {
-		w, err := zw.Create(spoolMember)
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: spoolMember, Method: zip.Deflate, Modified: time.Now()})
 		if err != nil {
 			return nil, err
 		}

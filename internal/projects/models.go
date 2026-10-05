@@ -47,6 +47,13 @@ type AddModelRequest struct {
 	// Objects names the objects of a .3mf input to take (case insensitive); empty
 	// takes them all. An unknown name is an error that lists the names of the file.
 	Objects []string
+	// Names gives the objects taken from the file their names, one per object in
+	// file order (after Objects filtering); they win over the names of the file.
+	Names []string
+	// KeepPositions keeps the XY of the file: the centre of each object's
+	// bounding box in file coordinates is its centre on the plate. No automatic
+	// placement; Z still drops to the bed.
+	KeepPositions bool
 }
 
 // AddModelResult reports the objects that were added.
@@ -89,13 +96,28 @@ func loadModel(path string) ([]mesh.Placed, error) {
 		// model file: take them from there when the items line up.
 		if sp, oerr := threemf.Open(path); oerr == nil {
 			if sp.IsSlicerProject && len(sp.Items) == len(items) {
+				w, d := bedSize(sp.Settings)
+				seen := map[int]int{}
 				for i, it := range sp.Items {
 					if o := sp.Object(it.ObjectID); o != nil && o.Name != "" {
-						items[i].Name = o.Name
+						items[i].Name, items[i].Unnamed = o.Name, false
 					}
+					// The plate the item sits on gives the origin its file coordinates are
+					// measured from (a slicer project lays its plates side by side).
+					if pl := sp.PlateOf(it.ObjectID, seen[it.ObjectID]); pl != nil && w > 0 {
+						items[i].Origin = threemf.PlateOrigin(pl.Index, len(sp.Plates), w, d)
+					}
+					seen[it.ObjectID]++
 				}
 			}
 			sp.Close()
+		}
+		// An object the file does not name (FreeCAD exports carry no names) gets
+		// the file name and its place in the file: "bracket 1", "bracket 2".
+		for i := range items {
+			if items[i].Unnamed {
+				items[i].Name, items[i].Unnamed = fmt.Sprintf("%s %d", name, i+1), false
+			}
 		}
 		return items, nil
 	default:
@@ -208,6 +230,16 @@ func (h *handle) findSpot(plate int, w, d float64, taken []rect) (cx, cy float64
 	return 0, 0, false
 }
 
+// bedSize is the width and depth of the printable area in whole millimetres
+// (0 when the settings do not say), as the plate layout uses it.
+func bedSize(cfg *threemf.Config) (w, d float64) {
+	if cfg == nil {
+		return 0, 0
+	}
+	b := bedOf(cfg)
+	return math.Round(b.X1 - b.X0), math.Round(b.Y1 - b.Y0)
+}
+
 func linearFor(scale [3]float64, rot [3]float64) mesh.Matrix {
 	return mesh.Compose(mesh.Scale(scale[0], scale[1], scale[2]), eulerMatrix(rot[0], rot[1], rot[2]))
 }
@@ -230,9 +262,25 @@ func (s *Store) AddModel(ref string, req AddModelRequest) (*AddModelResult, erro
 			return nil, err
 		}
 	}
+	if len(req.Names) > 0 && len(req.Names) != len(items) {
+		var have []string
+		for _, it := range items {
+			have = append(have, it.Name)
+		}
+		return nil, invalidf("give one name per object, in file order: "+strings.Join(have, "; "), "names has %d entries but %d object(s) are taken from the file", len(req.Names), len(items))
+	}
+	for i, n := range req.Names {
+		if strings.TrimSpace(n) == "" {
+			return nil, invalidf("every name needs text", "name %d is empty", i+1)
+		}
+		items[i].Name = strings.TrimSpace(n)
+	}
 	copies := req.Copies
 	if copies == 0 {
 		copies = 1
+	}
+	if req.KeepPositions && (req.X != nil || req.Y != nil || copies > 1) {
+		return nil, invalidf("keep_positions places every object where the file has it: leave out position and copies", "keep_positions cannot go with position or copies above 1")
 	}
 	if copies < 1 {
 		return nil, invalidf("", "copies must be at least 1")
@@ -289,8 +337,11 @@ func (s *Store) AddModel(ref string, req AddModelRequest) (*AddModelResult, erro
 		if plateFor != 0 && h.p.Plate(plateFor) == nil {
 			return notFoundf("call get_project to see the plates", "project %s has no plate %d", h.id, plateFor)
 		}
-		for _, it := range items {
+		for i, it := range items {
 			base := req.Name
+			if len(req.Names) > 0 {
+				base = req.Names[i]
+			}
 			if base == "" {
 				base = it.Name
 			}
@@ -321,8 +372,11 @@ func (s *Store) AddModel(ref string, req AddModelRequest) (*AddModelResult, erro
 				}
 				plate := plateFor
 				var cx, cy float64
-				if req.X != nil {
-					cx, cy = *req.X, *req.Y
+				if req.X != nil || req.KeepPositions {
+					cx, cy = c[0]-it.Origin[0], c[1]-it.Origin[1] // keep_positions: the file's own XY, plate relative
+					if req.X != nil {
+						cx, cy = *req.X, *req.Y
+					}
 					if plate == 0 {
 						plate = 1
 					}
@@ -688,6 +742,9 @@ func (s *Store) AddModifier(ref string, req ModifierRequest) (*ModifierResult, e
 				continue
 			}
 			if opt, ok := h.validate(key, v, catalog.ScopePart, false, &errs); ok {
+				if key == "extruder" {
+					h.checkExtruder(key, opt, v, 0, &errs)
+				}
 				cfgKV.Set(key, objectValue(opt, v))
 			}
 		}

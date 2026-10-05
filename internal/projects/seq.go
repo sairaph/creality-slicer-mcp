@@ -228,6 +228,16 @@ func (h *handle) plateFilamentCount(plate int) int {
 	for _, in := range pl.Instances {
 		if o := h.p.Object(in.ObjectID); o != nil {
 			slots[max(o.Extruder(), 1)] = true
+			for _, p := range o.Parts {
+				if n := atoi0(p.Config.Value("extruder")); n > 0 {
+					slots[n] = true
+				}
+			}
+			for _, r := range o.LayerRanges {
+				if n := atoi0(r.Options.Value("extruder")); n > 0 {
+					slots[n] = true
+				}
+			}
 		}
 	}
 	return len(slots)

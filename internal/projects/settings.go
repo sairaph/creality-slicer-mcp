@@ -1,6 +1,7 @@
 package projects
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -26,6 +27,10 @@ type SettingsRequest struct {
 	// "object/part" (part id or name); a height range as "object/N" (N from 1);
 	// a plate number. Empty for the project scope.
 	Target string
+	// Targets is Target for several objects, parts, height ranges or plates of
+	// one scope (exclusive with Target): all are checked, and nothing changes
+	// unless every one passes; one revision.
+	Targets []string
 	// Values maps setting keys to values: string, number, bool or a list for
 	// vector settings. nil removes the override.
 	Values      map[string]any
@@ -158,21 +163,54 @@ func (s *Store) UpdateSettings(ref string, req SettingsRequest) (*SettingsResult
 		return nil, invalidf("give values: {key: value}", "no settings given")
 	}
 	res := &SettingsResult{}
+	if len(req.Targets) > 0 {
+		if req.Target != "" {
+			return nil, invalidf("give target or targets, not both", "target and targets contradict each other")
+		}
+		if scope == ScopeProject {
+			return nil, invalidf("targets applies to the object, part, layer_range and plate scopes", "the project scope has no targets")
+		}
+	}
 	err := s.write(ref, func(h *handle) error {
 		var err error
-		switch scope {
-		case ScopeProject:
-			err = h.updateProject(req, res)
-		case ScopeObject:
-			err = h.updateObject(req, res)
-		case ScopePart:
-			err = h.updatePart(req, res)
-		case ScopeLayerRange:
-			err = h.updateRange(req, res)
-		case ScopePlate:
-			err = h.updatePlate(req, res)
-		default:
-			err = invalidf("scopes: project, object, part, layer_range, plate", "unknown scope %q", scope)
+		one := func(r SettingsRequest) error {
+			switch scope {
+			case ScopeProject:
+				return h.updateProject(r, res)
+			case ScopeObject:
+				return h.updateObject(r, res)
+			case ScopePart:
+				return h.updatePart(r, res)
+			case ScopeLayerRange:
+				return h.updateRange(r, res)
+			case ScopePlate:
+				return h.updatePlate(r, res)
+			}
+			return invalidf("scopes: project, object, part, layer_range, plate", "unknown scope %q", scope)
+		}
+		if len(req.Targets) == 0 {
+			err = one(req)
+		} else {
+			seen := map[string]bool{}
+			for _, t := range req.Targets {
+				t = strings.TrimSpace(t)
+				if t == "" || seen[t] {
+					continue
+				}
+				seen[t] = true
+				r := req
+				r.Target, r.Targets = t, nil
+				if err = one(r); err != nil {
+					// A whole call is one change: the first target that fails stops it
+					// and the file is not saved.
+					var ae *Error
+					if errors.As(err, &ae) {
+						ae.Message = fmt.Sprintf("target %q: %s", t, ae.Message)
+					}
+					break
+				}
+			}
+			res.Warnings = dedupeStrings(res.Warnings)
 		}
 		if err == nil && !res.effective() {
 			// Nothing changes: the project is not saved and its revision stays.
@@ -189,6 +227,19 @@ func (s *Store) UpdateSettings(ref string, req SettingsRequest) (*SettingsResult
 		return ierr
 	})
 	return res, err
+}
+
+// dedupeStrings drops repeated entries, keeping the first of each.
+func dedupeStrings(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func sortedValueKeys(m map[string]any) []string {
@@ -223,6 +274,22 @@ func (h *handle) validate(key string, v any, scope catalog.Scope, allowLocked bo
 }
 
 func label(o *catalog.Option) string { return o.Title() }
+
+// checkExtruder checks a filament number against the project's filaments: min 1
+// for an object, min 0 for a part or a height range (0 = the object's own).
+func (h *handle) checkExtruder(key string, opt *catalog.Option, v any, min int, errs *keyErrors) {
+	nfil := 1
+	if h.p.Settings != nil {
+		nfil = len(h.p.Settings.List("filament_settings_id"))
+	}
+	if n, err := strconv.Atoi(objectValue(opt, v)); err != nil || n < min || n > nfil {
+		hint := fmt.Sprintf("the project has %d filament(s); use a number from %d to %d", nfil, min, nfil)
+		if min == 0 {
+			hint += " (0 is the object's own filament)"
+		}
+		errs.add(key, hint)
+	}
+}
 
 // updateProject changes project_settings.config.
 func (h *handle) updateProject(req SettingsRequest, res *SettingsResult) error {
@@ -528,10 +595,6 @@ func (h *handle) updateObject(req SettingsRequest, res *SettingsResult) error {
 		return err
 	}
 	var errs keyErrors
-	nfil := 1
-	if h.p.Settings != nil {
-		nfil = len(h.p.Settings.List("filament_settings_id"))
-	}
 	opts := map[string]*catalog.Option{}
 	for _, key := range sortedValueKeys(req.Values) {
 		opt, ok := h.validate(key, req.Values[key], catalog.ScopeObject, req.AllowLocked, &errs)
@@ -540,9 +603,7 @@ func (h *handle) updateObject(req SettingsRequest, res *SettingsResult) error {
 		}
 		opts[key] = opt
 		if key == "extruder" && req.Values[key] != nil {
-			if n, err := strconv.Atoi(objectValue(opt, req.Values[key])); err != nil || n < 1 || n > nfil {
-				errs.add(key, fmt.Sprintf("the project has %d filament(s); use a number from 1 to %d", nfil, nfil))
-			}
+			h.checkExtruder(key, opt, req.Values[key], 1, &errs)
 		}
 	}
 	if err := errs.err("call describe_setting for the valid values of a setting"); err != nil {
@@ -589,6 +650,9 @@ func (h *handle) updatePart(req SettingsRequest, res *SettingsResult) error {
 	for _, key := range sortedValueKeys(req.Values) {
 		if opt, ok := h.validate(key, req.Values[key], catalog.ScopePart, req.AllowLocked, &errs); ok {
 			opts[key] = opt
+			if key == "extruder" && req.Values[key] != nil {
+				h.checkExtruder(key, opt, req.Values[key], 0, &errs)
+			}
 		}
 	}
 	if err := errs.err("call describe_setting for the valid values of a setting"); err != nil {
@@ -635,6 +699,9 @@ func (h *handle) updateRange(req SettingsRequest, res *SettingsResult) error {
 	for _, key := range sortedValueKeys(req.Values) {
 		if opt, ok := h.validate(key, req.Values[key], catalog.ScopeLayerRange, req.AllowLocked, &errs); ok {
 			opts[key] = opt
+			if key == "extruder" && req.Values[key] != nil {
+				h.checkExtruder(key, opt, req.Values[key], 0, &errs)
+			}
 		}
 	}
 	if err := errs.err("call describe_setting for the valid values of a setting"); err != nil {

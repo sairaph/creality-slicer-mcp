@@ -499,6 +499,14 @@ func (b *Build) assemble() *Catalog {
 			e.Scopes.PerPartOrMod = inPrint && inReg
 			e.Scopes.PerLayerRange = inPrint && (inReg || o.Key == "layer_height")
 			e.Scopes.PerPlate = plateList.Has(o.Key)
+			// extruder is not in any Tab key set: the object list sets it on the
+			// object config, on the config of every part and modifier, and in each
+			// layer config range (GUI_ObjectList.cpp: update_objects_list_filament_column,
+			// change_part_extruder, the layer range cases around 880-1020; read back
+			// by Print.cpp 1059 and 1254 for ranges). Hence an explicit addition.
+			if o.Key == "extruder" {
+				e.Scopes.PerObject, e.Scopes.PerPartOrMod, e.Scopes.PerLayerRange = true, true, true
+			}
 			for _, l := range e.GuiLocations {
 				if l.Tab == "process" && e.Scopes.PerObject {
 					e.Scopes.ShownPerObject = true

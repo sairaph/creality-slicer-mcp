@@ -14,7 +14,7 @@ import (
 // topics23 are the topics of get_guide in 23-tools-spec.md, sorted.
 var topics23 = []string{
 	"calibration", "glossary", "gui-handoff", "k2-combo", "modifiers-and-ranges", "multi-plate",
-	"multicolor-cfs", "speed-vs-quality", "start", "strength", "supports", "surface-quality", "troubleshooting",
+	"multicolor-cfs", "speed-vs-quality", "start", "strength", "supports", "surface-quality", "thin-features", "troubleshooting",
 }
 
 func TestEveryTopicOf23ExistsAndIsWellFormed(t *testing.T) {
@@ -83,7 +83,7 @@ var guideTools = []string{
 	"list_presets", "get_preset", "create_project", "open_project", "list_projects", "get_project",
 	"add_model", "update_object", "remove_object", "update_settings", "set_presets", "add_modifier",
 	"set_height_ranges", "set_layer_actions", "manage_plates", "export_project", "delete_project",
-	"slice_project", "get_slice_status", "get_slice_report", "get_view", "remove_part", "open_in_app",
+	"slice_project", "get_slice_status", "get_slice_report", "get_view", "remove_part", "open_in_app", "group_objects", "analyze_toolpaths",
 	// The creality-k2-mcp server.
 	"upload_gcode_file", "get_filaments", "start_print", "exclude_object", "list_printers",
 }
@@ -110,6 +110,8 @@ var guideWords = []string{
 	// Values of enum parameters (kind, action type, support style, seam).
 	"layer_range", "negative_part", "support_enforcer", "support_blocker", "color_change", "tool_change",
 	"tree_slim", "tree_strong", "tree_hybrid", "aligned_back",
+	// Measure values and parameters of analyze_toolpaths.
+	"first_layers", "unsupported_starts", "short_runs", "support_contacts", "wall_order", "min_run", "per_layer",
 }
 
 var snake = regexp.MustCompile(`\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b`)

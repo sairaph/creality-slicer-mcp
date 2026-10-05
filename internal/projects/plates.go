@@ -219,6 +219,9 @@ func (s *Store) SetHeightRangesDetailed(ref, object string, ranges []RangeSpec) 
 					continue
 				}
 				if opt, ok := h.validate(key, v, catalog.ScopeLayerRange, false, &errs); ok {
+					if key == "extruder" {
+						h.checkExtruder(key, opt, v, 0, &errs)
+					}
 					lr.Options.Set(key, objectValue(opt, v))
 				}
 			}

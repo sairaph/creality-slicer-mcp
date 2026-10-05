@@ -77,6 +77,17 @@ func (h *handle) plateObjectsUseOneFilament(plate int) bool {
 	return true
 }
 
+// layerFilamentChanges counts the tool changes stored as layer actions of a plate.
+func (h *handle) layerFilamentChanges(plate int) int {
+	n := 0
+	for _, it := range h.p.CustomGCodes(plate).Items {
+		if it.Type == threemf.GCodeToolChange {
+			n++
+		}
+	}
+	return n
+}
+
 // purgeWarning is the note of a sliced plate that printed several filaments by
 // layer: how much of the material went into the prime tower and the flush, and
 // whether printing by object would avoid it. Empty when there is no waste.
@@ -91,7 +102,10 @@ func (h *handle) purgeWarning(plate int, pr PlateResult) string {
 	}
 	msg := fmt.Sprintf("Purge waste %.1f g of %.1f g (%.0f%%): prime tower %.1f g + flush %.1f g over %d filament changes%s.",
 		waste, pr.TotalG, 100*waste/pr.TotalG, pr.PrimeTowerG, pr.FlushG, pr.FlushChanges, est)
-	if h.plateObjectsUseOneFilament(plate) {
+	if n := h.layerFilamentChanges(plate); n > 0 && len(h.p.Plate(plate).Instances) == 1 {
+		// One object: the changes are the layer actions, by object changes nothing.
+		msg += fmt.Sprintf(" The waste comes from the %d layer filament change(s) of this plate: fewer changes, or a smaller flush_multiplier or flush matrix, reduce it. Printing by object does not apply to one object.", n)
+	} else if h.plateObjectsUseOneFilament(plate) {
 		need := 2 * h.seqHalf(h.seqBoxes(plate))
 		msg += fmt.Sprintf(" Each object here uses one filament, so printing by object removes the prime tower and most of this flush (a change between objects that use different filaments still flushes): update_settings {\"scope\":\"plate\",\"target\":\"%d\",\"values\":{\"print_sequence\":\"by object\"}} then slice_project with arrange true (by-object needs about %.0f mm between objects).", plate, need)
 	} else {

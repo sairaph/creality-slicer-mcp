@@ -54,6 +54,7 @@ func init() {
 func (s *Server) registerEditTools() {
 	addTool(s.mcpServer, "add_model", withRange(withItemRange(withItemRange(inputSchema[addModelInput](map[string]string{"copies": "1", "include_screenshot": "true"}), "position", 2, 3), "rotation", 3, 3), 1, 1e6, "copies"), s.addModel)
 	addTool(s.mcpServer, "update_object", withItemRange(withItemRange(inputSchema[updateObjectInput](map[string]string{"include_screenshot": "true"}), "position", 2, 3), "rotation", 3, 3), s.updateObject)
+	addTool(s.mcpServer, "group_objects", withMinItems(inputSchema[groupObjectsInput](map[string]string{"include_screenshot": "true"}), "objects", 2), s.groupObjects)
 	addTool(s.mcpServer, "remove_object", inputSchema[removeObjectInput](map[string]string{"include_screenshot": "true"}), s.removeObject)
 	addTool(s.mcpServer, "remove_part", inputSchema[removePartInput](map[string]string{"include_screenshot": "true"}), s.removePart)
 	addTool(s.mcpServer, "update_settings", withEnum(inputSchema[updateSettingsInput](map[string]string{"scope": `"project"`, "allow_locked": "false"}), "scope", "project", "object", "part", "layer_range", "plate"), s.updateSettings)
@@ -101,6 +102,8 @@ type addModelInput struct {
 	Name              *string    `json:"name,omitempty"`
 	Copies            *int       `json:"copies,omitempty"`
 	Objects           []string   `json:"objects,omitempty"`
+	Names             []string   `json:"names,omitempty"`
+	KeepPositions     *bool      `json:"keep_positions,omitempty"`
 	IncludeScreenshot *bool      `json:"include_screenshot,omitempty"`
 }
 
@@ -128,7 +131,7 @@ func (s *Server) addModel(ctx context.Context, _ *mcp.CallToolRequest, in addMod
 	if fail != nil {
 		return fail, nil, nil
 	}
-	req := projects.AddModelRequest{Path: in.Path, Name: deref(in.Name), Rotation: rot3(in.Rotation), LayFlat: false, Objects: in.Objects}
+	req := projects.AddModelRequest{Path: in.Path, Name: deref(in.Name), Rotation: rot3(in.Rotation), LayFlat: false, Objects: in.Objects, Names: in.Names, KeepPositions: boolOr(in.KeepPositions, false)}
 	req.X, req.Y, req.Z = xyz(in.Position)
 	if in.Plate != nil {
 		req.Plate = *in.Plate
@@ -251,6 +254,7 @@ type updateSettingsInput struct {
 	Project     string         `json:"project"`
 	Scope       *string        `json:"scope,omitempty"`
 	Target      *string        `json:"target,omitempty"`
+	Targets     []string       `json:"targets,omitempty"`
 	Values      map[string]any `json:"values"`
 	AllowLocked *bool          `json:"allow_locked,omitempty"`
 }
@@ -279,7 +283,7 @@ func (s *Server) updateSettings(ctx context.Context, _ *mcp.CallToolRequest, in 
 		scope = "project"
 	}
 	res, err := be.Store.UpdateSettings(in.Project, projects.SettingsRequest{
-		Scope: scope, Target: strings.TrimSpace(deref(in.Target)), Values: in.Values, AllowLocked: boolOr(in.AllowLocked, false),
+		Scope: scope, Target: strings.TrimSpace(deref(in.Target)), Targets: in.Targets, Values: in.Values, AllowLocked: boolOr(in.AllowLocked, false),
 	})
 	if err != nil {
 		return projFailure(err), nil, nil
@@ -300,13 +304,29 @@ func (s *Server) updateSettings(ctx context.Context, _ *mcp.CallToolRequest, in 
 		b.WriteString("Nothing changed: every value was already set.\n")
 	} else {
 		fmt.Fprintf(&b, "Changed %d setting(s) at %s scope:\n", len(changed), scope)
+		// With several targets the changes are grouped under their target.
+		last := "\x00"
+		var order []string
+		byTarget := map[string][]projects.Change{}
 		for _, c := range changed {
-			front.Changed = append(front.Changed, settingChangeText(c))
-			label := ""
-			if c.Label != "" && c.Label != c.Key {
-				label = " (" + c.Label + ")"
+			if _, ok := byTarget[c.Target]; !ok {
+				order = append(order, c.Target)
 			}
-			fmt.Fprintf(&b, "- %s%s\n", settingChangeText(c), label)
+			byTarget[c.Target] = append(byTarget[c.Target], c)
+		}
+		for _, t := range order {
+			if len(order) > 1 && t != last {
+				fmt.Fprintf(&b, "%s:\n", orDash(t))
+			}
+			last = t
+			for _, c := range byTarget[t] {
+				front.Changed = append(front.Changed, settingChangeText(c))
+				label := ""
+				if c.Label != "" && c.Label != c.Key {
+					label = " (" + c.Label + ")"
+				}
+				fmt.Fprintf(&b, "- %s%s\n", settingChangeText(c), label)
+			}
 		}
 	}
 	if len(same) > 0 {

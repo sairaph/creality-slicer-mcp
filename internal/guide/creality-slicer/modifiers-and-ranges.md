@@ -50,6 +50,8 @@ Ranges must not overlap. A range can change `layer_height` and the region settin
 
 ## Layer actions
 
+Filament per part or range: `extruder` is a setting at part and layer_range scope (0 = the object's own); set it with update_settings, or in set_height_ranges `settings`. To print parts of one model in different colours, group_objects merges objects into one with a filament per part.
+
 set_layer_actions changes what happens at a height, per plate: `pause`, `color_change` or `tool_change` (both with `filament`, the slot to switch to) or `custom` (with `gcode`). The K2 has no colour change G-code, so a `color_change` is stored as a `tool_change`: the CFS switches spools by itself, which needs two or more filaments. The app applies such changes only when every object on the plate uses one filament; with mixed filaments they do nothing (the reply warns): give those objects a plate of their own. Give `z` or a `layer` number; layers are converted using the layer heights. A pause lets you insert a magnet or change material by hand; the printer waits until resumed. The slice reply lists the pauses, colour changes and custom G-code it found in the G-code, by height, so you can confirm they were written.
 
 ```json

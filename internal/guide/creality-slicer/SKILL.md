@@ -37,6 +37,7 @@ Written for Creality Print 7.2 or 7.3 and the K2 family. Call the tools by their
 | `supports` | When and how to enable supports |
 | `strength` | Walls, infill and where to spend material |
 | `surface-quality` | Seams, layer height, ironing, fuzzy skin |
+| `thin-features` | Tines, teeth, tips: wall choice, mid-air starts, tip dots, field results |
 | `speed-vs-quality` | Trading time for quality |
 | `modifiers-and-ranges` | Per-object, per-part and per-height settings |
 | `multi-plate` | Several plates in one project |

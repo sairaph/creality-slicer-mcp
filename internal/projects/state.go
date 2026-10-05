@@ -46,6 +46,8 @@ type PlateInfo struct {
 // RangeInfo is one height range of an object.
 type RangeInfo struct {
 	From, To float64
+	// Filament is the slot the range prints with, 0 when it uses the object's.
+	Filament int
 	Settings map[string]string
 }
 
@@ -56,6 +58,9 @@ type PartInfo struct {
 	Subtype   string
 	Overrides int
 	Painted   bool
+	// Filament is the filament slot set on the part (its extruder), 0 when it
+	// uses the object's.
+	Filament int
 	// Size and Center are the extent and the centre of a modifier, negative
 	// part, support enforcer or support blocker on its plate, in mm (zero for
 	// a normal part).
@@ -96,12 +101,15 @@ type Warning struct {
 
 // Info is the state of a project, the "project fields" of the tool replies.
 type Info struct {
-	ID         string
-	Name       string
-	Revision   int
-	Created    time.Time
-	Updated    time.Time
-	SourcePath string
+	// BedTypeFromApp is set by create_project when the bed type is the one
+	// Creality Print last used for the printer (not stored in the project).
+	BedTypeFromApp bool
+	ID             string
+	Name           string
+	Revision       int
+	Created        time.Time
+	Updated        time.Time
+	SourcePath     string
 	// AppVersion is the version of the application that wrote the file.
 	AppVersion string
 	Printer    string
@@ -374,10 +382,11 @@ func (h *handle) objectInfo(o *threemf.Object, geo geometry) ObjectInfo {
 		for _, kv := range lr.Options {
 			ri.Settings[kv.Key] = kv.Value
 		}
+		ri.Filament = atoi0(lr.Options.Value("extruder"))
 		oi.HeightRanges = append(oi.HeightRanges, ri)
 	}
 	for _, part := range o.Parts {
-		oi.Parts = append(oi.Parts, PartInfo{ID: part.ID, Name: part.Name, Subtype: part.Subtype, Overrides: overrideCount(part.Config), Painted: part.Mesh.Painted.Any()})
+		oi.Parts = append(oi.Parts, PartInfo{ID: part.ID, Name: part.Name, Subtype: part.Subtype, Overrides: overrideCount(part.Config), Painted: part.Mesh.Painted.Any(), Filament: atoi0(part.Config.Value("extruder"))})
 		if part.Subtype == threemf.SubtypeNormal {
 			oi.Triangles += part.Mesh.Triangles
 		}

@@ -146,7 +146,7 @@ var specTools = []string{
 	"list_presets", "get_preset", "create_project", "open_project", "list_projects", "get_project",
 	"add_model", "update_object", "remove_object", "remove_part", "update_settings", "set_presets", "add_modifier",
 	"set_height_ranges", "set_layer_actions", "manage_plates", "export_project", "delete_project",
-	"slice_project", "get_slice_status", "get_slice_report", "get_view", "open_in_app",
+	"slice_project", "get_slice_status", "get_slice_report", "get_view", "open_in_app", "group_objects", "analyze_toolpaths",
 }
 
 // k2Tools are the creality-k2-mcp tools and parameters the guide and the
@@ -157,7 +157,7 @@ var k2Tools = []string{
 	// Fields of the slice result the guide names.
 	"gcode_path", "upload_name", "exclude_names", "time_s", "time_text", "total_g", "slicer_error",
 	// Values of enum parameters and an example object label.
-	"layer_range", "negative_part", "support_enforcer", "support_blocker", "color_change", "tool_change",
+	"layer_range", "negative_part", "support_enforcer", "support_blocker", "color_change", "tool_change", "first_layers", "unsupported_starts", "short_runs", "support_contacts", "wall_order", "min_run", "per_layer",
 	"logo_plate1", "part_id_0_copy_0", "catalog_id", "spool_slot", "tree_slim", "tree_strong", "tree_hybrid", "aligned_back", "stl_id_0_copy_0", "multi_material",
 }
 

@@ -35,6 +35,7 @@ type Move struct {
 	Arc            bool
 	Clockwise      bool    // arcs only: G2
 	I, J           float64 // arcs only: centre offset from the start
+	P              float64 // arcs only: the P word, the number of full turns (0 when absent)
 }
 
 // apply interprets one G-code line, updates the state and, when the line moves
@@ -103,7 +104,7 @@ func (s *MotionState) set(line []byte) {
 }
 
 func (s *MotionState) move(line []byte, arc, cw bool) (Move, bool) {
-	var x, y, z, e, i, j float64
+	var x, y, z, e, i, j, pTurns float64
 	var hasX, hasY, hasZ, hasE bool
 	eachWord(line, func(letter byte, v float64) {
 		switch letter {
@@ -119,6 +120,8 @@ func (s *MotionState) move(line []byte, arc, cw bool) (Move, bool) {
 			i = v
 		case 'J':
 			j = v
+		case 'P':
+			pTurns = v
 		case 'F':
 			s.Feed = v
 		}
@@ -165,7 +168,7 @@ func (s *MotionState) move(line []byte, arc, cw bool) (Move, bool) {
 		X0: x0, Y0: y0, X1: s.X, Y1: s.Y, Z: s.Z,
 		Extruding: de > 0, E: de,
 		Feature: s.Feature, Tool: s.Tool, Speed: s.Feed,
-		Arc: arc, Clockwise: cw && arc, I: i, J: j,
+		Arc: arc, Clockwise: cw && arc, I: i, J: j, P: pTurns,
 	}, true
 }
 

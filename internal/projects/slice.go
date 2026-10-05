@@ -82,6 +82,9 @@ type PlateResult struct {
 	// PurgeWarning is the note about the purge waste of a multi-filament by-layer
 	// plate (see purgeWarning); empty when there is none.
 	PurgeWarning string
+	// Overrides are the plate, object, part and height range settings at the time
+	// of the slice (the project copy the slicer read is deleted).
+	Overrides *OverridesReport
 }
 
 // LastSlice is the record of the last successful slice, kept in job.json.
@@ -589,6 +592,9 @@ func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res
 		pr.PrimeTowerG, pr.PrimeTowerS = primeTower(file, sum)
 		pr.FlushG, pr.FlushChanges, pr.FlushEstimated = flushCost(file, sum, sp.Settings)
 		pr.PurgeWarning = snap.purgeWarning(plate, pr)
+		ov := &OverridesReport{Plate: plate}
+		snap.fillOverrides(ov)
+		pr.Overrides = ov
 		pr.Changes = sum.TotalFilamentChange
 		if pr.Changes == 0 {
 			uses := 0
@@ -845,6 +851,9 @@ func (s *Store) Report(ref string, plate int) (*SliceReport, error) {
 	}
 	if m.LastSlice == nil {
 		return nil, notFoundf("call slice_project first", "project %s has not been sliced", id)
+	}
+	if len(m.LastSlice.Plates) == 0 {
+		return nil, notFoundf("call slice_project first", "project %s has no sliced plate", id)
 	}
 	if plate == 0 {
 		plate = m.LastSlice.Plates[0].Plate

@@ -59,6 +59,9 @@ func (h *handle) highestSlot() (int, string) {
 				note(n, fmt.Sprintf("part %q of object %q", p.Name, o.Name))
 			}
 		}
+		for i, r := range o.LayerRanges {
+			note(atoi0(r.Options.Value("extruder")), fmt.Sprintf("height range %d of object %q", i+1, o.Name))
+		}
 	}
 	for _, pl := range h.p.Plates {
 		for _, it := range h.p.CustomGCodes(pl.Index).Items {

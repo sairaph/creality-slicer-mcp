@@ -176,6 +176,13 @@ func (s *Store) CreateProject(req CreateRequest) (*Info, error) {
 	if err := s.checkBedType(req.BedType); err != nil {
 		return nil, err
 	}
+	// Without a bed type the one Creality Print last used for this printer.
+	bedFromApp := false
+	if req.BedType == "" {
+		if bt, ok := s.appBedType(printer.Name); ok && s.checkBedType(bt) == nil {
+			req.BedType, bedFromApp = bt, true
+		}
+	}
 
 	in := composeInput{Cat: s.cfg.Catalog, Printer: printer, Process: process, Filaments: filaments, Colours: colours,
 		Version: s.version(), BedType: req.BedType, Plates: 1}
@@ -225,6 +232,9 @@ func (s *Store) CreateProject(req CreateRequest) (*Info, error) {
 	})
 	if err != nil {
 		return fail(err)
+	}
+	if bedFromApp {
+		info.BedTypeFromApp = true
 	}
 	return info, nil
 }

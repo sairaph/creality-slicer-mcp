@@ -182,6 +182,13 @@ func unitScale(unit string) float64 {
 type Placed struct {
 	Name string
 	Mesh *Mesh
+	// Unnamed is true when the file gives the object no name (Name is then
+	// "object <id>"); callers that know the file name can do better.
+	Unnamed bool
+	// Origin is the XY offset to subtract from the mesh's file coordinates to get
+	// plate relative ones: the origin of the plate the item sits on in a slicer
+	// project (zero for other files).
+	Origin [2]float64
 }
 
 // Read3MF reads every build item of a 3MF as one flattened mesh: components
@@ -274,10 +281,11 @@ func Read3MF(path string) ([]Placed, error) {
 		if len(m.Triangles) == 0 {
 			return nil
 		}
-		if name == "" {
+		unnamed := name == ""
+		if unnamed {
 			name = fmt.Sprintf("object %d", id)
 		}
-		placed = append(placed, Placed{Name: name, Mesh: m.Transformed(tr.Then(Scale(scale, scale, scale)))})
+		placed = append(placed, Placed{Name: name, Mesh: m.Transformed(tr.Then(Scale(scale, scale, scale))), Unnamed: unnamed})
 		return nil
 	}
 	if len(main.Items) == 0 {

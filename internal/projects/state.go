@@ -516,7 +516,14 @@ func (h *handle) warnings(in *Info, geo geometry) []Warning {
 			}
 		}
 	}
-	// Layer actions that cannot do what they say (PR5, verified with 7.3 on the
+	// With an empty change_filament_gcode the slicer writes only a bare T<n> for
+	// every filament change (GCode.cpp, the toolchange of the wipe tower code):
+	// the printer preset's own procedure (the K2's lifts, moves and purge around
+	// the T command) is missing, for layer filament changes and for the changes
+	// between objects alike.
+	if h.p.Settings != nil && len(in.Filaments) >= 2 && strings.TrimSpace(h.p.Settings.String("change_filament_gcode")) == "" {
+		add("change_filament_gcode_empty", "change_filament_gcode is empty and the project uses %d filaments: every filament change is written as a bare T command, without the printer preset's own change procedure (on the K2 that macro does the lift, the move and the purge around the change), so changes may fail or print badly; set it again with update_settings (get_preset shows the printer preset's value)", len(in.Filaments))
+	}
 	// K2: tool changes, pauses and custom G-code are honoured; a colour change
 	// writes nothing because the printer preset has no colour change G-code).
 	for _, pl := range in.Plates {
@@ -532,6 +539,9 @@ func (h *handle) warnings(in *Info, geo geometry) []Warning {
 			}
 			if a.Kind == ActionTemplate && h.p.Settings != nil && strings.TrimSpace(h.p.Settings.String("template_custom_gcode")) == "" {
 				add("template_gcode_empty", "the template action at layer %d on plate %d writes nothing: template_custom_gcode is empty; set it with update_settings", a.Layer, pl.Index)
+			}
+			if a.Kind == ActionPause && h.p.Settings != nil && strings.TrimSpace(h.p.Settings.String("machine_pause_gcode")) == "" {
+				add("pause_gcode_empty", "the pause at layer %d on plate %d writes only the ;PAUSE_PRINT marker: machine_pause_gcode is empty, so the printer will not pause; set it with update_settings (the printer preset's own value is PAUSE on the K2)", a.Layer, pl.Index)
 			}
 			if a.Kind == ActionColorChange {
 				add("color_change_no_gcode", "the colour change at layer %d on plate %d writes nothing: Creality Print 7.2 and 7.3 never write colour change G-code (the emitter is disabled), only tool changes; call set_layer_actions again with the same actions to store it as a filament (tool) change", a.Layer, pl.Index)

@@ -237,6 +237,7 @@ func (r *Runner) Run(ctx context.Context, req SliceRequest, opts ...RunOption) (
 			res.Ending = EndTimedOut
 			res.Outcome = Outcome{
 				Code:    OutcomeTimedOut,
+				Name:    OutcomeTimedOut,
 				Message: fmt.Sprintf("Creality Print did not finish within %s", cfg.timeout.Round(time.Second)),
 				Hint:    "Slice again with a longer timeout, or reduce the work (fewer objects or plates, a coarser layer height).",
 			}
@@ -291,7 +292,7 @@ func swapPlateFiles(work, dir string) ([]string, error) {
 }
 
 func cancelledOutcome() Outcome {
-	return Outcome{Code: OutcomeCanceled, Message: "the slice was stopped because the request was cancelled"}
+	return Outcome{Code: OutcomeCanceled, Name: OutcomeCanceled, Message: "the slice was stopped because the request was cancelled"}
 }
 
 // noOutputOutcome is the outcome of a run that exited 0 without writing the

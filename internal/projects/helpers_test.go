@@ -59,7 +59,7 @@ func writeBundle(t *testing.T, processExtra string) string {
 	}
 	printer := func(name, nozzle string) string {
 		return fmt.Sprintf(`{"type":"machine","name":%q,"from":"system","instantiation":"true","setting_id":"9%s",
-"printer_model":"Creality K2","printer_variant":%q,"nozzle_diameter":[%q],
+"printer_model":"Creality K2","printer_variant":%q,"machine_pause_gcode":"PAUSE","change_filament_gcode":"T[next_extruder]","nozzle_diameter":[%q],
 "printable_area":"0x0,260x0,260x260,0x260","printable_height":"250","nozzle_volume":"183",
 "enable_long_retraction_when_cut":"2","long_retractions_when_cut":"1","retraction_distances_when_cut":"30",
 "default_print_profile":%q,"default_filament_profile":[%q],"thumbnails":"96x96/PNG, 300x300/PNG"}`,

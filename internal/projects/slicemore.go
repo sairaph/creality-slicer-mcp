@@ -39,9 +39,11 @@ type ActionResult struct {
 	// the objects of the plate use several filaments (see layer_tool_change_ignored):
 	// the T lines the G-code has at that height are the objects' own swaps.
 	Ignored bool
-	// EmptyTemplate is true for a template action whose template_custom_gcode is
-	// empty: the slicer has nothing to write.
-	EmptyTemplate bool
+	// Empty names the setting that is empty when the action was written but
+	// does nothing: template_custom_gcode (a template), machine_pause_gcode (a
+	// pause) or change_filament_gcode (a tool change, which is then a bare T).
+	// Found is false then.
+	Empty string
 }
 
 // labelRE parses <name>_id_<n>_copy_<k>.
@@ -113,6 +115,8 @@ func scanActions(gcode string, actions []ActionInfo) []ActionResult {
 		tool int
 		text string
 		z    float64
+		// empty: a pause marker with no G-code after it
+		empty bool
 	}
 	var events []event
 	firstLine := func(a ActionInfo) string {
@@ -134,6 +138,7 @@ func scanActions(gcode string, actions []ActionInfo) []ActionResult {
 	z := 0.0
 	firstTool := true
 	afterMarker := false // the line before was ;CUSTOM_GCODE
+	afterPause := false  // the line before was ;PAUSE_PRINT
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		// 7.3 writes ;CUSTOM_GCODE and then the text of a custom action or the
@@ -141,12 +146,19 @@ func scanActions(gcode string, actions []ActionInfo) []ActionResult {
 		// line right after the marker counts: with an empty template it is a
 		// blank line, a comment (; OBJECT_ID) or an EXCLUDE_OBJECT line, and
 		// nothing was inserted. Other text that is no custom action is the template.
-		if afterMarker {
-			afterMarker = false
+		wasAfter, wasPause := afterMarker, afterPause
+		afterMarker, afterPause = false, false
+		if wasAfter {
 			if line != "" && !strings.HasPrefix(line, ";") && !strings.HasPrefix(line, "EXCLUDE_OBJECT") && !customs[line] &&
 				!strings.HasPrefix(line, "M600") && !toolLineRE.MatchString(line) {
 				events = append(events, event{kind: ActionTemplate, z: z})
 			}
+		}
+		if wasPause && (line == "" || strings.HasPrefix(line, ";")) {
+			// 7.3 writes ";PAUSE_PRINT" and then the processed machine_pause_gcode and
+			// a newline: with an empty machine_pause_gcode a blank line follows, and
+			// the printer is never told to pause.
+			events[len(events)-1].empty = true
 		}
 		if line == ";CUSTOM_GCODE" {
 			afterMarker = true
@@ -157,6 +169,7 @@ func scanActions(gcode string, actions []ActionInfo) []ActionResult {
 			z, _ = strconv.ParseFloat(zLineRE.FindStringSubmatch(line)[1], 64)
 		case line == ";PAUSE_PRINT":
 			events = append(events, event{kind: ActionPause, z: z})
+			afterPause = true
 		case strings.HasPrefix(line, "M600"):
 			events = append(events, event{kind: ActionColorChange, z: z})
 		case toolLineRE.MatchString(line):
@@ -166,7 +179,8 @@ func scanActions(gcode string, actions []ActionInfo) []ActionResult {
 				continue
 			}
 			events = append(events, event{kind: ActionToolChange, tool: tool + 1, z: z})
-		case customs[line]:
+		case customs[line] && wasAfter:
+			// the text itself, right after the marker (the same line elsewhere is not it)
 			events = append(events, event{kind: ActionCustom, text: line, z: z})
 		}
 	}
@@ -185,7 +199,11 @@ func scanActions(gcode string, actions []ActionInfo) []ActionResult {
 				continue
 			}
 			used[i] = true
-			r.Found, r.AtZ = true, e.z
+			if e.empty {
+				r.Empty, r.AtZ = "machine_pause_gcode", e.z
+			} else {
+				r.Found, r.AtZ = true, e.z
+			}
 			break
 		}
 		out = append(out, r)
@@ -330,6 +348,15 @@ func (s *Store) ExplainSettings(ref string, used map[string]string) ([]SettingDi
 		if diffs := cfg.List("different_settings_to_system"); len(diffs) > 0 {
 			for _, k := range strings.Split(diffs[0], ";") {
 				changed[k] = true
+			}
+		}
+		// A setting the user set on a plate (print sequence, bed type, spiral mode)
+		// is a change of this project too.
+		for _, pl := range h.p.Plates {
+			for _, e := range pl.Config {
+				if mapped, ok := plateOverrideKeys[e.Key]; ok && e.Value != "" {
+					changed[e.Key], changed[mapped] = true, true
+				}
 			}
 		}
 		env := condEnv{get: func(key string) (string, bool) { v, ok := used[key]; return v, ok }}

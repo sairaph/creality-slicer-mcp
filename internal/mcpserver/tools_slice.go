@@ -238,8 +238,11 @@ func sliceReply(info *projects.Info, last *projects.LastSlice, warnings []string
 	front.ElapsedS = round1(last.ElapsedS)
 	purgeNotes := last.PurgeNotes()
 	fmt.Fprintf(&b, "Sliced %d plate(s) from revision %d in %s.\n", len(last.Plates), last.Revision, elapsedText(last.ElapsedS))
-	for _, n := range purgeNotes {
-		b.WriteString(n + "\n")
+	// One list: the purge note first, then the others. The front matter holds
+	// exactly this list, and the body prints it right after the Sliced line.
+	front.Warnings = dedupe(append(append([]string(nil), purgeNotes...), front.Warnings...))
+	if len(front.Warnings) > 0 {
+		b.WriteString(strings.TrimPrefix(warningLines(front.Warnings), "\n") + "\n")
 	}
 	b.WriteString("\n")
 	b.WriteString("Plates (plate | time | grams | layers | upload name | G-code path):\n")
@@ -262,8 +265,8 @@ func sliceReply(info *projects.Info, last *projects.LastSlice, warnings []string
 				fmt.Fprintf(&actions, "%d | %s at layer %d (z %s mm) | ignored by Creality Print: the plate's objects use several filaments\n", p.Plate, kind, a.Layer, num(a.Z))
 			} else if a.Found {
 				fmt.Fprintf(&actions, "%d | %s at layer %d (z %s mm) | found in the G-code at z %s mm\n", p.Plate, kind, a.Layer, num(a.Z), num(a.AtZ))
-			} else if a.EmptyTemplate {
-				fmt.Fprintf(&actions, "%d | %s at layer %d (z %s mm) | wrote nothing: template_custom_gcode is empty\n", p.Plate, kind, a.Layer, num(a.Z))
+			} else if a.Empty != "" {
+				fmt.Fprintf(&actions, "%d | %s at layer %d (z %s mm) | %s\n", p.Plate, kind, a.Layer, num(a.Z), emptyActionText(a.Empty))
 			} else {
 				fmt.Fprintf(&actions, "%d | %s at layer %d (z %s mm) | not found in the G-code: it did nothing\n", p.Plate, kind, a.Layer, num(a.Z))
 			}
@@ -307,15 +310,7 @@ func sliceReply(info *projects.Info, last *projects.LastSlice, warnings []string
 	if front.Stale {
 		fmt.Fprintf(&b, "\nThe project changed after this slice (now revision %d): slice again for current results.\n", info.Revision)
 	}
-	var others []string // the purge notes are already at the top of the body
-	for _, w := range front.Warnings {
-		if !slices.Contains(purgeNotes, w) {
-			others = append(others, w)
-		}
-	}
-	if len(others) > 0 {
-		b.WriteString("\nWarnings:\n- " + strings.Join(others, "\n- ") + "\n")
-	}
+
 	b.WriteString("\n" + handoffText(front.Handoff))
 	return successResult(front, strings.TrimRight(b.String(), "\n"))
 }
@@ -574,8 +569,14 @@ func (s *Server) getSliceReport(ctx context.Context, _ *mcp.CallToolRequest, in 
 	switch section {
 	case "summary":
 		fmt.Fprintf(&b, "Plate %d: %s, %.1f g in total, %d layer(s), %d object(s), %s.\nG-code: %s\n", p.Plate, orDefault(p.TimeText, durText(p.TimeSeconds)), p.TotalG, p.Layers, len(p.ExcludeNames), fmtBytes(p.Bytes), p.GCodePath)
+		// The warnings come right after the summary line, the purge note first.
+		var ws []string
 		if p.PurgeWarning != "" {
-			b.WriteString(p.PurgeWarning + "\n")
+			ws = append(ws, p.PurgeWarning)
+		}
+		ws = dedupe(append(ws, rep.Warnings...))
+		if len(ws) > 0 {
+			b.WriteString(strings.TrimPrefix(warningLines(ws), "\n") + "\n")
 		}
 		for _, a := range p.Actions {
 			if a.Ignored {
@@ -589,9 +590,6 @@ func (s *Server) getSliceReport(ctx context.Context, _ *mcp.CallToolRequest, in 
 		}
 		if sm.Bounds != nil {
 			fmt.Fprintf(&b, "Bounds (mm): x %s to %s, y %s to %s, z 0 to %s.\n", num(sm.Bounds.MinX), num(sm.Bounds.MaxX), num(sm.Bounds.MinY), num(sm.Bounds.MaxY), num(sm.Bounds.MaxZ))
-		}
-		if len(rep.Warnings) > 0 {
-			b.WriteString("\nWarnings:\n- " + strings.Join(rep.Warnings, "\n- ") + "\n")
 		}
 		b.WriteString("\nNext: get_slice_report with section filaments, objects, layers, layer or settings; the handoff steps are in the slice_project reply.")
 	case "filaments":
@@ -914,7 +912,7 @@ func (s *Server) settingsDigest(ctx context.Context, be ProjectBackend, info *pr
 		var lines []string
 		for _, d := range diffs {
 			if d.Origin == g.origin {
-				lines = append(lines, fmt.Sprintf("%s: %s -> %s", d.Key, d.Preset, d.Used))
+				lines = append(lines, fmt.Sprintf("%s: %s -> %s", d.Key, shortValue(d.Preset), shortValue(d.Used)))
 				if g.origin == "app" {
 					lines[len(lines)-1] += " (" + strings.TrimPrefix(d.Why, "the app sets this automatically ") + ")"
 				}
@@ -1002,9 +1000,9 @@ func overridesDigest(be ProjectBackend, id string, plate int) string {
 	}
 	line := func(l projects.OverrideLine) string {
 		if l.Label != "" && l.Label != l.Key {
-			return fmt.Sprintf("%s: %s (%s)", l.Key, l.Value, l.Label)
+			return fmt.Sprintf("%s: %s (%s)", l.Key, shortValue(l.Value), l.Label)
 		}
-		return fmt.Sprintf("%s: %s", l.Key, l.Value)
+		return fmt.Sprintf("%s: %s", l.Key, shortValue(l.Value))
 	}
 	fil := func(n int) string {
 		if n > 0 {
@@ -1061,4 +1059,15 @@ func overridesDigest(be ProjectBackend, id string, plate int) string {
 		b.WriteString("None: no plate, object, part or height range overrides the project settings.\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// emptyActionText says why a layer action was written but does nothing.
+func emptyActionText(setting string) string {
+	switch setting {
+	case "machine_pause_gcode":
+		return "wrote nothing: machine_pause_gcode is empty (the printer will not pause)"
+	case "change_filament_gcode":
+		return "wrote only a bare T: change_filament_gcode is empty (the printer's filament change procedure is missing)"
+	}
+	return "wrote nothing: " + setting + " is empty"
 }

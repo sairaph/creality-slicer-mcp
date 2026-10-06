@@ -1,6 +1,7 @@
 package projects
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -264,5 +265,107 @@ func TestUnknownSliceJobIsNotFound(t *testing.T) {
 	for _, ref := range []string{"slice-deadbeef", "job-0"} {
 		_, err := e.st.SliceStatus(ref)
 		wantCode(t, err, CodeNotFound)
+	}
+}
+
+// A missing object or part is answered with the names that exist.
+func TestNotFoundHintsListTheNames(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Names")
+	e.addBox(t, info.ID, "alpha", 20, 20, 20)
+	e.addBox(t, info.ID, "beta", 20, 20, 20)
+	_, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: ScopeObject, Target: "gamma", Values: map[string]any{"wall_loops": 3}})
+	wantCode(t, err, CodeNotFound)
+	hint := AsError(err).Hint
+	if !strings.Contains(hint, `"alpha"`) || !strings.Contains(hint, `"beta"`) {
+		t.Errorf("object hint %q", hint)
+	}
+	_, err = e.st.RemovePart(info.ID, "alpha", "nothing")
+	wantCode(t, err, CodeNotFound)
+	if hint := AsError(err).Hint; !strings.Contains(hint, "parts of") || !strings.Contains(hint, `"alpha"`) {
+		t.Errorf("part hint %q", hint)
+	}
+	_, err = e.st.RemoveObject(info.ID, "zeta")
+	if hint := AsError(err).Hint; !strings.Contains(hint, `"beta"`) {
+		t.Errorf("remove_object hint %q", hint)
+	}
+}
+
+// A plate setting the user set (spiral_mode) is explained as a change of this
+// project, not listed among the differences nothing explains.
+func TestPlateLevelChangeIsExplained(t *testing.T) {
+	e := newEnvWith(t, `"spiral_mode":"0",`)
+	info := e.newProject(t, "Plate")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "plate", Target: "1", Values: map[string]any{"spiral_mode": true}}); err != nil {
+		t.Fatal(err)
+	}
+	diffs, err := e.st.ExplainSettings(info.ID, map[string]string{"spiral_mode": "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, d := range diffs {
+		if d.Key == "spiral_mode" {
+			found = true
+			if d.Origin == "other" {
+				t.Errorf("a plate setting is unexplained: %+v", d)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("spiral_mode is not compared: %+v", diffs)
+	}
+}
+
+// A filament number the project does not have is answered with the specific
+// hint, for extruder and for a role filament key alike.
+func TestFilamentRefusalHintIsSpecific(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Hint", FilamentSpec{Preset: testPLA, Colour: "#FFFFFF"})
+	e.addBox(t, info.ID, "box", 20, 20, 20)
+	for _, key := range []string{"extruder", "wall_filament", "sparse_infill_filament"} {
+		_, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "object", Target: "box", Values: map[string]any{key: 3}})
+		wantCode(t, err, CodeInvalidInput)
+		if h := AsError(err).Hint; !strings.Contains(h, "add a filament with set_presets") || strings.Contains(h, "describe_setting") {
+			t.Errorf("%s: hint %q", key, h)
+		}
+	}
+	// another problem next to it keeps the general hint
+	_, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "object", Target: "box", Values: map[string]any{"wall_filament": 3, "wall_loops": "many"}})
+	if h := AsError(err).Hint; !strings.Contains(h, "describe_setting") {
+		t.Errorf("mixed problems: hint %q", h)
+	}
+}
+
+func TestCompactNamesCollapsesRunsAndBoundsTheList(t *testing.T) {
+	var names []string
+	for i := 1; i <= 400; i++ {
+		names = append(names, fmt.Sprintf("cube20_%d", i))
+	}
+	if got := compactNames(names, 40); got != `"cube20_1" .. "cube20_400" (400)` {
+		t.Errorf("run: %s", got)
+	}
+	var mixed []string
+	for i := 0; i < 100; i++ {
+		mixed = append(mixed, fmt.Sprintf("part%c", 'a'+i%26)+strings.Repeat("x", i/26))
+	}
+	got := compactNames(mixed, 40)
+	if !strings.HasSuffix(got, "and 60 more: call get_project") || strings.Count(got, ", ") != 40 {
+		t.Errorf("bounded: %s", got)
+	}
+	if got := compactNames([]string{"a", "b2", "b3", "c"}, 40); got != `"a", "b2" .. "b3" (2), "c"` {
+		t.Errorf("mixed: %s", got)
+	}
+}
+
+func TestExtruderRefusalMessageAndHintDiffer(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Ext")
+	e.addBox(t, info.ID, "box", 20, 20, 20)
+	_, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "object", Target: "box", Values: map[string]any{"extruder": 9}})
+	ae := AsError(err)
+	if ae.Hint == "" || strings.Contains(ae.Message, ae.Hint) || !strings.Contains(ae.Hint, "set_presets") {
+		t.Errorf("message %q hint %q", ae.Message, ae.Hint)
 	}
 }

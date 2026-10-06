@@ -379,3 +379,98 @@ func TestTemplateActionWithEmptyTemplateWarnsAndSaysSo(t *testing.T) {
 		t.Fatalf("no warning: %+v", got.Warnings)
 	}
 }
+
+func TestFoundMeansTheContentIsThere(t *testing.T) {
+	g := filepath.Join(t.TempDir(), "f.gcode")
+	write := func(text string) {
+		t.Helper()
+		if err := os.WriteFile(g, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pause := []ActionInfo{{Layer: 2, Z: 0.4, Kind: ActionPause}}
+	// a pause with G-code after the marker, and one with only the marker
+	write(";Z:0.4\n;PAUSE_PRINT\nPAUSE\n;Z:0.6\n")
+	if r := scanActions(g, pause); !r[0].Found || r[0].Empty != "" {
+		t.Errorf("pause with G-code: %+v", r)
+	}
+	write(";Z:0.4\n;PAUSE_PRINT\n\n;Z:0.6\n")
+	if r := scanActions(g, pause); r[0].Found || r[0].Empty != "machine_pause_gcode" {
+		t.Errorf("a bare pause marker is not a pause: %+v", r)
+	}
+	// custom text counts only right after the marker
+	custom := []ActionInfo{{Layer: 2, Z: 0.4, Kind: ActionCustom, GCode: "M117 hi"}}
+	write(";Z:0.4\n;CUSTOM_GCODE\nM117 hi\n")
+	if r := scanActions(g, custom); !r[0].Found {
+		t.Errorf("custom text after its marker: %+v", r)
+	}
+	write(";Z:0.4\n;CUSTOM_GCODE\n\nM117 hi\n")
+	if r := scanActions(g, custom); r[0].Found {
+		t.Errorf("custom text away from its marker is not the action: %+v", r)
+	}
+	write(";Z:0.4\nM117 hi\n")
+	if r := scanActions(g, custom); r[0].Found {
+		t.Errorf("the same text with no marker: %+v", r)
+	}
+}
+
+// Through a slice: blank machine_pause_gcode and change_filament_gcode are named,
+// and the project warns.
+func TestEmptyPauseAndChangeMacroAreReported(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Macros")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Values: map[string]any{"machine_pause_gcode": "", "change_filament_gcode": ""}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.SetLayerActions(info.ID, 1, []LayerAction{{Layer: 3, Kind: ActionPause}, {Layer: 7, Kind: ActionToolChange, Filament: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.st.GetProject(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codes := map[string]string{}
+	for _, w := range got.Warnings {
+		codes[w.Code] = w.Message
+	}
+	if !strings.Contains(codes["pause_gcode_empty"], "machine_pause_gcode is empty") || !strings.Contains(codes["change_filament_gcode_empty"], "bare T") {
+		t.Fatalf("warnings %v", codes)
+	}
+	e.exec.gcode = func(int) string {
+		var b strings.Builder
+		b.WriteString(strings.Split(defaultGCode, "T0\n")[0] + "T0\n")
+		for layer, z := range []string{"0.2", "0.4", "0.6", "0.8", "1", "1.2", "1.4", "1.6"} {
+			b.WriteString(";LAYER_CHANGE\n;:" + z + "\n;HEIGHT:0.2\n")
+			switch layer {
+			case 2:
+				b.WriteString(";PAUSE_PRINT\n\n")
+			case 6:
+				b.WriteString("T1\n")
+			}
+		}
+		b.WriteString("; EXECUTABLE_BLOCK_END\n; filament used [g] = 1.00\n; estimated printing time (normal mode) = 1m 5s\n")
+		return b.String()
+	}
+	out, err := e.st.Slice(info.ID, SliceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range out.Last.Plates[0].Actions {
+		want := map[string]string{ActionPause: "machine_pause_gcode", ActionToolChange: "change_filament_gcode"}[a.Kind]
+		if a.Found || a.Empty != want {
+			t.Errorf("%s: %+v", a.Kind, a)
+		}
+	}
+	// one filament only: a blank change macro is no problem
+	one := e.newProject(t, "OneFil", FilamentSpec{Preset: testPLA, Colour: "#FFFFFF"})
+	if _, err := e.st.UpdateSettings(one.ID, SettingsRequest{Values: map[string]any{"change_filament_gcode": ""}}); err != nil {
+		t.Fatal(err)
+	}
+	g1, _ := e.st.GetProject(one.ID)
+	for _, w := range g1.Warnings {
+		if w.Code == "change_filament_gcode_empty" {
+			t.Error("warned with one filament")
+		}
+	}
+}

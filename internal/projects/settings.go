@@ -3,6 +3,7 @@ package projects
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -61,13 +62,29 @@ type SettingsResult struct {
 }
 
 // keyErrors collects one validation problem per key.
-type keyErrors struct{ list []string }
+type keyErrors struct {
+	list []string
+	// filHint is the hint of a filament number that does not exist; ext counts
+	// the problems of that kind. When every problem is one, it is the hint.
+	filHint string
+	ext     int
+}
 
 func (k *keyErrors) add(key, msg string) { k.list = append(k.list, fmt.Sprintf("%s: %s", key, msg)) }
+
+// addFilament records a filament number the project does not have.
+func (k *keyErrors) addFilament(key, msg, hint string) {
+	k.add(key, msg)
+	k.filHint = hint
+	k.ext++
+}
 
 func (k *keyErrors) err(hint string) error {
 	if len(k.list) == 0 {
 		return nil
+	}
+	if k.ext == len(k.list) {
+		hint = k.filHint
 	}
 	e := invalidf(hint, "%s", strings.Join(k.list, "; "))
 	e.Fields = map[string]any{"errors": k.list}
@@ -111,7 +128,7 @@ func (h *handle) objectByRef(ref string) (*threemf.Object, error) {
 	case 1:
 		return hits[0], nil
 	case 0:
-		return nil, notFoundf("call get_project to see the objects and their ids", "project %s has no object %q", h.id, ref)
+		return nil, notFoundf(h.objectNamesHint(), "project %s has no object %q", h.id, ref)
 	}
 	var ids []string
 	for _, o := range hits {
@@ -136,7 +153,61 @@ func (h *handle) partByRef(o *threemf.Object, ref string) (*threemf.Part, error)
 	if len(hits) == 1 {
 		return hits[0], nil
 	}
-	return nil, notFoundf("call get_project to see the parts", "object %q has no unique part %q", o.Name, ref)
+	names := make([]string, len(o.Parts))
+	for i, p := range o.Parts {
+		names[i] = fmt.Sprintf("%q", p.Name)
+	}
+	hint := "the parts of " + fmt.Sprintf("%q", o.Name) + " are " + strings.Join(names, ", ") + " (get_project shows them)"
+	if len(hits) > 1 {
+		hint = "several parts are named " + fmt.Sprintf("%q", ref) + ": use the part id; " + hint
+	}
+	return nil, notFoundf(hint, "object %q has no unique part %q", o.Name, ref)
+}
+
+// objectNamesHint lists the names of the project's objects as get_project shows
+// them, for the hint of an object that was not found.
+func (h *handle) objectNamesHint() string {
+	if len(h.p.Objects) == 0 {
+		return "the project has no objects: add_model adds one"
+	}
+	names := make([]string, len(h.p.Objects))
+	for i, o := range h.p.Objects {
+		names[i] = o.Name
+	}
+	return "the objects are " + compactNames(names, 40) + " (get_project shows them with their ids)"
+}
+
+var numberedRE = regexp.MustCompile(`^(.*?)(\d+)$`)
+
+// compactNames lists names for a hint: runs of numbered names (cube_1, cube_2,
+// ...) collapse to "cube_1 .. cube_400 (400)", and after maxEntries entries the
+// rest is counted. It bounds what the hint shows, not any data.
+func compactNames(names []string, maxEntries int) string {
+	var entries []string
+	for i := 0; i < len(names); {
+		j := i
+		m := numberedRE.FindStringSubmatch(names[i])
+		if m != nil {
+			for j+1 < len(names) {
+				n := numberedRE.FindStringSubmatch(names[j+1])
+				if n == nil || n[1] != m[1] {
+					break
+				}
+				j++
+			}
+		}
+		if j > i {
+			entries = append(entries, fmt.Sprintf("%q .. %q (%d)", names[i], names[j], j-i+1))
+		} else {
+			entries = append(entries, fmt.Sprintf("%q", names[i]))
+		}
+		i = j + 1
+	}
+	if len(entries) > maxEntries {
+		rest := len(entries) - maxEntries
+		entries = append(entries[:maxEntries], fmt.Sprintf("and %d more: call get_project", rest))
+	}
+	return strings.Join(entries, ", ")
 }
 
 func (h *handle) plateByRef(ref string) (*threemf.Plate, error) {
@@ -298,14 +369,15 @@ func (h *handle) checkExtruder(key string, opt *catalog.Option, v any, min int, 
 		nfil = len(h.p.Settings.List("filament_settings_id"))
 	}
 	if n, err := strconv.Atoi(objectValue(opt, v)); err != nil || n < min || n > nfil {
-		hint := fmt.Sprintf("the project has %d filament(s); use a number from %d to %d", nfil, min, nfil)
-		if nfil == 1 {
-			hint = "the project has 1 filament: add a filament with set_presets first, then use its number"
-		}
+		msg := fmt.Sprintf("the project has %d filament(s), so the number must be from %d to %d", nfil, min, nfil)
 		if min == 0 {
-			hint += " (0 is the object's own filament)"
+			msg += " (0 is the object's own filament)"
 		}
-		errs.add(key, hint)
+		hint := fmt.Sprintf("use a filament number from %d to %d, or add a filament with set_presets", min, nfil)
+		if nfil == 1 {
+			hint = "add a filament with set_presets first, then use its number"
+		}
+		errs.addFilament(key, msg, hint)
 	}
 }
 
@@ -691,22 +763,32 @@ func (h *handle) updatePart(req SettingsRequest, res *SettingsResult) error {
 			// The importer erases the extruder of the only part of an object
 			// (bbs_3mf.cpp:2917-2919): the filament goes on the object, where the app keeps it.
 			objOld := o.Config.Value("extruder")
+			n := 0
 			if v := req.Values[key]; v != nil {
-				if n := atoi0(objectValue(opt, v)); n > 0 {
-					if err := h.p.SetObjectOverride(o.ID, "extruder", strconv.Itoa(n)); err != nil {
+				n = atoi0(objectValue(opt, v))
+			}
+			if n == 0 {
+				// 0 (or removing the override) means "the object's own filament",
+				// which a single part always has: nothing to write. A leftover part
+				// override is removed; the object keeps its filament.
+				if old != "" {
+					if _, err := h.p.DeletePartOverride(o.ID, part.ID, key); err != nil {
 						return errf(CodeInternal, "", "%v", err)
 					}
+					res.Changed = append(res.Changed, Change{Key: key, Label: label(opt), Scope: ScopePart, Target: o.Name + "/" + part.Name, Old: old, New: "(from the object)", Removed: true})
 				}
+				res.Warnings = append(res.Warnings, fmt.Sprintf("object %q has one part, so extruder 0 (use the object's filament) changes nothing: the object keeps its filament (update_object filament changes it)", o.Name))
+				continue
+			}
+			if err := h.p.SetObjectOverride(o.ID, "extruder", strconv.Itoa(n)); err != nil {
+				return errf(CodeInternal, "", "%v", err)
 			}
 			if part.Config.Value("extruder") != "" {
 				if _, err := h.p.DeletePartOverride(o.ID, part.ID, key); err != nil {
 					return errf(CodeInternal, "", "%v", err)
 				}
 			}
-			nv := "(the object's own)"
-			if v := req.Values[key]; v != nil {
-				nv = objectValue(opt, v)
-			}
+			nv := strconv.Itoa(n)
 			res.Changed = append(res.Changed, Change{Key: key, Label: label(opt), Scope: ScopeObject, Target: o.Name, Old: objOld, New: nv,
 				Note: "an object with one part keeps its filament on the object; it was set there"})
 			res.Warnings = append(res.Warnings, fmt.Sprintf("object %q has one part, and Creality Print keeps the filament of a single part on the object: the filament was set on the object, not on the part", o.Name))

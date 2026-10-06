@@ -195,7 +195,7 @@ func TestRunTimeoutIsNotACrashOrCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Ending != EndTimedOut || res.Outcome.Code != OutcomeTimedOut || res.Crashed || res.Outcome.OK {
+	if res.Ending != EndTimedOut || res.Outcome.Code != OutcomeTimedOut || res.Outcome.Name != "timed_out" || res.Crashed || res.Outcome.OK {
 		t.Fatalf("%+v", res)
 	}
 	if res.Stdout != "partial output" || res.Outcome.Hint == "" {
@@ -212,7 +212,7 @@ func TestRunCancelIsNotATimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Ending != EndCancelled || res.Outcome.Code != OutcomeCanceled || res.Crashed {
+	if res.Ending != EndCancelled || res.Outcome.Code != OutcomeCanceled || res.Outcome.Name != "cancelled" || res.Crashed {
 		t.Fatalf("%+v", res)
 	}
 }

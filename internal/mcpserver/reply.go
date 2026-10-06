@@ -98,7 +98,16 @@ func reported(what, msg, hint string) *mcp.CallToolResult {
 // successResult renders front, a typed struct (never a map: key order must be
 // deterministic), and body into a tool result.
 func successResult(front any, body string) *mcp.CallToolResult {
-	return render.SuccessResult(front, body)
+	return render.SuccessResult(front, spaceBeforeNext(body))
+}
+
+var nextRE = regexp.MustCompile(`([^\n])\nNext:`)
+
+// spaceBeforeNext puts a blank line before a "Next:" line that follows text
+// directly (after a list of warnings, rows or notes), so every reply reads the
+// same whichever builder wrote it.
+func spaceBeforeNext(body string) string {
+	return nextRE.ReplaceAllString(body, "$1\n\nNext:")
 }
 
 // shortMessage keeps the start of an error message, which says what failed,

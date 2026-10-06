@@ -47,14 +47,15 @@ func (s *Server) groupObjects(ctx context.Context, _ *mcp.CallToolRequest, in gr
 	if err != nil {
 		return projFailure(err), nil, nil
 	}
-	front := groupObjectsFront{baseFront: base(res.Info), Object: objectFrontOf(res.Object), Warnings: res.Warnings}
+	warns := withIntroduced(res.Warnings, before, res.Info)
+	front := groupObjectsFront{baseFront: base(res.Info), Object: objectFrontOf(res.Object), Warnings: warns}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Grouped %d objects into %s.\n\nParts (name | kind | filament):\n", len(objects), objectLine(res.Object))
 	for _, p := range res.Parts {
 		front.Parts = append(front.Parts, groupPartFront{Name: p.Name, Kind: partKindName(p.Subtype), Filament: p.Filament})
 		fmt.Fprintf(&b, "%s | %s | %d\n", pipeSafe(p.Name), partKindName(p.Subtype), p.Filament)
 	}
-	b.WriteString(warningLines(withIntroduced(res.Warnings, before, res.Info)))
+	b.WriteString(warningLines(warns))
 	out := successResult(front, nextLine(b.String(), "update_settings with scope part to tune one part, get_view to check, or slice_project."))
 	return s.withObjectScreenshot(be, out, in.IncludeScreenshot, in.Project, res.Object.Plate, strconv.Itoa(res.Object.ID), false), nil, nil
 }

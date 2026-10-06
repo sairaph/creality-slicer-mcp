@@ -788,7 +788,7 @@ func TestSliceReportsLayerActionsFound(t *testing.T) {
 			case 2:
 				b.WriteString(";PAUSE_PRINT\nPAUSE\n")
 			case 4:
-				b.WriteString("M117 hello\nM117 again\n")
+				b.WriteString(";CUSTOM_GCODE\nM117 hello\nM117 again\n")
 			case 6:
 				b.WriteString("T1\n")
 			}

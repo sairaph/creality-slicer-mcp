@@ -35,7 +35,7 @@ add_model takes `filament` (1-based) for a whole object, and update_object chang
 - The slicer computes the matrix from the colours you gave. `set_presets` accepts `flush_matrix` (an N by N list, row by row, from-filament in rows) to override it, and `flush_multiplier` to scale everything.
 - The prime tower catches the purge and primes the nozzle. It is on in the K2 process presets (`enable_prime_tower`, width `prime_tower_width`, `prime_volume`), but the slicer builds it only when the print uses two or more filaments and is printed by layer (or by object with a single object): a plate with several objects printed by object, or one that uses one filament, gets no tower, and the slice report's settings section then shows `enable_prime_tower: 1 -> 0` as a rule of Creality Print, not something you changed. Turning it off with several filaments makes prints messy.
 - `flush_into_support`, `flush_into_infill` and `flush_into_objects` reuse the purge inside the model to save filament. Only one style at a time; the app's skeleton flush is experimental and app-only.
-- A multi-filament by-layer plate gets `Purge waste X g of Y g (Z%)` right after the `Sliced` line (see `troubleshooting`).
+- A multi-filament by-layer plate gets `Purge waste X g of Y g (Z%)` as the first warning, right after the `Sliced` line (see `troubleshooting`).
 
 ## Slice, then hand off
 

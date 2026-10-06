@@ -73,8 +73,8 @@ func TestPurgeNoteFirstInTheSliceReplyAndInTheReport(t *testing.T) {
 	}
 	body := out[strings.LastIndex(out, "---\n")+4:]
 	lines := strings.Split(body, "\n")
-	if !strings.HasPrefix(lines[0], "Sliced 1 plate(s)") || !strings.HasPrefix(lines[1], "Purge waste ") {
-		t.Fatalf("the purge note is not right after the Sliced line:\n%s", body)
+	if !strings.HasPrefix(lines[0], "Sliced 1 plate(s)") || lines[1] != "" || lines[2] != "Warnings:" || !strings.HasPrefix(lines[3], "- Purge waste ") {
+		t.Fatalf("the Warnings section, purge note first, is not right after the Sliced line:\n%s", body)
 	}
 	if strings.Count(body, "Purge waste ") != 1 {
 		t.Errorf("the note appears more than once in the body:\n%s", body)
@@ -84,7 +84,79 @@ func TestPurgeNoteFirstInTheSliceReplyAndInTheReport(t *testing.T) {
 	if len(ws) == 0 || !strings.HasPrefix(ws[0].(string), "Purge waste ") {
 		t.Errorf("front warnings %v", front["warnings"])
 	}
-	contains(t, "summary", pf.ok(t, "get_slice_report", map[string]any{"project": id}), "Purge waste ", "printing by object")
+	sum := pf.ok(t, "get_slice_report", map[string]any{"project": id})
+	contains(t, "summary", sum, "Warnings:\n- Purge waste ", "printing by object")
+	if strings.Count(sum, "Purge waste ") != 1 {
+		t.Errorf("the report prints the purge note more than once:\n%s", sum)
+	}
+}
+
+// Every tool with front-matter warnings prints exactly that list in the body.
+func TestFrontWarningsEqualTheBodyWarningsInEveryTool(t *testing.T) {
+	pf := newProjFixture(t)
+	id := namedModel(t, pf, "", "A", 1)
+	namedModel(t, pf, id, "B", 1)
+	pf.ok(t, "set_layer_actions", map[string]any{"project": id, "actions": []map[string]any{{"layer": 2, "type": "tool_change", "filament": 2}}})
+	items := func(out string) []string {
+		body := out[strings.LastIndex(out, "---\n")+4:]
+		i := strings.Index(body, "Warnings:\n")
+		if i < 0 {
+			return nil
+		}
+		var got []string
+		for _, l := range strings.Split(body[i+len("Warnings:\n"):], "\n") {
+			if !strings.HasPrefix(l, "- ") {
+				break
+			}
+			got = append(got, strings.TrimPrefix(l, "- "))
+		}
+		return got
+	}
+	check := func(name, out string) {
+		t.Helper()
+		// a call that failed (an error reply has no front matter and no Warnings
+		// section) must fail the test, never pass as "no warnings, none shown"
+		if strings.Contains(out, "error:\n  code:") || !strings.HasPrefix(out, "---\n") {
+			t.Fatalf("%s did not succeed:\n%s", name, out)
+		}
+		body := items(out)
+		var front []string
+		switch w := frontOf(t, out)["warnings"].(type) {
+		case int:
+			for i := 0; i < w; i++ {
+				front = append(front, "")
+			}
+		case []any:
+			for _, x := range w {
+				front = append(front, x.(string))
+			}
+		}
+		if len(body) == 0 {
+			t.Errorf("%s: the case produces no warning, so it proves nothing:\n%s", name, out)
+			return
+		}
+		if len(front) != len(body) {
+			t.Errorf("%s: front %d, body %d\n%s", name, len(front), len(body), out)
+			return
+		}
+		for i := range front {
+			if front[i] != "" && front[i] != body[i] {
+				t.Errorf("%s: item %d differs:\nfront %s\nbody  %s", name, i, front[i], body[i])
+			}
+		}
+	}
+	check("update_settings", pf.ok(t, "update_settings", map[string]any{"project": id, "scope": "object", "target": "B", "values": map[string]any{"extruder": 2}}))
+	check("slice_project", pf.ok(t, "slice_project", map[string]any{"project": id, "preview": "none", "background": false}))
+	job, _ := frontOf(t, pf.ok(t, "slice_project", map[string]any{"project": id, "preview": "none", "background": true}))["job_id"].(string)
+	var status string
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		status = pf.ok(t, "get_slice_status", map[string]any{"job_id": job})
+		if frontOf(t, status)["state"] == "finished" {
+			break
+		}
+	}
+	check("get_slice_status", status)
+	check("group_objects", pf.ok(t, "group_objects", map[string]any{"project": id, "objects": []string{"A", "B"}, "include_screenshot": false}))
 }
 
 func TestBedTemperaturesShownWithTheFilaments(t *testing.T) {
@@ -560,4 +632,67 @@ func TestOverridesDigestCases(t *testing.T) {
 func namedModelOnPlate(t *testing.T, pf *projFixture, project, name string, plate int) {
 	t.Helper()
 	pf.ok(t, "add_model", map[string]any{"project": project, "path": pf.stl, "name": name, "plate": plate})
+}
+
+func TestLongSettingValuesAreShortenedForDisplay(t *testing.T) {
+	if got := shortValue("M104 S200"); got != "M104 S200" {
+		t.Errorf("short value changed: %q", got)
+	}
+	if got := shortValue("first line\nsecond\nthird"); got != "first line ... (23 characters)" {
+		t.Errorf("multi line: %q", got)
+	}
+	long := strings.TrimSpace(strings.Repeat("G1 X1 ", 3000))
+	if got := shortValue(long); !strings.HasPrefix(got, "G1 X1 G1 X1") || !strings.HasSuffix(got, " ... (17999 characters)") || len(got) > 120 {
+		t.Errorf("long: %q", got)
+	}
+	pf := newProjFixture(t)
+	id := pf.create(t, "Long")
+	out := pf.ok(t, "update_settings", map[string]any{"project": id, "values": map[string]any{"template_custom_gcode": long}})
+	if len(out) > 4000 || !strings.Contains(out, "... (17999 characters)") {
+		t.Errorf("the reply echoes the value: %d bytes\n%.600s", len(out), out)
+	}
+	// the stored value is whole: sending it again changes nothing, and that reply is short too
+	again := pf.ok(t, "update_settings", map[string]any{"project": id, "values": map[string]any{"template_custom_gcode": long}})
+	if !strings.Contains(again, "Nothing changed") || len(again) > 1500 || !strings.Contains(again, "... (17999 characters)") {
+		t.Errorf("re-sending the value: %d bytes\n%.800s", len(again), again)
+	}
+	rep := pf.ok(t, "get_project", map[string]any{"project": id})
+	if len(rep) > 6000 {
+		t.Errorf("get_project is %d bytes", len(rep))
+	}
+}
+
+// The front matter count and the body warnings are one list.
+func TestFrontWarningsMatchTheBody(t *testing.T) {
+	pf := newProjFixture(t)
+	id := namedModel(t, pf, "", "A", 1)
+	namedModel(t, pf, id, "B", 1)
+	pf.ok(t, "set_layer_actions", map[string]any{"project": id, "actions": []map[string]any{{"layer": 2, "type": "tool_change", "filament": 2}}})
+	out := pf.ok(t, "update_settings", map[string]any{"project": id, "scope": "object", "target": "B", "values": map[string]any{"extruder": 2}})
+	body := out[strings.LastIndex(out, "---"):]
+	shown := 0
+	if i := strings.Index(body, "Warnings:"); i >= 0 {
+		shown = strings.Count(body[i:], "\n- ")
+	}
+	got, _ := frontOf(t, out)["warnings"].(int)
+	if shown == 0 || got != shown {
+		t.Errorf("front count %d, body shows %d:\n%s", got, shown, out)
+	}
+}
+
+// A Next line has a blank line before it, whatever the reply ends with.
+func TestNextLineHasABlankLineBefore(t *testing.T) {
+	if got := spaceBeforeNext("Added.\n\nWarnings:\n- one\nNext: go"); got != "Added.\n\nWarnings:\n- one\n\nNext: go" {
+		t.Errorf("%q", got)
+	}
+	if got := spaceBeforeNext("Added.\n\nNext: go"); got != "Added.\n\nNext: go" {
+		t.Errorf("%q", got)
+	}
+	pf := newProjFixture(t)
+	id := namedModel(t, pf, "", "A", 1)
+	pf.ok(t, "set_layer_actions", map[string]any{"project": id, "actions": []map[string]any{{"layer": 2, "type": "tool_change", "filament": 2}}})
+	out := pf.ok(t, "add_model", map[string]any{"project": id, "path": pf.stl, "name": "B", "filament": 2})
+	if !strings.Contains(out, "Warnings:") || strings.Contains(out, "\nNext:") && !strings.Contains(out, "\n\nNext:") {
+		t.Errorf("no blank line before Next:\n%s", out)
+	}
 }

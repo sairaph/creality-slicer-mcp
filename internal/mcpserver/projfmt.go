@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sairaph/mcp-wizard/render"
@@ -411,7 +412,7 @@ func writeRanges(b *strings.Builder, in *projects.Info) {
 			var keys []string
 			for k := range r.Settings {
 				if k != "extruder" {
-					keys = append(keys, k+"="+r.Settings[k])
+					keys = append(keys, k+"="+shortValue(r.Settings[k]))
 				}
 			}
 			sort.Strings(keys)
@@ -531,4 +532,23 @@ func defaultHint(code string) string {
 		return "Call get_slice_status for the job, or slice_project again; get_slicer_status shows whether the slicer works."
 	}
 	return "Try the call again; if it fails the same way, call get_slicer_status and report the message."
+}
+
+// shortValue shortens a long setting value for display (a G-code template can
+// be 20 KB): its first line, or its first 80 characters, then the length. The
+// stored value is never changed.
+func shortValue(v string) string {
+	const limit = 80
+	first, rest, multi := strings.Cut(v, "\n")
+	if !multi && len(v) <= limit {
+		return v
+	}
+	if len(first) > limit {
+		first = first[:limit]
+		for len(first) > 0 && !utf8.ValidString(first) {
+			first = first[:len(first)-1]
+		}
+	}
+	_ = rest
+	return strings.TrimRight(first, " \r") + fmt.Sprintf(" ... (%d characters)", utf8.RuneCountInString(v))
 }

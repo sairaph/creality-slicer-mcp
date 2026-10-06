@@ -271,9 +271,9 @@ type updateSettingsFront struct {
 
 func settingChangeText(c projects.Change) string {
 	if c.Removed {
-		return fmt.Sprintf("%s: %s -> (override removed)", c.Key, orDash(plainVector(c.Old)))
+		return fmt.Sprintf("%s: %s -> (override removed)", c.Key, shortValue(orDash(plainVector(c.Old))))
 	}
-	return fmt.Sprintf("%s: %s -> %s", c.Key, orDash(plainVector(c.Old)), orDash(plainVector(c.New)))
+	return fmt.Sprintf("%s: %s -> %s", c.Key, shortValue(orDash(plainVector(c.Old))), shortValue(orDash(plainVector(c.New))))
 }
 
 // plainVector shows a vector value whose entries are all equal (a single
@@ -310,7 +310,9 @@ func (s *Server) updateSettings(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err != nil {
 		return projFailure(err), nil, nil
 	}
-	front := updateSettingsFront{baseFront: base(res.Info), Scope: scope, Warnings: len(res.Warnings)}
+	// The front matter count and the body come from one list.
+	warns := withIntroduced(res.Warnings, before, res.Info)
+	front := updateSettingsFront{baseFront: base(res.Info), Scope: scope, Warnings: len(warns)}
 	var b strings.Builder
 	// A value written as it already was is reported as unchanged, not as a
 	// change from 15% to 15%.
@@ -354,7 +356,7 @@ func (s *Server) updateSettings(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if len(same) > 0 {
 		var names []string
 		for _, c := range same {
-			names = append(names, c.Key+" ("+orDash(c.New)+")")
+			names = append(names, c.Key+" ("+shortValue(orDash(c.New))+")")
 		}
 		fmt.Fprintf(&b, "\nUnchanged, already at that value: %s.\n", strings.Join(names, ", "))
 	}
@@ -369,7 +371,7 @@ func (s *Server) updateSettings(ctx context.Context, _ *mcp.CallToolRequest, in 
 			fmt.Fprintf(&b, "- %s%s\n", settingChangeText(c), note)
 		}
 	}
-	b.WriteString(warningLines(withIntroduced(res.Warnings, before, res.Info)))
+	b.WriteString(warningLines(warns))
 	return successResult(front, nextLine(strings.TrimRight(b.String(), "\n"), "update_settings for more changes, add_model, or slice_project.")), nil, nil
 }
 

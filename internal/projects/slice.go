@@ -614,10 +614,16 @@ func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res
 		}
 		pr.ObjectLabels = objectLabels(sp, plate, pr.ExcludeNames)
 		pr.Actions = scanActions(file, snap.layerActions(plate))
-		if sp.Settings != nil && strings.TrimSpace(sp.Settings.String("template_custom_gcode")) == "" {
+		if sp.Settings != nil {
 			for i := range pr.Actions {
-				if pr.Actions[i].Kind == ActionTemplate && !pr.Actions[i].Found {
-					pr.Actions[i].EmptyTemplate = true
+				a := &pr.Actions[i]
+				switch {
+				case a.Kind == ActionTemplate && !a.Found && strings.TrimSpace(sp.Settings.String("template_custom_gcode")) == "":
+					a.Empty = "template_custom_gcode"
+				case a.Kind == ActionPause && strings.TrimSpace(sp.Settings.String("machine_pause_gcode")) == "":
+					a.Empty, a.Found = "machine_pause_gcode", false
+				case a.Kind == ActionToolChange && a.Found && strings.TrimSpace(sp.Settings.String("change_filament_gcode")) == "":
+					a.Empty, a.Found = "change_filament_gcode", false
 				}
 			}
 		}

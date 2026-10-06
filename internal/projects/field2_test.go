@@ -88,7 +88,7 @@ func TestExtruderOnPartsAndRanges(t *testing.T) {
 	}
 }
 
-// R2-7: one object whose filament changes are layer actions: by object does not apply.
+// R2-7: one object whose filament changes are layer actions: the note names the changes, not by object.
 func TestPurgeWarningForLayerActionsOnOneObject(t *testing.T) {
 	data := purgeGCode(t)
 	e := newEnv(t)
@@ -103,12 +103,12 @@ func TestPurgeWarningForLayerActionsOnOneObject(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := res.Last.Plates[0].PurgeWarning
-	for _, want := range []string{"Purge waste ", "2 layer filament change(s)", "flush_multiplier", "by object does not apply"} {
+	for _, want := range []string{"Purge waste ", "2 layer filament change(s)", "flush_multiplier"} {
 		if !strings.Contains(strings.ToLower(w), strings.ToLower(want)) {
 			t.Errorf("%q lacks %q", w, want)
 		}
 	}
-	if strings.Contains(w, "mix filaments") || strings.Contains(w, "avoids") || strings.Contains(w, "Each object here") {
+	if strings.Contains(w, "mix filaments") || strings.Contains(w, "avoids") || strings.Contains(w, "Each object here") || strings.Contains(w, "does not apply") {
 		t.Errorf("by object advice for one object: %q", w)
 	}
 }
@@ -739,7 +739,7 @@ func TestExtruderRefusedWithOneFilamentSaysHowToAddOne(t *testing.T) {
 	e.addBox(t, info.ID, "a", 20, 20, 20)
 	_, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "object", Target: "a", Values: map[string]any{"extruder": 2}})
 	ae := wantCode(t, err, CodeInvalidInput)
-	if !strings.Contains(ae.Message, "add a filament with set_presets first") {
+	if !strings.Contains(ae.Hint, "add a filament with set_presets first") {
 		t.Fatalf("message %q hint %q", ae.Message, ae.Hint)
 	}
 }
@@ -858,8 +858,8 @@ func TestRoleFilamentKeysAreChecked(t *testing.T) {
 			// the app hides the project value of the feature filaments: allow it here, the check is the point
 			_, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: scope, Target: target, Values: map[string]any{key: 2}, AllowLocked: true})
 			ae := wantCode(t, err, CodeInvalidInput)
-			if !strings.Contains(ae.Message, "add a filament with set_presets first") {
-				t.Errorf("%s at %s scope: %q", key, scope, ae.Message)
+			if !strings.Contains(ae.Hint, "add a filament with set_presets first") {
+				t.Errorf("%s at %s scope: %q", key, scope, ae.Hint)
 			}
 			if scope != "project" {
 				if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: scope, Target: target, Values: map[string]any{key: 0}}); err != nil {
@@ -1232,5 +1232,32 @@ func TestListOverridesUseTheSeparatorOfTheirType(t *testing.T) {
 	}
 	if g := escapeStringsCstyle([]string{"a", "", "b c"}); g != `a;;"b c"` {
 		t.Errorf("several: %q", g)
+	}
+}
+
+// Part scope extruder 0 means "the object's filament": on a single part it is a
+// no-op that must not write 0 to the object or say it did.
+func TestSinglePartExtruderZeroIsANoOp(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "ZeroPart")
+	e.addBox(t, info.ID, "box", 30, 30, 30)
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "part", Target: "box/box", Values: map[string]any{"extruder": 2}}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "part", Target: "box/box", Values: map[string]any{"extruder": 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Info.Objects[0].Filament != 2 {
+		t.Errorf("the object filament became %d", res.Info.Objects[0].Filament)
+	}
+	for _, c := range res.Changed {
+		if c.Scope == ScopeObject {
+			t.Errorf("a change on the object: %+v", c)
+		}
+	}
+	joined := strings.Join(res.Warnings, "|")
+	if strings.Contains(joined, "set on the object") || !strings.Contains(joined, "changes nothing") {
+		t.Errorf("warnings %v", res.Warnings)
 	}
 }

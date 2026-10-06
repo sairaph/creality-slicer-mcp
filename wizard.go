@@ -20,6 +20,11 @@ import (
 // written. install.ps1 and install.sh rely on it to undo their own changes.
 const exitCancelled = 3
 
+// exitInterrupted is the exit status, when the app started the wizard, of a
+// wizard left while the clients were being registered. The app shows the
+// message itself; run directly the wizard prints it and exits 1.
+const exitInterrupted = 4
+
 // harnessSelection adapts mcp-wizard v0.1.1's client list:
 //
 //   - It renders every key of HarnessState.Selected as checked, including
@@ -52,6 +57,12 @@ func (h harnessSelection) Init(state *AppState) tea.Cmd {
 }
 
 func (h harnessSelection) Update(msg tea.Msg, state *AppState) (flow.Directive, tea.Cmd) {
+	// Once cancelled, nothing else counts: keys typed in the same burst as q
+	// (an enter behind it) must not move on to the registration before the
+	// program has quit.
+	if state.cancelled {
+		return flow.Quit, nil
+	}
 	if tui.IsSpinMsg(msg) {
 		state.Spinner.Frame++
 	}
@@ -64,6 +75,9 @@ func (h harnessSelection) Update(msg tea.Msg, state *AppState) (flow.Directive, 
 		}
 	}
 	d, cmd := h.Step.Update(msg, state)
+	if _, isKey := msg.(tea.KeyMsg); isKey && d == flow.Quit {
+		state.cancelled = true
+	}
 	if state.harnessDetecting && state.Harness.Selected != nil {
 		state.harnessDetecting = false
 		if h.findUnticked != nil {

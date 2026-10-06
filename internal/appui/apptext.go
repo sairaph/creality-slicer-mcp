@@ -58,3 +58,67 @@ func ErrText(err error) string {
 	}
 	return appMessage(err.Error())
 }
+
+// toolList is the alternation of the tool names, for the clause patterns.
+var toolList = strings.Join(toolNames, "|")
+
+var (
+	// textRules say what the app wording is where a text names a tool and
+	// the app has its own way to the same thing.
+	textRules = []struct {
+		re   *regexp.Regexp
+		with string
+	}{
+		{regexp.MustCompile(`slice_project reports the tower grams and the flush per plate after slicing`), "the slice report shows the tower grams and the flush per plate"},
+		{regexp.MustCompile(`slice_project with arrange true packs the plate with the needed clearance`), "slicing again with the objects arranged packs the plate with the needed clearance"},
+		{regexp.MustCompile(`: update_settings \{.*?\}\} then slice_project with arrange true \(`), ": set the plate to print by object and slice it again with the objects arranged ("},
+		{regexp.MustCompile(`when set_presets rebuilds its settings`), "when its presets are replaced"},
+		{regexp.MustCompile(`describe_setting will say so`), "the setting texts will say so"},
+		{regexp.MustCompile(`describe_setting will say a setting has no description`), "a setting will show no description"},
+	}
+	// Clauses that still name a tool are dropped: a parenthesis, the part
+	// after a semicolon, or a whole sentence.
+	parenClause = regexp.MustCompile(`\s*\([^()]*\b(?:` + toolList + `)\b[^()]*\)`)
+	semiClause  = regexp.MustCompile(`;\s*[^;.]*\b(?:` + toolList + `)\b[^;.]*`)
+	spaceRun    = regexp.MustCompile(`\s{2,}`)
+)
+
+// AppText is a text of the server, a project or a slice as the app shows it:
+// those are written for an AI client and name its tools. A reference to a tool
+// becomes app wording where a rule has one and is dropped where there is none.
+// appMessage is only the last guard; a test checks that the rules alone leave
+// no tool name.
+func AppText(s string) string { return appMessage(rewriteText(s)) }
+
+// rewriteText applies the rules of AppText.
+func rewriteText(s string) string {
+	if !toolRE.MatchString(s) {
+		return s
+	}
+	for _, r := range textRules {
+		s = r.re.ReplaceAllString(s, r.with)
+	}
+	s = parenClause.ReplaceAllString(s, "")
+	s = semiClause.ReplaceAllString(s, "")
+	s = dropSentences(s)
+	return spaceRun.ReplaceAllString(strings.TrimSpace(s), " ")
+}
+
+// dropSentences removes the sentences that still name a tool. A sentence ends
+// at a period followed by a space or the end of the text.
+func dropSentences(s string) string {
+	var kept []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '.' && (i+1 == len(s) || s[i+1] == ' ' || s[i+1] == '\t' || s[i+1] == '\n') {
+			if sent := s[start : i+1]; !toolRE.MatchString(sent) {
+				kept = append(kept, strings.TrimSpace(sent))
+			}
+			start = i + 1
+		}
+	}
+	if rest := s[start:]; strings.TrimSpace(rest) != "" && !toolRE.MatchString(rest) {
+		kept = append(kept, strings.TrimSpace(rest))
+	}
+	return strings.Join(kept, " ")
+}

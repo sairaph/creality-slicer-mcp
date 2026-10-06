@@ -234,7 +234,7 @@ func (m *Model) projectsFrame() Frame {
 	f.Context = countText(total, "project", "projects")
 	if total == 0 {
 		f.Body = append(f.Body, "  No projects yet.", "")
-		f.Body = append(f.Body, prefixAll("  ", Wrap("Ask your AI client to create one (create_project) or to open a 3MF (open_project). It shows up here.", BodyWidth(m.w), 0))...)
+		f.Body = append(f.Body, prefixAll("  ", Wrap("Ask your AI client to create or open a project. It shows up here.", BodyWidth(m.w), 0))...)
 		return f
 	}
 	head, starts, rows := m.listPlan()

@@ -401,6 +401,8 @@ func (m *Model) onSetupDone(msg setupDoneMsg) tea.Cmd {
 		m.say(RoleOK, "Setup finished.")
 	case 3:
 		m.say(RoleDim, "Setup cancelled; nothing was changed.")
+	case 4:
+		m.say(RoleFail, "Setup was interrupted while registering the AI clients, so some may be registered. Run `creality-slicer-mcp install` to finish, or `creality-slicer-mcp uninstall --all` to remove everything.")
 	default:
 		m.say(RoleFail, "Setup did not finish (exit %d). Run Doctor.", msg.code)
 	}

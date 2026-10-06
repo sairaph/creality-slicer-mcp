@@ -92,7 +92,7 @@ func (m *Model) doctorLines() []string {
 		outcome := Paint(rr, PadRight(levelWord(r.Level), doctorOutcomeW))
 		if stacked {
 			out = append(out, "  "+Paint(nameRole, r.Name)+"  "+Paint(rr, levelWord(r.Level)))
-			out = append(out, WrapRole(r.Detail, "    ", "    ", m.w-2, detailRole)...)
+			out = append(out, WrapRole(AppText(r.Detail), "    ", "    ", m.w-2, detailRole)...)
 			continue
 		}
 		first := "  " + Paint(nameRole, PadRight(r.Name, nameW)) + "  " + outcome + "  "
@@ -100,7 +100,7 @@ func (m *Model) doctorLines() []string {
 			out = append(out, first)
 			continue
 		}
-		out = append(out, WrapRole(r.Detail, first, Spaces(col), m.w-2, detailRole)...)
+		out = append(out, WrapRole(AppText(r.Detail), first, Spaces(col), m.w-2, detailRole)...)
 	}
 	return out
 }

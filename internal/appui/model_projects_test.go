@@ -174,7 +174,7 @@ func TestEmptyProjectList(t *testing.T) {
 	if lines[0] != "creality-slicer-mcp  Projects  0 projects" || lines[2] != "  No projects yet." {
 		t.Errorf("empty list:\n%s", h.view())
 	}
-	if got := squash(h.view()); !strings.Contains(got, squash("Ask your AI client to create one (create_project) or to open a 3MF (open_project). It shows up here.")) {
+	if got := squash(h.view()); !strings.Contains(got, squash("Ask your AI client to create or open a project. It shows up here.")) {
 		t.Errorf("no explanation:\n%s", h.view())
 	}
 	if lines[23] != "r reload \u00b7 esc back" {

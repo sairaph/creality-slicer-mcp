@@ -62,13 +62,13 @@ func (m *Model) statusLines() []string {
 		if reason == "" {
 			reason = "Creality Print was not found"
 		}
-		row("Creality Print", "not found: "+reason, RoleFail)
+		row("Creality Print", "not found: "+AppText(reason), RoleFail)
 	case !st.Supported:
 		reason := st.Reason
 		if reason == "" {
 			reason = "only versions 7.2 and 7.3 are supported"
 		}
-		row("Creality Print", fmt.Sprintf("%s%s, not supported: %s", st.Version, build, reason), RoleFail)
+		row("Creality Print", fmt.Sprintf("%s%s, not supported: %s", st.Version, build, AppText(reason)), RoleFail)
 	default:
 		row("Creality Print", fmt.Sprintf("%s%s, supported", st.Version, build), RoleOK)
 	}
@@ -109,7 +109,7 @@ func (m *Model) statusLines() []string {
 		if i == 0 {
 			label = "Problems"
 		}
-		row(label, p, RoleWarn)
+		row(label, AppText(p), RoleWarn)
 	}
 	return out
 }

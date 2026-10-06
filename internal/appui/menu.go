@@ -82,9 +82,9 @@ func (m *Model) summaryLines() []string {
 	case m.sum.val != nil:
 		s := m.sum.val
 		if s.SlicerOK {
-			add(RoleOK, fmt.Sprintf("%s %s.", s.SlicerLine, countText(s.Projects, "project", "projects")))
+			add(RoleOK, fmt.Sprintf("%s %s.", AppText(s.SlicerLine), countText(s.Projects, "project", "projects")))
 		} else {
-			add(RoleWarn, s.SlicerLine)
+			add(RoleWarn, AppText(s.SlicerLine))
 		}
 		if len(s.Clients) > 0 {
 			add(RoleText, "AI clients: "+strings.Join(s.Clients, ", ")+".")

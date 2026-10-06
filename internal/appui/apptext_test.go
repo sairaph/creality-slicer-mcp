@@ -1,6 +1,7 @@
 package appui
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -120,5 +121,77 @@ func TestToolHintsBecomeAppActions(t *testing.T) {
 		if !strings.HasPrefix(got, "It failed. ") || !strings.Contains(got, c.want) {
 			t.Errorf("hint %q -> %q, want it to say %q", c.hint, got, c.want)
 		}
+	}
+}
+
+// toolRegexp matches any registered tool name.
+func toolRegexp(t *testing.T) *regexp.Regexp {
+	var names []string
+	for _, n := range registeredTools(t) {
+		if !strings.HasPrefix(n, "sample_") {
+			names = append(names, n)
+		}
+	}
+	return regexp.MustCompile(`\b(` + strings.Join(names, "|") + `)\b`)
+}
+
+// Every text of the projects, the doctor checks and the server that names a
+// tool (the warnings of a project and of a slice among them) is free of the
+// name once AppText has rewritten it.
+func TestAppTextNamesNoTool(t *testing.T) {
+	re := toolRegexp(t)
+	checked := 0
+	for _, s := range stringLiterals(t, "../projects", "../mcpserver", "../doctorchecks") {
+		if !re.MatchString(s) {
+			continue
+		}
+		if got := rewriteText(s); re.MatchString(got) || (strings.Contains(got, "that action") && !strings.Contains(s, "that action")) {
+			t.Fatalf("the rules leave a tool name or lean on the last-resort wording:\n%s\nfrom %q", got, s)
+		}
+		checked++
+	}
+	if checked < 20 {
+		t.Errorf("only %d literals name a tool: the scan found too little", checked)
+	}
+}
+
+func TestAppTextWording(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"plain text", "plain text"},
+		{"the slicer adds a prime tower; fewer changes reduce it (slice_project reports the tower grams and the flush per plate after slicing)",
+			"the slicer adds a prime tower; fewer changes reduce it (the slice report shows the tower grams and the flush per plate)"},
+		{"the pause writes only the marker: machine_pause_gcode is empty; set it with update_settings (the printer preset's own value is PAUSE on the K2)",
+			"the pause writes only the marker: machine_pause_gcode is empty"},
+		{"No flat face. Call get_project to see the plates.", "No flat face."},
+		{"Setting descriptions are not available (no catalog); describe_setting will say so.", "Setting descriptions are not available (no catalog); the setting texts will say so."},
+	} {
+		if got := AppText(c.in); got != c.want {
+			t.Errorf("AppText(%q)\n got %q\nwant %q", c.in, got, c.want)
+		}
+	}
+}
+
+// The purge warning of the projects package, as purge.go writes it, names
+// update_settings with a JSON value and slice_project.
+func TestAppTextPurgeWarning(t *testing.T) {
+	var src string
+	for _, s := range stringLiterals(t, "../projects") {
+		if strings.Contains(s, "Each object here uses one filament") {
+			src = s
+		}
+	}
+	if src == "" {
+		t.Fatal("the purge text is not in the projects package")
+	}
+	text := "Purge waste 3.0 g of 9.0 g (33%): prime tower 2.0 g + flush 1.0 g over 4 filament changes." +
+		fmt.Sprintf(src, 1, 25.0)
+	got := AppText(text)
+	for _, want := range []string{"set the plate to print by object and slice it again with the objects arranged (by-object needs about 25 mm between objects).", "Purge waste 3.0 g"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("purge warning: %q does not contain %q", got, want)
+		}
+	}
+	if strings.Contains(got, "update_settings") || strings.Contains(got, "slice_project") || strings.Contains(got, "{") {
+		t.Errorf("purge warning keeps the tool wording: %q", got)
 	}
 }

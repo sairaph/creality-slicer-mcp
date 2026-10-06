@@ -151,6 +151,8 @@ type AppState struct {
 	// client list is being detected (see harnessSelection).
 	UntickedClients  []string
 	harnessDetecting bool
+	// cancelled is set when the client list was left with q or ctrl+c.
+	cancelled bool
 
 	// Skills is the guide skill, written after the registration; ShowPaths and
 	// Scroll belong to the screens of the wizard, FromApp is set when the app
@@ -330,30 +332,48 @@ func runWizard(ctx context.Context, detector *harness.Detector, scope harness.Sc
 	applyIndex := stepIndex(steps, "apply")
 	f := flow.New(steps, state)
 	code := runFlow(ctx, f, os.Stdin, os.Stdout)
+	return finishWizard(ctx, f, state, applyIndex, code, cmd.DryRun, os.Stdout, os.Stderr)
+}
 
-	switch classifyWizard(&state.BaseState, code, f.Current() >= applyIndex, cmd.DryRun, ctx.Err() != nil) {
+// finishWizard maps the end of the flow to the exit code and the text left in
+// the terminal. When the app started the wizard it shows the notice itself
+// from the exit code, so nothing is printed then: text printed here would
+// land on the main screen and stay there after the app exits.
+func finishWizard(ctx context.Context, f *flow.Flow[AppState], state *AppState, applyIndex, code int, dryRun bool, stdout, stderr io.Writer) int {
+	quiet := state.FromApp
+	say := func(w io.Writer, text string) {
+		if !quiet {
+			fmt.Fprintln(w, text)
+		}
+	}
+	switch classifyWizard(&state.BaseState, code, f.Current() >= applyIndex, dryRun, ctx.Err() != nil) {
 	case outcomeCancelled:
-		fmt.Println("  Setup cancelled; nothing was changed.")
+		say(stdout, "  Setup cancelled; nothing was changed.")
 		return exitCancelled
 	case outcomeInterrupted:
-		fmt.Fprintln(os.Stderr, interruptedMessage)
+		say(stderr, interruptedMessage)
+		if quiet {
+			return exitInterrupted
+		}
 		return 1
 	case outcomeFailed:
 		if state.Failure != nil {
-			fmt.Fprintln(os.Stderr, state.Failure)
+			say(stderr, state.Failure.Error())
 		} else {
-			fmt.Fprintln(os.Stderr, "  The setup wizard could not run in this terminal; nothing was changed.\n"+
+			say(stderr, "  The setup wizard could not run in this terminal; nothing was changed.\n"+
 				"  Run `"+domain.BinaryName+" install --yes` to install without it.")
 		}
 		return 1
 	}
 	if state.Failure != nil {
 		// Registration failed for some clients; the rest still got the guide.
-		fmt.Fprintln(os.Stderr, state.Failure)
+		say(stderr, state.Failure.Error())
 	}
-	printScrollback(os.Stdout, state, cmd.DryRun)
+	if !quiet {
+		printScrollback(stdout, state, dryRun)
+	}
 	if state.Skills.Started && !state.Skills.Done {
-		fmt.Fprintf(os.Stderr, "  The guide skill may not have been written; run `%s install --yes` to write it.\n", domain.BinaryName)
+		say(stderr, fmt.Sprintf("  The guide skill may not have been written; run `%s install --yes` to write it.", domain.BinaryName))
 		return 1
 	}
 	return max(code, state.Skills.Code)

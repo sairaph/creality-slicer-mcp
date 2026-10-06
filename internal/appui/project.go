@@ -175,7 +175,7 @@ func (m *Model) detailLines() []string {
 
 	var warnings []string
 	for _, wn := range info.Warnings {
-		warnings = append(warnings, wn.Message)
+		warnings = append(warnings, AppText(wn.Message))
 	}
 	if n := len(info.Drift); n > 0 {
 		warnings = append(warnings, fmt.Sprintf("%s the presets set are not known to this server yet.", countText(n, "setting", "settings")))

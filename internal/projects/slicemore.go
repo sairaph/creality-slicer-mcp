@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sairaph/creality-slicer-mcp/internal/catalog"
 	"github.com/sairaph/creality-slicer-mcp/internal/profiles"
@@ -214,36 +215,74 @@ func scanActions(gcode string, actions []ActionInfo) []ActionResult {
 
 var logPrefixRE = regexp.MustCompile(`^\[[^\]]*\]\s+\[[^\]]*\]\s+\[(\w+)\]\s*`)
 
-// logTail returns the last n meaningful lines of the slicer's log: no trace or
-// debug lines, the time and thread prefix reduced to the level.
+// logNoiseRE matches the lines that fill the 7.3 CLI log without telling what
+// went wrong: the preset bundle being loaded (one line per vendor preset), the
+// model object bookkeeping, the temporary model folder and the import timings.
+var logNoiseRE = regexp.MustCompile(`load_vendor_configs_from_json|PresetBundle::|load filament_id|ModelObject::|ModelObject destructor|Model::clear_objects|^create /|MODEL_IMPORT_TIMING|^Slic3r::_BBS_3MF_Importer::|^model 0x|^model [0-9A-F]{8,} `)
+
+// logTail returns the last n meaningful lines of the slicer's log: whole lines
+// only (a line is never cut), without trace or debug lines and without the
+// preset loading and bookkeeping noise (the unfiltered tail when nothing else is
+// left), the time and thread prefix reduced to the level. A line longer than
+// maxLogLine is a dump, not a message, and is left out.
 func logTail(path string, n int) []string {
+	const maxLogLine = 400
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
 	defer f.Close()
+	partial := false
 	if info, err := f.Stat(); err == nil && info.Size() > 512<<10 {
 		f.Seek(info.Size()-512<<10, 0)
+		partial = true // the first line read starts mid-line
 	}
-	var lines []string
+	var lines, all []string
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1<<20), 8<<20)
 	for sc.Scan() {
+		if partial {
+			partial = false
+			continue
+		}
 		line := strings.TrimRight(sc.Text(), "\r\x00 ")
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
+		important := false // an error or a warning is never filtered or dropped
 		if m := logPrefixRE.FindStringSubmatch(line); m != nil {
-			switch strings.ToLower(m[1]) {
+			level := strings.ToLower(m[1])
+			switch level {
 			case "trace", "debug":
 				continue
+			case "error", "warning", "warn", "critical", "fatal":
+				important = true
 			}
-			line = strings.ToLower(m[1]) + ": " + line[len(m[0]):]
+			line = level + ": " + line[len(m[0]):]
 		}
-		if len(line) > 300 {
-			line = line[:300] + "..."
+		if important {
+			// a long line is cut where it shows: whole characters, with its length
+			if n := utf8.RuneCountInString(line); n > maxLogLine {
+				cut := line[:maxLogLine]
+				for len(cut) > 0 && !utf8.ValidString(cut) {
+					cut = cut[:len(cut)-1]
+				}
+				line = cut + fmt.Sprintf(" ... (%d characters)", n)
+			}
+			all = append(all, line)
+			lines = append(lines, line)
+			continue
 		}
-		lines = append(lines, line)
+		if len(line) > maxLogLine {
+			continue // a dump, not a message
+		}
+		all = append(all, line)
+		if !logNoiseRE.MatchString(line) {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		lines = all
 	}
 	if len(lines) > n {
 		lines = lines[len(lines)-n:]
@@ -318,7 +357,7 @@ type SettingDiff struct {
 	Key    string
 	Preset string
 	Used   string
-	// Origin is "project" (changed in this project), "app" (the app switches it
+	// Origin is "project" (changed in this project), "filament" (the filament preset owns the setting), "app" (the app switches it
 	// automatically) or "other" (nothing the tools know explains it).
 	Origin string
 	Why    string
@@ -345,9 +384,18 @@ func (s *Store) ExplainSettings(ref string, used map[string]string) ([]SettingDi
 			return notFoundf("", "the process preset %q is not available", cfg.String("print_settings_id"))
 		}
 		changed := map[string]bool{}
-		if diffs := cfg.List("different_settings_to_system"); len(diffs) > 0 {
-			for _, k := range strings.Split(diffs[0], ";") {
-				changed[k] = true
+		// One entry per preset: the process, then every filament, then the printer
+		// (PresetBundle.cpp: different_values[0], [i+1], [num_filaments+1]). A key
+		// changed in any of them is a change of this project.
+		processOnly := map[string]bool{}
+		for i, slot := range cfg.List("different_settings_to_system") {
+			for _, k := range strings.Split(slot, ";") {
+				if k = strings.TrimSpace(k); k != "" {
+					changed[k] = true
+					if i == 0 {
+						processOnly[k] = true
+					}
+				}
 			}
 		}
 		// A setting the user set on a plate (print sequence, bed type, spiral mode)
@@ -383,8 +431,11 @@ func (s *Store) ExplainSettings(ref string, used map[string]string) ([]SettingDi
 				d.Origin, d.Why = "app", appRuleWhy(key, used, cat, filamentName)
 			case changed[key]:
 				d.Origin, d.Why = "project", "changed in this project"
+			case forcedRuleWhy(cat, key, env, got) != "":
+				// a rule of the app that fires on the used values, filament setting or not
+				d.Origin, d.Why = "app", forcedRuleWhy(cat, key, env, got)
 			case filamentOwnedWhy(key, cat, filamentName) != "":
-				d.Origin, d.Why = "app", filamentOwnedWhy(key, cat, filamentName)
+				d.Origin, d.Why = "filament", filamentOwnedWhy(key, cat, filamentName)
 			default:
 				d.Origin, d.Why = "other", "the slicer used this value and neither the preset nor a change in the project explains it (the preset may differ from the one the app merged, or the slicer normalises the value)"
 				if o, ok := cat.Get(key); ok {
@@ -395,7 +446,7 @@ func (s *Store) ExplainSettings(ref string, used map[string]string) ([]SettingDi
 			}
 			out = append(out, d)
 		}
-		out = append(out, h.explainOtherLevels(used, cfg, changed, out)...)
+		out = append(out, h.explainOtherLevels(used, cfg, processOnly, out)...)
 		sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 		return nil
 	})
@@ -530,6 +581,15 @@ func filamentOwnedWhy(key string, cat *catalog.Catalog, filament string) string 
 			src = "the filament preset `" + filament + "`"
 		}
 		return "a filament setting: the slice takes it from " + src + ", not from the process preset"
+	}
+	return ""
+}
+
+// forcedRuleWhy is the catalog's forced_by rule that explains the used value of
+// a setting, or "".
+func forcedRuleWhy(cat *catalog.Catalog, key string, env condEnv, got string) string {
+	if o, ok := cat.Get(key); ok {
+		return forcedWhy(o, env, got)
 	}
 	return ""
 }

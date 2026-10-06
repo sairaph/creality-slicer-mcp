@@ -40,12 +40,17 @@ type SettingsRequest struct {
 
 // Change is one setting that changed.
 type Change struct {
-	Key     string
-	Label   string
-	Scope   string
-	Target  string
-	Old     string
-	New     string
+	Key    string
+	Label  string
+	Scope  string
+	Target string
+	Old    string
+	New    string
+	// OldList and NewList are the entries of a vector setting, one per filament,
+	// as the config holds them (nil for a scalar). Display decides from these, not
+	// from the text, where a value with commas in it is ambiguous.
+	OldList []string
+	NewList []string
 	Removed bool
 	// Forced is true for a change the app itself would make as a consequence of
 	// another (forced_by).
@@ -492,11 +497,13 @@ func (h *handle) updateProject(req SettingsRequest, res *SettingsResult) error {
 		if pl.remove && !pl.tower {
 			nv = in.baseValue(pl.o)
 		}
-		ch := Change{Key: key, Label: label(pl.o), Scope: ScopeProject, Old: valString(old), New: valString(nv), Removed: pl.remove}
+		ch := Change{Key: key, Label: label(pl.o), Scope: ScopeProject, Old: valString(old), New: valString(nv), OldList: listOf(old), NewList: listOf(nv), Removed: pl.remove}
 		if pl.tower { // shown as plate relative positions
 			ch.Old = valString(lval(plateVectorRelative(cfg, key, len(h.p.Plates))...))
+			ch.OldList = nil
 			cfg.Set(key, nv)
 			ch.New = valString(lval(plateVectorRelative(cfg, key, len(h.p.Plates))...))
+			ch.NewList = nil
 			if ch.Old == ch.New {
 				ch.Note = "unchanged"
 			}
@@ -563,7 +570,7 @@ func (h *handle) applyForced(cfg *threemf.Config, changed map[string]any, env co
 				continue
 			}
 			cfg.Set(o.Key, nv)
-			ch := Change{Key: o.Key, Label: label(o), Scope: ScopeProject, Old: valString(old), New: valString(nv), Forced: true,
+			ch := Change{Key: o.Key, Label: label(o), Scope: ScopeProject, Old: valString(old), New: valString(nv), OldList: listOf(old), NewList: listOf(nv), Forced: true,
 				Note: "the app sets this automatically when " + strings.Join(condSentences(f.When), " and ")}
 			res.Forced = append(res.Forced, ch)
 		}

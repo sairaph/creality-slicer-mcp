@@ -55,7 +55,7 @@ func (s *Server) groupObjects(ctx context.Context, _ *mcp.CallToolRequest, in gr
 		front.Parts = append(front.Parts, groupPartFront{Name: p.Name, Kind: partKindName(p.Subtype), Filament: p.Filament})
 		fmt.Fprintf(&b, "%s | %s | %d\n", pipeSafe(p.Name), partKindName(p.Subtype), p.Filament)
 	}
-	b.WriteString(warningLines(warns))
+	writeWarnings(&b, warns)
 	out := successResult(front, nextLine(b.String(), "update_settings with scope part to tune one part, get_view to check, or slice_project."))
 	return s.withObjectScreenshot(be, out, in.IncludeScreenshot, in.Project, res.Object.Plate, strconv.Itoa(res.Object.ID), false), nil, nil
 }

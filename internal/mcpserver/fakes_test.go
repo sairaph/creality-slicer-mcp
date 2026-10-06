@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -185,7 +186,14 @@ func sessionConfig(t *testing.T, cfg Config, extra ...func(*Server)) *mcp.Client
 func (f *fixture) call(t *testing.T, name string, args map[string]any) (string, bool) {
 	t.Helper()
 	res := call(t, f.cs, name, args)
-	return text(t, res), res.IsError
+	out := text(t, res)
+	// Sections of every reply are separated by exactly one blank line. Only the
+	// skeleton is checked: front matter and fenced blocks hold verbatim values.
+	if sk := replySkeleton(out); strings.Contains(sk, "\n\n\n") {
+		i := strings.Index(sk, "\n\n\n")
+		t.Errorf("%s reply has three newlines in a row near %q", name, sk[max(0, i-60):min(len(sk), i+60)])
+	}
+	return out, res.IsError
 }
 
 // ok runs a tool that must succeed.
@@ -247,3 +255,31 @@ func addKey(t *testing.T, root, dir, name, key, value string) {
 	p[key] = value
 	writeJSON(t, path, p)
 }
+
+// replySkeleton is a reply without its front matter and its fenced blocks, where
+// values are shown as they are.
+func replySkeleton(out string) string {
+	if rest, ok := strings.CutPrefix(out, "---\n"); ok {
+		if _, after, ok := strings.Cut(rest, "\n---\n"); ok {
+			out = after
+		}
+	}
+	var b strings.Builder
+	fenced := false
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "```") {
+			fenced = !fenced
+			if fenced {
+				b.WriteString("<fenced block>\n")
+			}
+			continue
+		}
+		if !fenced {
+			b.WriteString(l + "\n")
+		}
+	}
+	// inline code spans hold values too
+	return spanRE.ReplaceAllString(b.String(), "<value>")
+}
+
+var spanRE = regexp.MustCompile("(?s)`[^`]*`")

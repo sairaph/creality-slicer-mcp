@@ -135,13 +135,14 @@ type plateFront struct {
 	BedType       string   `yaml:"bed_type,omitempty"`
 	BedTemps      []string `yaml:"first_layer_bed_c,omitempty"`
 	PrintSequence string   `yaml:"print_sequence,omitempty"`
+	SpiralMode    bool     `yaml:"spiral_mode,omitempty"`
 	Locked        bool     `yaml:"locked"`
 }
 
 func platesFront(in *projects.Info) []plateFront {
 	out := make([]plateFront, len(in.Plates))
 	for i, p := range in.Plates {
-		out[i] = plateFront{Index: p.Index, Name: p.Name, Objects: p.Objects, BedType: p.BedType, BedTemps: p.BedTemps, PrintSequence: p.PrintSequence, Locked: p.Locked}
+		out[i] = plateFront{Index: p.Index, Name: p.Name, Objects: p.Objects, BedType: p.BedType, BedTemps: p.BedTemps, PrintSequence: p.PrintSequence, SpiralMode: p.SpiralMode, Locked: p.Locked}
 	}
 	return out
 }
@@ -195,6 +196,9 @@ func projectBody(in *projects.Info, labels map[int][]string) string {
 		lock := ""
 		if p.Locked {
 			lock = ", locked"
+		}
+		if p.SpiralMode {
+			lock = ", spiral mode" + lock
 		}
 		fmt.Fprintf(&b, "%d | %s | %d object(s) | %s | %s%s\n", p.Index, pipeSafe(name), p.Objects, orDash(p.BedType), orDash(p.PrintSequence), lock)
 	}

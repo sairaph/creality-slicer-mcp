@@ -369,3 +369,125 @@ func TestExtruderRefusalMessageAndHintDiffer(t *testing.T) {
 		t.Errorf("message %q hint %q", ae.Message, ae.Hint)
 	}
 }
+
+// The log tail of a failed or timed out slice is whole lines, without the preset
+// loading noise.
+func TestLogTailSkipsNoiseAndNeverCutsALine(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("cli mode, Current CrealityPrint Version 7.3.0.6149\n")
+	for i := 0; b.Len() < 600<<10; i++ {
+		fmt.Fprintf(&b, "Slic3r::PresetBundle::load_vendor_configs_from_json::<lambda_7a8f>::operator () 5204Standard %d @Creality K2 load filament_id: 0\n", i)
+	}
+	b.WriteString("slicing object 1 of 2\n")
+	b.WriteString(strings.Repeat("x", 900) + "\n") // a dump
+	b.WriteString("ModelObject::clear_volumes called: object_name=Head\n")
+	b.WriteString("[2026-10-01 10:00:00.000] [0x1] [error] could not slice layer 12\n")
+	b.WriteString("ModelObject destructor called: name=Head\n")
+	path := filepath.Join(t.TempDir(), "slice.log")
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := logTail(path, 10)
+	want := []string{"slicing object 1 of 2", "error: could not slice layer 12"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("tail %q, want %q", got, want)
+	}
+	for _, l := range got {
+		if strings.HasSuffix(l, "...") {
+			t.Errorf("a cut line: %q", l)
+		}
+	}
+	// only noise: the whole lines of the unfiltered tail are shown
+	if err := os.WriteFile(path, []byte("ModelObject::clear_volumes called: a\nModelObject::clear_volumes called: b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := logTail(path, 1); len(got) != 1 || got[0] != "ModelObject::clear_volumes called: b" {
+		t.Errorf("fallback %q", got)
+	}
+}
+
+// A filament setting the process preset also lists, with another value, is the
+// filament preset's: not a rule of the app.
+func TestFilamentOwnedDifferenceIsNotAnAppRule(t *testing.T) {
+	e := newEnvWith(t, `"nozzle_temperature":["200"],`)
+	info := e.newProject(t, "FilOwned")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	diffs, err := e.st.ExplainSettings(info.ID, map[string]string{"nozzle_temperature": "215"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range diffs {
+		if d.Key == "nozzle_temperature" {
+			if d.Origin != "filament" || !strings.Contains(d.Why, "filament setting") {
+				t.Errorf("attribution %+v", d)
+			}
+			return
+		}
+	}
+	t.Fatalf("not compared: %+v", diffs)
+}
+
+func TestSliceSaysWhichEmptyPlatesWereSkipped(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Skip")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	if _, err := e.st.ManagePlates(info.ID, PlatesRequest{Action: "add"}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := e.st.Slice(info.ID, SliceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(out.Last.Warnings, "|"), "plate 2 skipped: no objects") {
+		t.Errorf("warnings %v", out.Last.Warnings)
+	}
+}
+
+// A filament setting changed in the project (different_settings_to_system lists
+// it in the filament's slot) is a change of this project, not the preset's.
+func TestChangedFilamentSettingIsAProjectChange(t *testing.T) {
+	e := newEnvWith(t, `"nozzle_temperature":["200"],`)
+	info := e.newProject(t, "FilChanged")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Values: map[string]any{"nozzle_temperature": 230}}); err != nil {
+		t.Fatal(err)
+	}
+	diffs, err := e.st.ExplainSettings(info.ID, map[string]string{"nozzle_temperature": "230"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range diffs {
+		if d.Key == "nozzle_temperature" {
+			if d.Origin != "project" {
+				t.Errorf("attribution %+v", d)
+			}
+			return
+		}
+	}
+	t.Fatalf("not compared: %+v", diffs)
+}
+
+// An error or warning line is never dropped as noise or for its length: a long one
+// is cut where it shows, with its length.
+func TestLogTailKeepsErrorLines(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("[2026-10-01 10:00:00.000] [0x1] [error] PresetBundle::load failed for preset X\n")
+	b.WriteString("[2026-10-01 10:00:01.000] [0x1] [warning] ModelObject::clear_volumes warns about Y\n")
+	b.WriteString("[2026-10-01 10:00:02.000] [0x1] [info] ModelObject::clear_volumes called: a\n")
+	b.WriteString("[2026-10-01 10:00:03.000] [0x1] [error] " + strings.Repeat("e", 900) + "\n")
+	b.WriteString("[2026-10-01 10:00:04.000] [0x1] [info] " + strings.Repeat("i", 900) + "\n")
+	path := filepath.Join(t.TempDir(), "slice.log")
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := logTail(path, 10)
+	if len(got) != 3 {
+		t.Fatalf("tail %q", got)
+	}
+	if got[0] != "error: PresetBundle::load failed for preset X" || !strings.HasPrefix(got[1], "warning: ModelObject::") {
+		t.Errorf("error and warning lines: %q", got)
+	}
+	if !strings.HasPrefix(got[2], "error: eeee") || !strings.HasSuffix(got[2], " ... (907 characters)") || len(got[2]) > 460 {
+		t.Errorf("long error line: %q", got[2])
+	}
+}

@@ -353,3 +353,11 @@ func valString(v val) string {
 	}
 	return v.Str
 }
+
+// listOf is the entries of a vector value, or nil for a scalar.
+func listOf(v val) []string {
+	if v.Raw == nil && v.IsList {
+		return append([]string{}, v.List...)
+	}
+	return nil
+}

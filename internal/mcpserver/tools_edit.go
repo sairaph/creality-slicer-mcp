@@ -159,7 +159,7 @@ func (s *Server) addModel(ctx context.Context, _ *mcp.CallToolRequest, in addMod
 		front.Added = append(front.Added, objectFrontOf(o))
 		fmt.Fprintf(&b, "- %s\n", objectLine(o))
 	}
-	b.WriteString(warningLines(withIntroduced(res.Warnings, before, res.Info)))
+	writeWarnings(&b, withIntroduced(res.Warnings, before, res.Info))
 	b.WriteString("\nNext: get_view to look at the plate from another side, update_settings to change settings, or slice_project.")
 	var focus []string
 	for _, o := range res.Added {
@@ -271,14 +271,33 @@ type updateSettingsFront struct {
 
 func settingChangeText(c projects.Change) string {
 	if c.Removed {
-		return fmt.Sprintf("%s: %s -> (override removed)", c.Key, shortValue(orDash(plainVector(c.Old))))
+		return fmt.Sprintf("%s: %s -> (override removed)", c.Key, orDash(shortValue(displayVector(c.Old, c.OldList))))
 	}
-	return fmt.Sprintf("%s: %s -> %s", c.Key, shortValue(orDash(plainVector(c.Old))), shortValue(orDash(plainVector(c.New))))
+	return fmt.Sprintf("%s: %s -> %s", c.Key, orDash(shortValue(displayVector(c.Old, c.OldList))), orDash(shortValue(displayVector(c.New, c.NewList))))
 }
 
-// plainVector shows a vector value whose entries are all equal (a single
-// filament's value, or the same value for every filament) as that value:
-// "[60]" and "[60,60]" read "60".
+// displayVector shows a vector setting whose entries are all equal (a single
+// filament's value, or the same value for every filament) as that one value:
+// [60] and [60, 60, 60, 60] read "60". The entries come from the config's own
+// list when there is one; entries that differ stay a list.
+func displayVector(text string, list []string) string {
+	if list != nil {
+		if len(list) == 0 {
+			return text
+		}
+		for _, e := range list[1:] {
+			if e != list[0] {
+				return text
+			}
+		}
+		return list[0]
+	}
+	return plainVector(text)
+}
+
+// plainVector is the fallback for a vector that has only its text: it collapses
+// equal entries only when every entry is a number, the one case where the comma
+// split cannot be ambiguous. Anything else is shown as it is.
 func plainVector(v string) string {
 	t := strings.TrimSpace(v)
 	if len(t) < 3 || t[0] != '[' || t[len(t)-1] != ']' {
@@ -286,8 +305,9 @@ func plainVector(v string) string {
 	}
 	parts := strings.Split(t[1:len(t)-1], ",")
 	first := strings.TrimSpace(parts[0])
-	for _, p := range parts[1:] {
-		if strings.TrimSpace(p) != first {
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if _, err := strconv.ParseFloat(strings.TrimSuffix(p, "%"), 64); err != nil || p != first {
 			return v
 		}
 	}
@@ -356,7 +376,7 @@ func (s *Server) updateSettings(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if len(same) > 0 {
 		var names []string
 		for _, c := range same {
-			names = append(names, c.Key+" ("+shortValue(orDash(c.New))+")")
+			names = append(names, c.Key+" ("+orDash(shortValue(displayVector(c.New, c.NewList)))+")")
 		}
 		fmt.Fprintf(&b, "\nUnchanged, already at that value: %s.\n", strings.Join(names, ", "))
 	}
@@ -371,7 +391,7 @@ func (s *Server) updateSettings(ctx context.Context, _ *mcp.CallToolRequest, in 
 			fmt.Fprintf(&b, "- %s%s\n", settingChangeText(c), note)
 		}
 	}
-	b.WriteString(warningLines(warns))
+	writeWarnings(&b, warns)
 	return successResult(front, nextLine(strings.TrimRight(b.String(), "\n"), "update_settings for more changes, add_model, or slice_project.")), nil, nil
 }
 
@@ -445,7 +465,7 @@ func (s *Server) setPresets(ctx context.Context, _ *mcp.CallToolRequest, in setP
 		fmt.Fprintf(&b, "\nFlush matrix: %s (multiplier %s). It is the purge volume in mm3 from each filament (row) to each other (column); dark to light needs the most. Give flush_matrix to set it by hand.\n", info.FlushMode, orDash(info.FlushMultiplier))
 		b.WriteString("For the K2 CFS, each filament's type must match a loaded spool: call get_guide with {\"topic\": \"multicolor-cfs\"}.\n")
 	}
-	b.WriteString(warningLines(withIntroduced(res.Warnings, before, info)))
+	writeWarnings(&b, withIntroduced(res.Warnings, before, info))
 	out := successResult(front, nextLine(strings.TrimRight(b.String(), "\n"), "update_settings or add_model, or slice_project."))
 	if len(in.Filaments) > 0 || len(in.Spools) > 0 {
 		out = s.withScreenshot(be, out, in.IncludeScreenshot, in.Project, 1, nil, false)
@@ -505,7 +525,7 @@ func (s *Server) addModifier(ctx context.Context, _ *mcp.CallToolRequest, in add
 			body += " Its settings apply where it overlaps the object."
 		}
 	}
-	body += warningLines(withIntroduced(nil, before, res.Info))
+	body = strings.TrimRight(body, "\n") + warningLines(withIntroduced(nil, before, res.Info))
 	out := successResult(addModifierFront{baseFront: base(res.Info), Part: res.PartID, Kind: in.Kind}, nextLine(body, "get_view with the object as focus and the Front or Right view to check it, or slice_project."))
 	return s.withPartScreenshot(be, out, in.IncludeScreenshot, in.Project, plateOfObject(res.Info, in.Object, 1), in.Object), nil, nil
 }
@@ -571,7 +591,7 @@ func (s *Server) setHeightRanges(ctx context.Context, _ *mcp.CallToolRequest, in
 	for _, n := range hr.Notes {
 		b.WriteString("\nNote: " + n + ".")
 	}
-	b.WriteString(warningLines(withIntroduced(nil, before, info)))
+	writeWarnings(&b, withIntroduced(nil, before, info))
 	out := successResult(heightRangesFront{baseFront: base(info), Object: in.Object, Ranges: len(in.Ranges)}, nextLine(strings.TrimRight(b.String(), "\n"), "get_view with show_ranges true to check the bands, or slice_project."))
 	return s.withObjectScreenshot(be, out, in.IncludeScreenshot, in.Project, plateOfObject(info, in.Object, 1), in.Object, true), nil, nil
 }
@@ -702,7 +722,7 @@ func (s *Server) setLayerActions(ctx context.Context, _ *mcp.CallToolRequest, in
 			ws = append(ws, w.Message)
 		}
 	}
-	b.WriteString(warningLines(withIntroduced(ws, before, res)))
+	writeWarnings(&b, withIntroduced(ws, before, res))
 	return successResult(layerActionsFront{baseFront: base(res), Plate: plate, Actions: len(actions)}, nextLine(strings.TrimRight(b.String(), "\n"), "get_project to check the plate, or slice_project.")), nil, nil
 }
 
@@ -758,9 +778,12 @@ func (s *Server) managePlates(ctx context.Context, _ *mcp.CallToolRequest, in ma
 		if p.Locked {
 			lock = ", locked"
 		}
+		if p.SpiralMode {
+			lock = ", spiral mode" + lock
+		}
 		fmt.Fprintf(&b, "- plate %d `%s`: %d object(s), bed %s, sequence %s%s\n", p.Index, orDash(p.Name), p.Objects, orDash(p.BedType), orDash(p.PrintSequence), lock)
 	}
-	b.WriteString(warningLines(withIntroduced(warnings, before, info)))
+	writeWarnings(&b, withIntroduced(warnings, before, info))
 	out := successResult(managePlatesFront{baseFront: base(info), Action: in.Action, Plates: platesFront(info)}, nextLine(strings.TrimRight(b.String(), "\n"), "add_model with a plate, get_view to look at a plate, or slice_project."))
 	switch in.Action {
 	case "add", "remove", "set":
@@ -866,4 +889,16 @@ func noteLine(n string) string {
 		return ""
 	}
 	return "\n\nNote: " + n + "."
+}
+
+// writeWarnings ends a reply's text with its Warnings section: one blank line
+// between the text and the heading, whatever the text ended with.
+func writeWarnings(b *strings.Builder, ws []string) {
+	if len(ws) == 0 {
+		return
+	}
+	s := strings.TrimRight(b.String(), "\n")
+	b.Reset()
+	b.WriteString(s)
+	b.WriteString(warningLines(ws))
 }

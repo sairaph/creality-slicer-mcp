@@ -39,8 +39,10 @@ type PlateInfo struct {
 	// BedTemps is the first layer bed temperature (C) of each filament for the
 	// plate's bed type, from the filament's <plate>_temp_initial_layer.
 	BedTemps []string
-	Locked   bool
-	Actions  []ActionInfo
+	// SpiralMode is true when the plate has vase (spiral) mode on.
+	SpiralMode bool
+	Locked     bool
+	Actions    []ActionInfo
 }
 
 // RangeInfo is one height range of an object.
@@ -339,6 +341,7 @@ func (h *handle) info() (*Info, error) {
 	for _, pl := range h.p.Plates {
 		pi := PlateInfo{Index: pl.Index, Name: pl.Name, Objects: len(pl.Instances), Locked: pl.Locked,
 			BedType: pl.Config.Value("bed_type"), PrintSequence: pl.Config.Value("print_sequence")}
+		pi.SpiralMode = pl.Config.Value("spiral_mode") == "true" || pl.Config.Value("spiral_mode") == "1"
 		if pi.BedType == "" && cfg != nil {
 			pi.BedType = cfg.String("curr_bed_type")
 		}

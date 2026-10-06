@@ -317,7 +317,8 @@ func (s *Store) Slice(ref string, opts SliceOptions) (*SliceOutcome, error) {
 		req       slicer.SliceRequest
 		startRev  int
 		platesOut []int
-		crashFil  int // filaments of the first multi-filament plate printed by layer (for the crash hint)
+		skipped   []int // empty plates left out of a slice of every plate
+		crashFil  int   // filaments of the first multi-filament plate printed by layer (for the crash hint)
 		crashSeq  string
 		seqHint   string // the hint of a -63 failure (by object clearance)
 		logPath   string // the slicer's own log of this run
@@ -365,6 +366,11 @@ func (s *Store) Slice(ref string, opts SliceOptions) (*SliceOutcome, error) {
 		var plateList []int
 		if opts.Plate == 0 && len(platesOut) < len(h.p.Plates) {
 			plateList = append(plateList, platesOut...)
+			for _, pl := range h.p.Plates {
+				if len(pl.Instances) == 0 {
+					skipped = append(skipped, pl.Index)
+				}
+			}
 		}
 		outDir := filepath.Join(h.dir, outDirName)
 		if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -417,6 +423,9 @@ func (s *Store) Slice(ref string, opts SliceOptions) (*SliceOutcome, error) {
 			return nil, withLog(slicerError(res, runErr, failureHint(s.cfg.Install.Dialect, res.Outcome, crashCtx{crashFil, crashSeq, seqHint})), logPath)
 		}
 		var notes []string
+		for _, p := range skipped {
+			notes = append(notes, fmt.Sprintf("plate %d skipped: no objects", p))
+		}
 		if retried {
 			notes = append(notes, "the file was saved by a newer or other application version; it was sliced with the newer-file check switched off")
 		}

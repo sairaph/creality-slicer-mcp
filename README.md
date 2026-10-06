@@ -5,7 +5,10 @@ clients, with the Creality Print you already have installed (7.3 preferred,
 7.2 works). The assistant builds real Creality Print projects with the right
 printer, process and filament presets, places your models, explains every
 setting in plain words before changing it, slices to G-code, and shows previews
-of the plate and of single layers. The projects are ordinary 3MF files you can
+of the plate and of single layers. It handles multi-colour work on the CFS
+(per object, per part, per height and per layer) and measures what the slicer
+really printed, object by object, so problems such as a thin feature starting
+in mid-air are found before printing. The projects are ordinary 3MF files you can
 open in Creality Print to paint or check, and the sliced result comes with
 everything the [creality-k2-mcp](https://github.com/sairaph/creality-k2-mcp)
 server needs to upload and print it. This server never talks to the printer.
@@ -29,8 +32,6 @@ It is a single self-contained binary.
 You need [Creality Print](https://www.creality.com/pages/download-creality-print)
 on the computer that runs this server. Creality Slicer MCP is a single
 self-contained binary: it needs no Python, uv or pip on your machine.
-Slicing needs Creality Print on Windows. On macOS and Linux the server installs
-and answers, but reports that it cannot slice.
 
 Windows (PowerShell):
 
@@ -71,7 +72,7 @@ entries, the guide skill, the cache and the program; your projects are kept.
 | [Installation](docs/installation.md) | Installer, commands, unattended installs, troubleshooting |
 | [Configuration](docs/configuration.md) | Environment variables, per-user folders |
 | [Tools](docs/tools.md) | Every tool, its arguments and what its replies contain |
-| [Examples](docs/examples.md) | Five worked flows, from a first print to a multi-plate batch |
+| [Examples](docs/examples.md) | Seven worked flows: a first print, two colours on the CFS, local reinforcement, an app project, several plates, a two-colour part from a CAD plate, thin-feature checks |
 
 ## Requirements
 

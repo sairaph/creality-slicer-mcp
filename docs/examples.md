@@ -2,7 +2,7 @@
 
 [Back to README](../README.md) · [Installation](installation.md) · [Configuration](configuration.md) · [Tools](tools.md)
 
-Five worked flows, each as the tool calls an assistant makes, with short JSON arguments and what the replies contain. Every reply starts with a front matter block of named fields and continues with a text body that ends with the next call to make; the [tools reference](tools.md) lists every field. Paths are examples: use absolute paths on your computer. Project names become ids (`bracket` becomes something like `bracket-3fa9c1`); pass the id, or the exact name when it is unique.
+Seven worked flows, each as the tool calls an assistant makes, with short JSON arguments and what the replies contain. Every reply starts with a front matter block of named fields and continues with a text body that ends with the next call to make; the [tools reference](tools.md) lists every field. Paths are examples: use absolute paths on your computer. Project names become ids (`bracket` becomes something like `bracket-3fa9c1`); pass the id, or the exact name when it is unique.
 
 Filament slots are numbered from 1 in the project tools (slot 1 is tool T0 in the G-code). The slice reply numbers the tools from 0, because that is what the printer server takes.
 
@@ -99,3 +99,23 @@ You ask: "Print three of these on a second plate as well, and slice both."
 3. Plate settings: `manage_plates` with `{"project": "kit", "action": "set", "plate": 2, "values": {"print_sequence": "by object"}}` prints plate 2 one object at a time. `lock` and `unlock` set the plate's lock flag, which the app honours when it arranges (the `arrange` option of `slice_project` ignores it); `rename` and `remove` work as their names say, and removing a plate that still has objects is refused.
 4. `slice_project` with `{"project": "kit", "plate": 0, "wait": 300}` slices every plate that has objects and waits up to five minutes for the result. The reply has one table row and one handoff entry per plate, with upload names `kit_plate1.gcode` and `kit_plate2.gcode`. `plate` 1 or 2 slices only that plate.
 5. `get_slice_report` with `{"project": "kit", "plate": 2, "section": "filaments"}` gives the grams, millimetres and cubic centimetres per tool for plate 2. If you change the project after slicing, the report says it is older than the project: slice again.
+
+## 6. One object in two colours, from a CAD plate
+
+You ask: "Here is my FreeCAD plate with the screw and its markings. Keep the layout, make the markings white."
+
+1. `add_model` with `{"project": "dial", "path": "C:\\Models\\dial_plate.3mf", "keep_positions": true, "names": ["screw", "top marks", "bottom marks"]}`. `keep_positions` places every object at the position it has in the file instead of arranging it; `names` names the objects in file order (CAD exports often carry no names, and they would become `dial_plate 1`, `dial_plate 2`, ...). Objects outside the bed are added with a warning.
+2. `group_objects` with `{"project": "dial", "objects": ["screw", "top marks", "bottom marks"], "name": "dial screw"}`. The first object is the base; the others become its parts, each keeping its place and the filament it had. The reply lists the parts with their filaments and attaches a picture.
+3. `update_settings` with `{"project": "dial", "scope": "part", "targets": ["dial screw/top marks", "dial screw/bottom marks"], "values": {"extruder": 2}}` prints both mark parts with filament 2. `extruder` also works per height range (`set_height_ranges`, a range's `values`); 0 means the object's own filament.
+4. `slice_project`, then `get_slice_report` with `{"project": "dial", "section": "layer", "layer": 1, "color_by": "filament"}` shows which filament prints where, with grams per tool for that layer.
+
+A colour change in height instead (stripes): `set_layer_actions` with `{"project": "dial", "actions": [{"layer": 20, "type": "color_change", "filament": 2}]}`. On the K2 with the CFS it is stored as a tool change that the printer performs by itself. Creality Print applies layer filament changes only when every object on the plate prints with one filament, and writes no layer actions at all on a plate printed by object with several objects; the replies warn in both cases, and the slice reply reports each action as found in the G-code or ignored.
+
+## 7. Check thin features before printing
+
+You ask: "Will these thin tines print? Fix what would fail."
+
+1. `get_guide` with `{"topic": "thin-features"}`: field results for thin features on the K2 (classic against variable-width walls, tip dots, lifting tips, the recipe below).
+2. `slice_project` with `{"project": "tines"}`, then `analyze_toolpaths` with `{"project": "tines", "measure": ["first_layers", "unsupported_starts", "short_runs"]}`. It reads the sliced G-code per object: the first and last layer of each feature, extrusion that starts in mid-air (a feature first printed above nothing, which fails), and short runs that leave dots on tips. Findings come first; long answers are paged, and every page gives each measure that still has rows a share.
+3. If a thin feature starts in mid-air, switch those objects to variable-width walls in one call: `update_settings` with `{"project": "tines", "scope": "object", "targets": ["tine A", "tine B"], "values": {"wall_generator": "arachne", "min_bead_width": "50%", "initial_layer_min_bead_width": "50%", "min_feature_size": "10%"}}`.
+4. Slice again and repeat step 2 until `unsupported_starts` has no findings. Other measures: `bounds` (outline per layer), `flow`, `radius` around a `center`, `support_contacts` (support patches and the object printed on each), `wall_order`.

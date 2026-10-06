@@ -40,6 +40,8 @@ With parameters, PowerShell needs the script block form: `& ([scriptblock]::Crea
 1. Finds the AI clients on your machine and lets you pick the ones to register with. A client whose `creality-slicer-mcp` entry you edited by hand (settings added to its `env`), or that runs another program under that name, starts unticked so the entry is kept; ticking it replaces the entry.
 2. Registers the server with the selected clients, then writes the `creality-slicer` guide skill into the skill folder each of them reads. Claude Desktop takes skills only as an upload, so it gets a note instead.
 
+The wizard runs full screen. Its last screen says in words what became of each client and of the guide skill; `p` shows the config files and folders, and the terminal keeps two lines (the result and the next step) when it ends. Started from the app (Configure AI clients), it returns to the app when you press enter.
+
 Nothing is written until step 2, so leaving the wizard earlier (`q`, Ctrl+C) changes nothing. It then exits with status 3, which the install scripts use to undo what they placed (the binary and the `PATH` entry), so a cancelled install leaves your machine as it was.
 
 ### Unattended
@@ -117,4 +119,4 @@ A warning does not make doctor fail; the exit status is 1 only when a check fail
 
 ## Running with no client
 
-Started bare in a terminal, `creality-slicer-mcp` opens a small menu app (run doctor, show slicer status, recent projects, quit). Started by an AI client, or with `mcp`, it serves MCP over stdio; `TRANSPORT=http` serves Streamable HTTP on `ADDR`.
+Started bare in a terminal, `creality-slicer-mcp` opens the app, a full-screen menu (projects, slicer status, doctor, configure AI clients, quit): the project list opens a project, starts it in Creality Print, exports it as a 3MF or deletes it, and "Configure AI clients" runs the setup wizard. Started by an AI client, or with `mcp`, it serves MCP over stdio; `TRANSPORT=http` serves Streamable HTTP on `ADDR`.

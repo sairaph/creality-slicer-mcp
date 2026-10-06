@@ -157,10 +157,17 @@ func TestCtrlCIsIgnoredWhileRegistrationRuns(t *testing.T) {
 	if d, _ := (applyGuard{inner, false}).Update(ctrlC, state); d != flow.Continue {
 		t.Fatalf("ctrl+c ended the wizard during registration: %v", d)
 	}
+	// Registered, and the guide skill is being written: still ignored.
 	state.Results.Done = true
-	if d, _ := (applyGuard{inner, false}).Update(ctrlC, state); d != flow.Quit {
-		t.Fatalf("ctrl+c after registration was swallowed: %v", d)
+	state.runSkills = func(harness.Scope, []harness.ID, bool) skillPlan { return skillPlan{} }
+	if d, _ := (applyGuard{inner, false}).Update(ctrlC, state); d != flow.Continue {
+		t.Fatalf("ctrl+c ended the wizard while the guide skill is written: %v", d)
 	}
+	state.Skills.take(skillPlan{})
+	if d, _ := (applyGuard{inner, false}).Update(ctrlC, state); d != flow.Quit {
+		t.Fatalf("ctrl+c after the guide skill was written was swallowed: %v", d)
+	}
+	state.Skills = skillState{}
 	state.Results.Done = false
 	if d, _ := (applyGuard{inner, true}).Update(ctrlC, state); d != flow.Quit {
 		t.Fatalf("ctrl+c during a dry run was swallowed: %v", d)

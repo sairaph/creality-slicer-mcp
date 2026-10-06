@@ -12,6 +12,7 @@ import (
 
 	"github.com/sairaph/mcp-wizard/cli"
 
+	"github.com/sairaph/creality-slicer-mcp/internal/appui"
 	"github.com/sairaph/creality-slicer-mcp/internal/domain"
 	"github.com/sairaph/creality-slicer-mcp/internal/guide"
 )
@@ -75,19 +76,34 @@ func TestOneShotCommandsAreRegistered(t *testing.T) {
 	}
 }
 
-func TestAppMenuOffersDoctorAndStatus(t *testing.T) {
-	var labels []string
-	for _, it := range menuItems() {
-		labels = append(labels, it.Label)
+func TestAppMenuEntries(t *testing.T) {
+	want := "Projects,Slicer status,Doctor,Configure AI clients,Quit"
+	if got := strings.Join(appui.MenuEntries(), ","); got != want {
+		t.Errorf("menu = %s, want %s", got, want)
 	}
-	if got := strings.Join(labels, ","); got != "Run doctor,Show slicer status,Recent projects,Quit" {
-		t.Errorf("menu = %s", got)
+}
+
+func TestConfigureCmdRunsInstallWithTheAppMarkerAndIsNotStarted(t *testing.T) {
+	cmd := configureCmd()
+	if len(cmd.Args) != 2 || cmd.Args[1] != "install" {
+		t.Fatalf("args = %v, want [<exe> install]", cmd.Args)
 	}
-	m := &appState{ctx: context.Background()}
-	for _, action := range []string{"doctor", "status"} {
-		if title, work, ok := m.reportFor(action); !ok || title == "" || work == nil {
-			t.Errorf("action %q is not a report", action)
-		}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Path != exe && cmd.Args[0] != exe {
+		t.Errorf("command = %q (%q), want this program %q", cmd.Path, cmd.Args[0], exe)
+	}
+	found := false
+	for _, kv := range cmd.Env {
+		found = found || kv == envFromApp+"=1"
+	}
+	if !found {
+		t.Errorf("the child does not carry %s=1", envFromApp)
+	}
+	if cmd.Process != nil {
+		t.Error("the command was started")
 	}
 }
 

@@ -1,19 +1,17 @@
 package main
 
 // Install wizard plumbing. The wizard writes nothing until the AI clients are
-// registered; the guide skill is written after that (installSkills). Leaving
+// registered; the guide skill is written after that, inside the wizard. Leaving
 // the wizard before that point (q, ctrl+c, closing it, SIGINT/SIGTERM) leaves
 // the machine unchanged, and the process exits with exitCancelled so the
 // install scripts can roll back the binary they just placed.
 
 import (
-	"fmt"
-	"strings"
-
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sairaph/mcp-wizard/cli"
 	"github.com/sairaph/mcp-wizard/flow"
 	"github.com/sairaph/mcp-wizard/harness"
+	"github.com/sairaph/mcp-wizard/tui"
 
 	"github.com/sairaph/creality-slicer-mcp/internal/domain"
 )
@@ -54,6 +52,9 @@ func (h harnessSelection) Init(state *AppState) tea.Cmd {
 }
 
 func (h harnessSelection) Update(msg tea.Msg, state *AppState) (flow.Directive, tea.Cmd) {
+	if tui.IsSpinMsg(msg) {
+		state.Spinner.Frame++
+	}
 	if k, ok := msg.(tea.KeyMsg); ok {
 		switch key := k.String(); {
 		case state.harnessDetecting && key != "q" && key != "ctrl+c":
@@ -77,26 +78,6 @@ func (h harnessSelection) Update(msg tea.Msg, state *AppState) (flow.Directive, 
 	}
 	pruneUnselected(&state.Harness.Selected)
 	return d, cmd
-}
-
-func (h harnessSelection) View(state *AppState) string {
-	view := h.Step.View(state)
-	if len(state.UntickedClients) == 0 || state.harnessDetecting {
-		return view
-	}
-	note := fmt.Sprintf("  %s already has a %q entry that setup did not write (edited by hand,\n"+
-		"  or another program's). It starts unticked so the entry is kept; ticking it replaces it.\n",
-		state.UntickedClients[0], h.name)
-	if len(state.UntickedClients) > 1 {
-		note = fmt.Sprintf("  %s already have a %q entry that setup did not write (edited by hand,\n"+
-			"  or another program's). They start unticked so the entries are kept; ticking one replaces it.\n",
-			strings.Join(state.UntickedClients, ", "), h.name)
-	}
-	// Above the footer, which is the last line.
-	if i := strings.LastIndex(view, "\n"); i >= 0 {
-		return view[:i] + "\n" + note + view[i:]
-	}
-	return view + "\n" + note
 }
 
 func anySelected[K comparable](selected map[K]bool) bool {
@@ -125,19 +106,15 @@ func runsUnattended(cmd cli.Command) bool {
 	return cmd.Yes || cmd.All || len(cmd.Clients) > 0 || len(cmd.Credentials) > 0
 }
 
-// applyGuard keeps ctrl+c from ending the wizard while the registration
-// writes are running: the library step accepts it, and exiting then would
-// kill the goroutine in the middle of writing a client's config file.
+// applyGuard is the registration step of the wizard. It keeps ctrl+c from
+// ending the wizard while the registration writes are running (the library
+// step accepts it, and exiting then would kill the goroutine in the middle of
+// writing a client's config file), writes the guide skill once the clients are
+// registered, and draws the registering and the finish screens (see
+// wizard_finish.go).
 type applyGuard struct {
 	flow.Step[AppState]
 	dryRun bool
-}
-
-func (g applyGuard) Update(msg tea.Msg, state *AppState) (flow.Directive, tea.Cmd) {
-	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "ctrl+c" && !state.Results.Done && !g.dryRun {
-		return flow.Continue, nil
-	}
-	return g.Step.Update(msg, state)
 }
 
 // stepIndex returns the position of the step with the given ID, or -1.
@@ -161,11 +138,11 @@ const (
 )
 
 // classifyWizard decides the outcome from the flow's state. runCode is
-// tui.Run's result: non-zero without a recorded failure means the terminal
+// runFlow's result: non-zero without a recorded failure means the terminal
 // UI could not run at all. applyStarted reports whether the flow reached the
 // registration step; in a dry run that step writes nothing. signalled
 // reports that the wizard's context was cancelled (SIGINT or SIGTERM), which
-// ends tui.Run with a non-zero code; before registration that is a cancel.
+// ends runFlow with a non-zero code; before registration that is a cancel.
 func classifyWizard(base *flow.BaseState, runCode int, applyStarted, dryRun, signalled bool) wizardOutcome {
 	switch {
 	case base.Settled:

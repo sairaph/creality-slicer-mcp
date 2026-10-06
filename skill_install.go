@@ -48,10 +48,9 @@ const (
 // they never list the guide twice.
 var readsBoth = map[harness.ID]bool{"cursor": true, "opencode": true, "vscode": true}
 
-// skillFolders returns the skill folders (absolute) that serve ids under
-// scope, sorted, and whether Claude Desktop is among ids: it reads skills from
-// an upload only, so it has no folder.
-func skillFolders(ids []harness.ID, scope harness.Scope, home string) (dirs []string, desktop bool) {
+// skillFoldersServed is skillFolders with, for each folder, how many of ids it
+// serves (Claude Desktop has no folder and is not counted).
+func skillFoldersServed(ids []harness.ID, scope harness.Scope, home string) (dirs []string, served map[string]int, desktop bool) {
 	root := home
 	if scope.IsProject() {
 		root = scope.Dir
@@ -62,13 +61,13 @@ func skillFolders(ids []harness.ID, scope harness.Scope, home string) (dirs []st
 			claudeCode = true
 		}
 	}
-	seen := map[string]bool{}
+	served = map[string]int{}
 	add := func(folder skillFolder) {
 		dir := filepath.Join(root, filepath.FromSlash(string(folder)))
-		if !seen[dir] {
-			seen[dir] = true
+		if served[dir] == 0 {
 			dirs = append(dirs, dir)
 		}
+		served[dir]++
 	}
 	for _, id := range ids {
 		switch {
@@ -89,15 +88,23 @@ func skillFolders(ids []harness.ID, scope harness.Scope, home string) (dirs []st
 				dir = v
 			}
 			dir = filepath.Join(dir, "skills")
-			if !seen[dir] {
-				seen[dir] = true
+			if served[dir] == 0 {
 				dirs = append(dirs, dir)
 			}
+			served[dir]++
 		default:
 			add(folderAgents)
 		}
 	}
 	sort.Strings(dirs)
+	return dirs, served, desktop
+}
+
+// skillFolders returns the skill folders (absolute) that serve ids under
+// scope, sorted, and whether Claude Desktop is among ids: it reads skills from
+// an upload only, so it has no folder.
+func skillFolders(ids []harness.ID, scope harness.Scope, home string) (dirs []string, desktop bool) {
+	dirs, _, desktop = skillFoldersServed(ids, scope, home)
 	return dirs, desktop
 }
 
@@ -172,6 +179,69 @@ func writeSkillFrom(src fs.FS, dir string) error {
 	return err
 }
 
+// skill states of a skillRow.
+const (
+	skillWritten    = "written"
+	skillWouldWrite = "would write"
+	skillSkipped    = "skipped"
+	skillFailed     = "failed"
+)
+
+// skillRow is what became of one skill folder.
+type skillRow struct {
+	// Dir is the folder of the skill itself (<skills folder>/creality-slicer).
+	Dir   string
+	State string
+	Err   error
+	// Clients is how many of the registered clients read this folder.
+	Clients int
+}
+
+// skillPlan is what installing the guide for some clients does or would do.
+type skillPlan struct {
+	Rows []skillRow
+	// Desktop is true when Claude Desktop is among the clients: it takes
+	// skills only as an upload, so it has no folder.
+	Desktop bool
+	// HomeErr is why the home directory cannot be found; Rows is then empty.
+	HomeErr error
+	home    string
+}
+
+// planSkills decides, and with dryRun false does, the writing of the guide for
+// ids' clients: one row per folder. A folder that holds a skill this program
+// did not write is skipped, as it is everywhere else.
+func planSkills(scope harness.Scope, ids []harness.ID, dryRun bool) skillPlan {
+	if len(ids) == 0 {
+		return skillPlan{}
+	}
+	home, err := userhome.Dir()
+	if err != nil {
+		return skillPlan{HomeErr: err}
+	}
+	dirs, served, desktop := skillFoldersServed(ids, scope, home)
+	plan := skillPlan{Desktop: desktop, home: home}
+	for _, dir := range dirs {
+		target := filepath.Join(dir, guide.Name)
+		row := skillRow{Dir: target, Clients: served[dir]}
+		ours, exists := ownSkill(target)
+		switch {
+		case exists && !ours:
+			row.State = skillSkipped
+		case dryRun:
+			row.State = skillWouldWrite
+		default:
+			if err := writeSkillFolder(target); err != nil {
+				row.State, row.Err = skillFailed, err
+			} else {
+				row.State = skillWritten
+			}
+		}
+		plan.Rows = append(plan.Rows, row)
+	}
+	return plan
+}
+
 // installSkills writes the guide for ids' clients, printing one line per
 // folder. It returns an exit code: a folder that could not be written fails.
 // With prune, ids is every registered client, so a copy that creality-slicer-mcp wrote
@@ -182,47 +252,43 @@ func installSkills(w io.Writer, scope harness.Scope, ids []harness.ID, dryRun, p
 	if len(ids) == 0 {
 		return 0
 	}
-	home, ok := skillHome(w)
-	if !ok {
+	plan := planSkills(scope, ids, dryRun)
+	if plan.HomeErr != nil {
+		fmt.Fprintf(w, "  [fail] guide skill: cannot find the home directory: %v\n", plan.HomeErr)
 		return 1
 	}
-	dirs, desktop := skillFolders(ids, scope, home)
-	if len(dirs) == 0 && !desktop {
+	if len(plan.Rows) == 0 && !plan.Desktop {
 		return 0
 	}
 	fmt.Fprintln(w, "\n  Guide skill")
 	code := 0
-	for _, dir := range dirs {
-		target := filepath.Join(dir, guide.Name)
-		ours, exists := ownSkill(target)
-		switch {
-		case exists && !ours:
-			fmt.Fprintf(w, "  [skip] %s holds a skill that creality-slicer-mcp did not write; it is left as it is.\n", target)
-		case dryRun:
-			fmt.Fprintf(w, "  [ok]   would write the guide skill to %s\n", target)
+	for _, row := range plan.Rows {
+		switch row.State {
+		case skillSkipped:
+			fmt.Fprintf(w, "  [skip] %s holds a skill that creality-slicer-mcp did not write; it is left as it is.\n", row.Dir)
+		case skillWouldWrite:
+			fmt.Fprintf(w, "  [ok]   would write the guide skill to %s\n", row.Dir)
+		case skillFailed:
+			fmt.Fprintf(w, "  [fail] %s: %v\n", row.Dir, row.Err)
+			code = 1
 		default:
-			if err := writeSkillFolder(target); err != nil {
-				fmt.Fprintf(w, "  [fail] %s: %v\n", target, err)
-				code = 1
-				continue
-			}
-			fmt.Fprintf(w, "  [ok]   wrote the guide skill to %s\n", target)
+			fmt.Fprintf(w, "  [ok]   wrote the guide skill to %s\n", row.Dir)
 		}
 	}
-	if prune && len(dirs) > 0 {
+	if prune && len(plan.Rows) > 0 {
 		wanted := map[string]bool{}
-		for _, dir := range dirs {
-			wanted[dir] = true
+		for _, row := range plan.Rows {
+			wanted[filepath.Dir(row.Dir)] = true
 		}
 		var stale []string
-		for _, dir := range allSkillFolders(scope, home) {
+		for _, dir := range allSkillFolders(scope, plan.home) {
 			if !wanted[dir] {
 				stale = append(stale, filepath.Join(dir, guide.Name))
 			}
 		}
 		code = max(code, removeOwnSkills(w, stale, dryRun))
 	}
-	if desktop {
+	if plan.Desktop {
 		fmt.Fprintln(w, "  Claude Desktop takes skills only as an upload (Settings > Capabilities > Skills), so the guide")
 		fmt.Fprintln(w, "  is not installed there. The tools and the server instructions work without it.")
 	}

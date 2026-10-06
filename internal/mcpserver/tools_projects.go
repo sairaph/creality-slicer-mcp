@@ -26,14 +26,18 @@ func (s *Server) registerProjectTools() {
 func (s *Server) projectsOrFail(ctx context.Context) (ProjectBackend, *toolResult) {
 	be, err := s.env.projectBackend(ctx)
 	if err != nil {
-		res := unavailable("use projects", err)
-		if errors.Is(err, errProjectsStart) {
-			res = render.ErrorResult(render.Error{Code: render.CodeUnavailable, Message: shortMessage("Cannot use projects: " + err.Error()),
-				Hint: "The project store could not start: check that the folder in the message exists and can be written to, then call get_slicer_status."})
-		}
-		return ProjectBackend{}, res
+		return ProjectBackend{}, render.ErrorResult(projectsError(err))
 	}
 	return be, nil
+}
+
+// projectsError is the error of a projects layer that cannot be used.
+func projectsError(err error) render.Error {
+	if errors.Is(err, errProjectsStart) {
+		return render.Error{Code: render.CodeUnavailable, Message: shortMessage("Cannot use projects: " + err.Error()),
+			Hint: "The project store could not start: check that the folder in the message exists and can be written to, then call get_slicer_status."}
+	}
+	return unavailableError("use projects", err)
 }
 
 // filamentInput is one filament slot in a request.

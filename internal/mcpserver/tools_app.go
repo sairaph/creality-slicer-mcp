@@ -2,14 +2,11 @@ package mcpserver
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/sairaph/mcp-wizard/render"
 
-	"github.com/sairaph/creality-slicer-mcp/internal/applaunch"
 	"github.com/sairaph/creality-slicer-mcp/internal/projects"
 )
 
@@ -42,43 +39,17 @@ type openInAppFront struct {
 // a window that is open, and it starts the application with that one file and
 // no option.
 func (s *Server) openInApp(ctx context.Context, _ *mcp.CallToolRequest, in openInAppInput) (*mcp.CallToolResult, any, error) {
-	install, err := s.env.install(ctx, false)
-	if err != nil {
-		return failure(ctx, "detect Creality Print", err, ""), nil, nil
-	}
-	if !install.Found || !install.Supported || install.Exe == "" {
-		reason := install.Reason
-		if reason == "" {
-			reason = "no supported Creality Print (7.2 or 7.3) was found"
-		}
-		return unavailable("open the app", errors.New(reason)), nil, nil
-	}
-	be, fail := s.projectsOrFail(ctx)
-	if fail != nil {
-		return fail, nil, nil
-	}
-	mode := deref(in.Mode)
-	if mode == "" {
-		mode = projects.ViewPreview
-	}
 	plate := 1
 	if in.Plate != nil {
 		plate = *in.Plate
 	}
-	vf, err := be.Store.PrepareView(in.Project, plate, mode)
-	if err != nil {
-		return projFailure(err), nil, nil
+	l, fail := s.launch(ctx, in.Project, plate, deref(in.Mode))
+	if fail != nil {
+		return fail.res, nil, nil
 	}
-	pid, err := s.env.deps.Launcher.Launch(install.Exe, vf.Path)
-	if err != nil {
-		hint := "Check that Creality Print starts from its own shortcut, then call open_in_app again."
-		if errors.Is(err, applaunch.ErrUnderTest) {
-			hint = "The real launcher does not run under go test."
-		}
-		return render.ErrorResult(render.Error{Code: render.CodeUnavailable, Message: shortMessage(fmt.Sprintf("Could not start Creality Print: %v", err)), Hint: hint}), nil, nil
-	}
+	install, vf, pid := l.install, l.view, l.PID
 	front := openInAppFront{baseFront: baseFront{Project: vf.ProjectID, Revision: vf.Revision}, Mode: vf.Mode, Plate: vf.Plate, File: vf.Path, PID: pid, AppVersion: install.Version, SavedFiles: vf.SavedFiles}
-	if info, ierr := be.Store.GetProject(vf.ProjectID); ierr == nil {
+	if info, ierr := l.store.GetProject(vf.ProjectID); ierr == nil {
 		front.baseFront = base(info)
 	}
 

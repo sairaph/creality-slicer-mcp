@@ -51,9 +51,14 @@ func (t *toolError) Error() string { return t.e.Message }
 // hint, when not empty, replaces the hint of err's class. Errors are returned
 // as results, never as Go errors, so the model always sees the hint.
 func failure(_ context.Context, what string, err error, hint string) *mcp.CallToolResult {
+	return render.ErrorResult(failureError(what, err, hint))
+}
+
+// failureError is the error failure reports.
+func failureError(what string, err error, hint string) render.Error {
 	var te *toolError
 	if errors.As(err, &te) {
-		return render.ErrorResult(te.e)
+		return te.e
 	}
 	e := render.Error{Code: render.CodeInternal, Message: shortMessage(fmt.Sprintf("Failed to %s: %v", what, err)), Hint: internalHint}
 	var netErr net.Error
@@ -72,7 +77,7 @@ func failure(_ context.Context, what string, err error, hint string) *mcp.CallTo
 	if hint != "" {
 		e.Hint = hint
 	}
-	return render.ErrorResult(e)
+	return e
 }
 
 // isTimeout reports whether err is an operation that did not finish in time.

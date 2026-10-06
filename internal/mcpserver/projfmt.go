@@ -17,12 +17,9 @@ import (
 	"github.com/sairaph/creality-slicer-mcp/internal/threemf"
 )
 
-// projFailure turns an error of the projects layer into the error result of a
-// tool: its code, message and hint as they are. A slicer failure carries the
-// slicer's own output as a second text item.
-func projFailure(err error) *toolResult {
-	e := projects.AsError(err)
-	code := e.Code
+// projErrorParts is the code, message and hint projFailure reports for e.
+func projErrorParts(e *projects.Error) (code, msg, hint string) {
+	code = e.Code
 	switch code {
 	case projects.CodeSlicerError:
 		code = codeSlicer
@@ -30,8 +27,8 @@ func projFailure(err error) *toolResult {
 	default:
 		code = render.CodeInternal
 	}
-	msg := dedupeKeyPrefix(e.Message)
-	hint := plainPaths(e.Hint)
+	msg = dedupeKeyPrefix(e.Message)
+	hint = plainPaths(e.Hint)
 	// A refused change of a key Creality's presets lock: say how to override.
 	if strings.Contains(msg, "in Creality presets (the vendor fixes it)") {
 		hint = "Pass allow_locked true to override Creality's lock (the vendor fixes this setting, so change it only when you know the slicer accepts the value), or call describe_setting to see its lock and range."
@@ -39,6 +36,15 @@ func projFailure(err error) *toolResult {
 	if hint == "" {
 		hint = defaultHint(code)
 	}
+	return code, msg, hint
+}
+
+// projFailure turns an error of the projects layer into the error result of a
+// tool: its code, message and hint as they are. A slicer failure carries the
+// slicer's own output as a second text item.
+func projFailure(err error) *toolResult {
+	e := projects.AsError(err)
+	code, msg, hint := projErrorParts(e)
 	re := render.Error{Code: code, Message: shortMessage(msg), Hint: hint}
 	var tail string
 	var logLines []string

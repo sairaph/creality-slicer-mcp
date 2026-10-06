@@ -22,6 +22,7 @@ import (
 	"github.com/sairaph/mcp-wizard/tui"
 	"github.com/sairaph/mcp-wizard/update"
 
+	"github.com/sairaph/creality-slicer-mcp/internal/appui"
 	"github.com/sairaph/creality-slicer-mcp/internal/clicmd"
 	"github.com/sairaph/creality-slicer-mcp/internal/doctorchecks"
 	"github.com/sairaph/creality-slicer-mcp/internal/domain"
@@ -150,6 +151,16 @@ type AppState struct {
 	// client list is being detected (see harnessSelection).
 	UntickedClients  []string
 	harnessDetecting bool
+
+	// Skills is the guide skill, written after the registration; ShowPaths and
+	// Scroll belong to the screens of the wizard, FromApp is set when the app
+	// started the wizard (see envFromApp).
+	Skills    skillState
+	ShowPaths bool
+	Scroll    appui.Scroller
+	FromApp   bool
+	// runSkills writes the guide skill (planSkills when nil); tests replace it.
+	runSkills func(scope harness.Scope, ids []harness.ID, dryRun bool) skillPlan
 }
 
 func harnessState(s *AppState) *installer.HarnessState { return &s.Harness }
@@ -261,7 +272,7 @@ func runInstall(ctx context.Context, cmd cli.Command) int {
 
 	if tui.IsInteractive() && !runsUnattended(cmd) {
 		warnUnusedCredentials(cmd)
-		return runWizard(ctx, detector, harness.Scope{}, cmd, domain.BinaryName+" setup")
+		return runWizard(ctx, detector, harness.Scope{}, cmd)
 	}
 	return runUnattended(ctx, detector, harness.Scope{}, cmd, harness.Present)
 }
@@ -295,15 +306,17 @@ func runAdd(ctx context.Context, cmd cli.Command) int {
 
 	if tui.IsInteractive() && !runsUnattended(cmd) {
 		warnUnusedCredentials(cmd)
-		return runWizard(ctx, detector, scope, cmd, domain.BinaryName+" project setup")
+		return runWizard(ctx, detector, scope, cmd)
 	}
 	return runUnattended(ctx, detector, scope, cmd, harness.Present)
 }
 
-// runWizard drives the interactive install: pick clients, register. Nothing is
-// written before the registration step; the guide skill follows it.
-func runWizard(ctx context.Context, detector *harness.Detector, scope harness.Scope, cmd cli.Command, title string) int {
-	state := &AppState{}
+// runWizard drives the interactive install: pick clients, register, write the
+// guide skill. Nothing is written before the registration step. The wizard
+// runs in the alternate screen; what stays in the terminal afterwards is a
+// summary line and the next step.
+func runWizard(ctx context.Context, detector *harness.Detector, scope harness.Scope, cmd cli.Command) int {
+	state := &AppState{FromApp: os.Getenv(envFromApp) == "1"}
 	steps := []flow.Step[AppState]{
 		harnessSelection{
 			Step: installer.HarnessStep(ctx, detector, harnessState, installer.HarnessStepOptions{AllDetected: true, Scope: scope}),
@@ -316,7 +329,7 @@ func runWizard(ctx context.Context, detector *harness.Detector, scope harness.Sc
 	}
 	applyIndex := stepIndex(steps, "apply")
 	f := flow.New(steps, state)
-	code := tui.Run(ctx, f, tui.Options{Title: title})
+	code := runFlow(ctx, f, os.Stdin, os.Stdout)
 
 	switch classifyWizard(&state.BaseState, code, f.Current() >= applyIndex, cmd.DryRun, ctx.Err() != nil) {
 	case outcomeCancelled:
@@ -335,10 +348,15 @@ func runWizard(ctx context.Context, detector *harness.Detector, scope harness.Sc
 		return 1
 	}
 	if state.Failure != nil {
-		// Registration failed for some clients; the rest still get the guide.
+		// Registration failed for some clients; the rest still got the guide.
 		fmt.Fprintln(os.Stderr, state.Failure)
 	}
-	return max(code, installSkills(os.Stdout, scope, selectedIDs(state.Harness.Selected), cmd.DryRun, false))
+	printScrollback(os.Stdout, state, cmd.DryRun)
+	if state.Skills.Started && !state.Skills.Done {
+		fmt.Fprintf(os.Stderr, "  The guide skill may not have been written; run `%s install --yes` to write it.\n", domain.BinaryName)
+		return 1
+	}
+	return max(code, state.Skills.Code)
 }
 
 func runUnattended(ctx context.Context, detector *harness.Detector, scope harness.Scope, cmd cli.Command, desired harness.DesiredState) int {
@@ -495,19 +513,22 @@ func updateOptions() update.Options {
 	return opts
 }
 
-func newDoctor() *doctor.Runner {
+// doctorChecks are the health checks, in the order doctor reports them.
+func doctorChecks() []doctor.Check {
 	opts := updateOptions()
-	r := doctor.New(
+	checks := []doctor.Check{
 		executableCheck{},
 		doctor.PathCheck{Dir: opts.InstallDir},
 		clientsCheck{},
-	)
-	r.Add(doctorchecks.Checks()...)
-	if version != "dev" {
-		r.Add(doctor.UpdateCheck{Opts: opts})
 	}
-	return r
+	checks = append(checks, doctorchecks.Checks()...)
+	if version != "dev" {
+		checks = append(checks, doctor.UpdateCheck{Opts: opts})
+	}
+	return checks
 }
+
+func newDoctor() *doctor.Runner { return doctor.New(doctorChecks()...) }
 
 func runDoctor(ctx context.Context) int {
 	return newDoctor().Run(ctx, os.Stdout)
@@ -534,6 +555,34 @@ func (c executableCheck) Run(ctx context.Context) doctor.Result {
 	return doctor.Result{Name: c.Name(), Status: doctor.OK, Detail: path}
 }
 
+// configuredClient is a client that has this server registered: its name and
+// the name with what is wrong with its entry.
+type configuredClient struct{ Name, Label string }
+
+// configuredClients lists the AI clients that have this server registered,
+// including entries the user has edited (see clients.go). outdated is true
+// when one of them runs another copy of the program.
+func configuredClients(ctx context.Context) (clients []configuredClient, outdated bool, err error) {
+	detector, err := newDetector(domain.ServerName)
+	if err != nil {
+		return nil, false, err
+	}
+	harnesses := detector.Detect(ctx)
+	entries := clientEntries(ctx, detector, harness.Scope{}, harnesses)
+	for _, h := range harnesses {
+		switch e := entries[h.ID]; e.kind {
+		case entryConfigured:
+			clients = append(clients, configuredClient{h.Name, h.Name})
+		case entryEdited:
+			clients = append(clients, configuredClient{h.Name, h.Name + " (entry edited)"})
+		case entryOutdated:
+			clients = append(clients, configuredClient{h.Name, h.Name + " (runs " + e.command + ")"})
+			outdated = true
+		}
+	}
+	return clients, outdated, nil
+}
+
 // clientsCheck lists the AI clients that have this server registered,
 // including entries the user has edited (see clients.go).
 type clientsCheck struct{}
@@ -541,24 +590,13 @@ type clientsCheck struct{}
 func (clientsCheck) Name() string { return "AI clients" }
 
 func (clientsCheck) Run(ctx context.Context) doctor.Result {
-	detector, err := newDetector(domain.ServerName)
+	clients, outdated, err := configuredClients(ctx)
 	if err != nil {
 		return doctor.Result{Name: "AI clients", Status: doctor.Fail, Detail: err.Error()}
 	}
-	harnesses := detector.Detect(ctx)
-	entries := clientEntries(ctx, detector, harness.Scope{}, harnesses)
 	var configured []string
-	outdated := false
-	for _, h := range harnesses {
-		switch e := entries[h.ID]; e.kind {
-		case entryConfigured:
-			configured = append(configured, h.Name)
-		case entryEdited:
-			configured = append(configured, h.Name+" (entry edited)")
-		case entryOutdated:
-			configured = append(configured, h.Name+" (runs "+e.command+")")
-			outdated = true
-		}
+	for _, c := range clients {
+		configured = append(configured, c.Label)
 	}
 	if len(configured) == 0 {
 		return doctor.Result{Name: "AI clients", Status: doctor.Warn, Detail: "no client is configured; run `" + domain.BinaryName + " install`"}

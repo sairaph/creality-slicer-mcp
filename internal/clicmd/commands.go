@@ -198,8 +198,8 @@ func RunSlice(ctx context.Context, d Deps, args []string) int {
 	return finish(d, tools.SliceFile(ctx, mcpserver.SliceFileArgs{Path: abs, Plate: *plate, Out: outDir, Overwrite: *overwrite}), false)
 }
 
-// WriteRecentProjects prints the recent projects, newest first, to w: the
-// interactive app's "Recent projects" report.
+// WriteRecentProjects prints the recent projects as text, newest first, to w. The
+// interactive app does not use it: its screens are drawn from typed data.
 func WriteRecentProjects(ctx context.Context, d Deps, w io.Writer) int {
 	d = d.withDefaults()
 	d.Stdout = w

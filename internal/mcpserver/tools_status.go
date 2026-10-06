@@ -3,7 +3,6 @@ package mcpserver
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -48,49 +47,23 @@ func (s *Server) getSlicerStatus(ctx context.Context, _ *mcp.CallToolRequest, in
 
 // SlicerStatus is get_slicer_status; the command line calls it too.
 func (s *Server) SlicerStatus(ctx context.Context, refresh bool) *mcp.CallToolResult {
-	install, err := s.env.install(ctx, refresh)
+	info, err := s.StatusInfo(ctx, refresh)
 	if err != nil {
 		return failure(ctx, "detect Creality Print", err, "")
 	}
+	install := info.Install
 	front := statusFront{
 		Installed: install.Found, Supported: install.Supported, Version: install.Version, Build: install.Build,
 		Dialect: install.Dialect, Exe: install.Exe, DataDir: install.DataDir, ProfileVersion: install.ProfileVersion,
 		GUIRunning: install.GUIRunning, Reason: install.Reason,
+		ProfileSource: info.ProfileSource, ProjectsDir: info.ProjectsDir,
+		CatalogVersion: info.CatalogVersion, TooltipCoverage: info.TooltipCoverage,
 	}
-	if install.Found && install.ProfileRoot != "" {
-		front.ProfileSource = "data_dir"
-		if filepath.Clean(install.ProfileRoot) == filepath.Clean(filepath.Join(install.Dir, "resources", "profiles")) {
-			front.ProfileSource = "install"
-		}
+	if info.DriftKnown {
+		n := len(info.Drift)
+		front.CatalogDrift = &n
 	}
-	if dir, err := s.env.deps.ProjectsDir(); err == nil {
-		front.ProjectsDir = dir
-	}
-
-	var textsNote string
-	var drift []string
-	cat, reason, cerr := s.env.catalog(ctx)
-	if cerr == nil {
-		st := cat.Stats()
-		front.CatalogVersion = st.Version
-		if st.TextsAttached {
-			front.TooltipCoverage = fmt.Sprintf("%d/%d", st.TooltipsFound, st.TooltipHashes)
-		} else if install.Found {
-			textsNote = reason
-		}
-		// Catalog drift: settings the installed K2 presets set that the
-		// shipped catalog does not know.
-		if install.Found {
-			if store, serr := s.env.profileStore(ctx); serr == nil {
-				if keys, kerr := store.KeysSetBy(k2Model); kerr == nil && len(keys) > 0 {
-					drift = cat.UnknownKeys(keys)
-					n := len(drift)
-					front.CatalogDrift = &n
-				}
-			}
-		}
-	}
-	return successResult(front, statusBody(install, front, textsNote, drift, refresh))
+	return successResult(front, statusBody(install, front, info.DescriptionsNote, info.Drift, refresh))
 }
 
 func statusBody(in slicer.Install, f statusFront, textsNote string, drift []string, refreshed bool) string {

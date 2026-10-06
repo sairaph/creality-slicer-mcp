@@ -312,7 +312,8 @@ func TestWizardStartsWithAKeptClientUnticked(t *testing.T) {
 	if len(state.UntickedClients) != 1 || state.UntickedClients[0] != "Cursor" {
 		t.Fatalf("UntickedClients = %v", state.UntickedClients)
 	}
-	if view := step.View(state); !strings.Contains(view, "starts unticked so the entry is kept") || !strings.Contains(view, "Cursor") {
+	// The note wraps to the window: compare it without the line breaks.
+	if view := strings.Join(strings.Fields(step.View(state)), " "); !strings.Contains(view, "starts unticked so the entry is kept") || !strings.Contains(view, "Cursor") {
 		t.Fatalf("no note explains the unticked client:\n%s", view)
 	}
 }

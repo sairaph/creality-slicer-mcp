@@ -60,7 +60,10 @@ Nothing is written until step 2, so cancelling earlier leaves your machine as
 it was. An entry you edited by hand, or one that runs another program, is kept
 unless you select that client, name it with `--clients` or pass `--all`.
 
-Restart your AI client afterwards. Run `creality-slicer-mcp doctor` at any time
+Restart your AI client afterwards. Run `creality-slicer-mcp` on its own to open
+the app: your projects (open one in Creality Print, export or delete it), the
+slicer status, a health check and "Configure AI clients" to run the setup again.
+Run `creality-slicer-mcp doctor` at any time
 to check the installation, and `creality-slicer-mcp update` to update to the
 latest release. `creality-slicer-mcp uninstall --all` removes the client
 entries, the guide skill, the cache and the program; your projects are kept.

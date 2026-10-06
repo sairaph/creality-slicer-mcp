@@ -81,11 +81,16 @@ func invalidInput(message, hint string) *toolResult {
 // unavailable is an unavailable error result for something the install or its
 // data lacks; the hint points at get_slicer_status.
 func unavailable(what string, err error) *toolResult {
-	return render.ErrorResult(render.Error{
+	return render.ErrorResult(unavailableError(what, err))
+}
+
+// unavailableError is the error unavailable reports.
+func unavailableError(what string, err error) render.Error {
+	return render.Error{
 		Code:    render.CodeUnavailable,
 		Message: shortMessage(fmt.Sprintf("Cannot %s: %v", what, err)),
 		Hint:    "Call get_slicer_status to see what is missing; settings, presets and guides need Creality Print to be found.",
-	})
+	}
 }
 
 // pipeSafe keeps a cell of a pipe separated row on its line.

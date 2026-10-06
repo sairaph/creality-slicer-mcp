@@ -52,7 +52,7 @@ Read the summary: print time, grams per tool, layer count, warnings. get_slice_r
 
 ## 7. Hand off to the printer
 
-The slice result carries a `handoff` block: the G-code path, a suggested upload name, the tools with their filament type and colour, and the object labels. Continue with the creality-k2-mcp server, as described in `multicolor-cfs`: get_filaments to read the spools, upload_gcode_file (`path`, optional `filename`), then start_print (`filename`, `source` `cfs`, a `slot_map` from the tools table) once the user agrees.
+The slice result carries a `handoff` block: the G-code path, a suggested upload name, the tools with their filament type and colour, and the object labels. Continue with the creality-k2-mcp server, as described in `multicolor-cfs`: get_filaments to read the spools, upload_gcode_file (`path`, optional `filename`), then start_print (`filename`, `source` `cfs`, a `slot_map` from the tools table) in two steps: the first call (no `confirm_token`) sends nothing and returns a proposal with warnings; show it and every warning to the user, and only after they confirm call again with the same arguments plus the `confirm_token`.
 
 ## When something needs the app
 

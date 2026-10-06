@@ -14,7 +14,7 @@ import (
 // --- analyze_toolpaths ---
 
 func (s *Server) registerAnalyzeTools() {
-	addTool(s.mcpServer, "analyze_toolpaths", withEnum(inputSchema[analyzeInput](map[string]string{"plate": "1", "detail": `"summary"`}), "detail", "summary", "per_layer"), s.analyzeToolpaths)
+	addTool(s.mcpServer, "analyze_toolpaths", withRange(withItemRange(withItemRange(withItemRange(withEnum(inputSchema[analyzeInput](map[string]string{"plate": "1", "detail": `"summary"`}), "detail", "summary", "per_layer"), "layers", 2, 2), "z", 2, 2), "center", 2, 2), 1, 1e6, "plate", "page"), s.analyzeToolpaths)
 }
 
 type analyzeInput struct {
@@ -45,7 +45,7 @@ type analyzeFront struct {
 	Layers    int                  `yaml:"layers"`
 	ByObject  bool                 `yaml:"by_object,omitempty"`
 	Measure   []string             `yaml:"measure"`
-	Objects   []analyzeObjectFront `yaml:"objects"`
+	Objects   []analyzeObjectFront `yaml:"objects,omitempty"`
 	// Findings count what the finding measures found.
 	UnsupportedStarts int `yaml:"unsupported_starts,omitempty"`
 	ShortRuns         int `yaml:"short_runs,omitempty"`
@@ -137,6 +137,11 @@ func (s *Server) analyzeToolpaths(ctx context.Context, _ *mcp.CallToolRequest, i
 	if err != nil {
 		return notFound("The G-code cannot be analysed: "+err.Error(), "Slice again with slice_project."), nil, nil
 	}
+	// An object name that matches nothing is an error that lists the names to use.
+	if unknown := unknownObjects(in.Objects, an.AllLabels); len(unknown) > 0 {
+		return notFound("No object named "+strings.Join(unknown, ", ")+" on plate "+fmt.Sprint(rep.Plate.Plate),
+			"Names as get_project shows them: "+strings.Join(objectNames(an.AllLabels), ", ")+"."), nil, nil
+	}
 	front := analyzeFront{baseFront: base(info), Plate: rep.Plate.Plate, Stale: rep.Stale, Layers: an.Layers, ByObject: an.ByObject, Measure: opt.Measures,
 		UnsupportedStarts: len(an.UnsupportedStarts), SupportClusters: len(an.SupportContacts)}
 	for _, r := range an.ShortRuns {
@@ -148,7 +153,17 @@ func (s *Server) analyzeToolpaths(ctx context.Context, _ *mcp.CallToolRequest, i
 	for _, r := range an.FirstLayers {
 		rangeOf[r.Object] = r
 	}
+	page := 1
+	if in.Page != nil {
+		page = *in.Page
+	}
+	if page < 1 {
+		page = 1
+	}
 	for _, o := range an.Objects {
+		if page > 1 {
+			break // the per object summary is on page 1 only
+		}
 		of := analyzeObjectFront{Name: o.Display}
 		if r, ok := rangeOf[o.Display]; ok {
 			of.FirstLayer, of.LastLayer, of.Gaps = r.FirstLayer, r.LastLayer, len(r.Gaps)
@@ -163,9 +178,6 @@ func (s *Server) analyzeToolpaths(ctx context.Context, _ *mcp.CallToolRequest, i
 	if an.ByObject {
 		head.WriteString("\nThis plate is printed by object: a layer number is the layer within its object (each object counts from 1), and the layer below is the object's own.")
 	}
-	if len(an.Objects) == 0 {
-		head.WriteString("\nNo object matched. Names are the ones get_project shows; the objects in the G-code are " + strings.Join(objectNames(an.AllLabels), ", ") + ".")
-	}
 	var empty []string
 	var shown []section
 	total := 0
@@ -177,16 +189,10 @@ func (s *Server) analyzeToolpaths(ctx context.Context, _ *mcp.CallToolRequest, i
 		total += len(sc.rows)
 		shown = append(shown, sc)
 	}
-	page := 1
-	if in.Page != nil {
-		page = *in.Page
-	}
-	if page < 1 {
-		page = 1
-	}
 	text, pages := pageOfSections(shown, page)
 	if len(shown) > 0 && page > pages {
-		return invalidInput(fmt.Sprintf("Page %d is past the end: %d page(s)", page, pages), "Ask for a smaller page number."), nil, nil
+		front.pageFront = pageFront{Page: page, Total: total, TotalPages: pages}
+		return successResult(front, nextLine(head.String()+fmt.Sprintf("\n\nPage %d is past the end: there are %d rows on %d page(s).", page, total, pages), "page=1.")), nil, nil
 	}
 	front.pageFront = pageFront{Page: page, Total: total, TotalPages: pages}
 	body := head.String() + "\n\n" + text
@@ -252,6 +258,24 @@ func dedupeStr(in []string) []string {
 	return out
 }
 
+// unknownObjects lists the requested names that match no object of the G-code,
+// by the same rule the analysis selects with: the name before _id_ or the whole
+// label, ignoring case and punctuation.
+func unknownObjects(want, labels []string) []string {
+	have := map[string]bool{}
+	for _, l := range labels {
+		have[gcodeinfo.NormObjectName(l)] = true
+		have[gcodeinfo.NormObjectName(objectNames([]string{l})[0])] = true
+	}
+	var out []string
+	for _, w := range want {
+		if !have[gcodeinfo.NormObjectName(w)] {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
 // objectNames turns G-code labels (name_id_N_copy_K) into the names get_project
 // shows, each once.
 func objectNames(labels []string) []string {
@@ -306,7 +330,7 @@ func analysisSections(an *gcodeinfo.Analysis, opt gcodeinfo.AnalyzeOptions, perL
 		for _, r := range an.SupportContacts {
 			rows = append(rows, fmt.Sprintf("%s | %s | %d | %s | %s | %s | %s | %s | %.1f | %s", pipeSafe(r.Object), pipeSafe(r.Feature), r.Layer, f2(r.Z), f2(r.MinX), f2(r.MaxX), f2(r.MinY), f2(r.MaxY), r.AreaMM2, pipeSafe(orDash(strings.Join(r.Above, ", ")))))
 		}
-		add(gcodeinfo.MeasureSupportContacts, "support_contacts (object | feature | layer | z | x min | x max | y min | y max | area mm2 | printed on it by the next layer)", rows, "")
+		add(gcodeinfo.MeasureSupportContacts, "support_contacts (object | feature | layer | z | x min | x max | y min | y max | area mm2 | objects printed on or beside it (within the support z gap))", rows, "")
 	}
 	if on[gcodeinfo.MeasureShortRuns] {
 		minRun := opt.MinRun

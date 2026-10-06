@@ -141,7 +141,7 @@ func (h *handle) fillOverrides(rep *OverridesReport) {
 		oo := ObjectOverrides{ID: o.ID, Name: o.Name, Filament: max(o.Extruder(), 1), Lines: h.overrideLines(o.Config, "extruder")}
 		for _, p := range o.Parts {
 			lines := h.overrideLines(p.Config, "extruder")
-			fil := atoi0(p.Config.Value("extruder"))
+			fil := atoi0(partConfig(o, p).Value("extruder"))
 			if len(lines) == 0 && fil == 0 && p.Subtype == threemf.SubtypeNormal {
 				continue
 			}

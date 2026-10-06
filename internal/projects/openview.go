@@ -3,6 +3,7 @@ package projects
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -46,24 +47,62 @@ type ViewFile struct {
 	SavedFiles []string
 }
 
-func sumOf(data []byte) string {
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
-}
-
 // matchesRecord reports whether the file at path still has the content the
 // server recorded for name.
 func matchesRecord(dir, name string, recs []ViewRecord) bool {
-	data, err := os.ReadFile(filepath.Join(dir, name))
-	if err != nil {
-		return false
-	}
 	for _, r := range recs {
 		if r.Name == name {
-			return int64(len(data)) == r.Size && sumOf(data) == r.SHA256
+			sum, size, err := sumFile(filepath.Join(dir, name))
+			return err == nil && size == r.Size && sum == r.SHA256
 		}
 	}
 	return false
+}
+
+// sumFile is the sha256 and the size of a file, read in a stream (a G-code can
+// be hundreds of megabytes).
+func sumFile(path string) (string, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), n, nil
+}
+
+// copyFileAtomic copies src to dst through a temporary file next to dst and a
+// replace, so the app never sees half a file. It streams the data.
+func copyFileAtomic(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	_ = tmp.Chmod(0o644)
+	if _, err := io.Copy(tmp, in); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := domain.ReplaceFile(name, dst); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
 }
 
 // PrepareView writes the file the app should open and returns its path.
@@ -112,7 +151,7 @@ func (s *Store) PrepareView(ref string, plate int, mode string) (*ViewFile, erro
 	}
 	rev := h.meta.Revision
 	vf := &ViewFile{ProjectID: h.id, Mode: mode, Plate: plate, Revision: rev}
-	var src []byte
+	var srcPath string
 	var stem, ext string
 	switch mode {
 	case ViewPreview:
@@ -130,18 +169,23 @@ func (s *Store) PrepareView(ref string, plate int, mode string) (*ViewFile, erro
 		if h.meta.plateStale(*pr) {
 			return nil, conflictf("slice_project again", "plate %d changed after it was sliced (slice revision %d, project revision %d)", plate, pr.Revision, rev)
 		}
-		if src, err = os.ReadFile(pr.GCodePath); err != nil {
+		srcPath = pr.GCodePath
+		if _, err = os.Stat(srcPath); err != nil {
 			return nil, conflictf("slice_project again", "the G-code of plate %d is not readable: %v", plate, err)
 		}
 		stem, ext = "plate"+strconv.Itoa(plate)+"_r"+strconv.Itoa(rev), ".gcode"
 	default:
-		if src, err = os.ReadFile(filepath.Join(h.dir, projectFile)); err != nil {
+		srcPath = filepath.Join(h.dir, projectFile)
+		if _, err = os.Stat(srcPath); err != nil {
 			return nil, errf(CodeInternal, "", "%v", err)
 		}
 		stem, ext = uploadBase(h.meta.Name, h.id)+"_r"+strconv.Itoa(rev), ".3mf"
 	}
-	vf.Bytes = int64(len(src))
-	sum := sumOf(src)
+	sum, size, err := sumFile(srcPath)
+	if err != nil {
+		return nil, conflictf("slice_project again", "the file to show is not readable: %v", err)
+	}
+	vf.Bytes = size
 
 	// The first name that is free, or holds a file this server wrote and that is
 	// unchanged, gets the content. A changed file (or one that cannot be written)
@@ -158,12 +202,12 @@ func (s *Store) PrepareView(ref string, plate int, mode string) (*ViewFile, erro
 			if !matchesRecord(dir, name, recs) {
 				continue // the user saved into it
 			}
-			if cur, rerr := os.ReadFile(path); rerr == nil && sumOf(cur) == sum {
+			if cur, _, rerr := sumFile(path); rerr == nil && cur == sum {
 				chosen = name // the same content is there already
 				break
 			}
 		}
-		if werr := domain.WriteFileAtomic(path, src, 0o644); werr != nil {
+		if werr := copyFileAtomic(srcPath, path); werr != nil {
 			continue // held open by the app, perhaps
 		}
 		chosen = name

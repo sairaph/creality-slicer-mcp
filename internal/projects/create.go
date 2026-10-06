@@ -95,7 +95,7 @@ func (s *Store) resolveFilaments(printer string, specs []FilamentSpec) ([]profil
 	var colours []string
 	for i, sp := range specs {
 		if strings.TrimSpace(sp.Preset) == "" {
-			return nil, nil, invalidf("", "filament %d has no preset", i+1)
+			return nil, nil, invalidf("give each filament a preset name from list_presets (kind filament), or pass spools", "filament %d has no preset", i+1)
 		}
 		if !colourRE.MatchString(sp.Colour) {
 			return nil, nil, invalidf("write the colour as #RRGGBB, for example #FFFFFF", "filament %d (%s) needs a colour, got %q", i+1, sp.Preset, sp.Colour)
@@ -429,7 +429,8 @@ func (s *Store) openInto(ref, source, tmpFile string) (*OpenResult, error) {
 		return nil, err
 	}
 	defer unlock()
-	if _, err := s.readMeta(id); err != nil {
+	meta0, err := s.readMeta(id)
+	if err != nil {
 		return nil, notFoundf("call list_projects to see the projects", "project %s cannot be read: %v", id, err)
 	}
 	dst := filepath.Join(s.dir(id), projectFile)
@@ -445,9 +446,18 @@ func (s *Store) openInto(ref, source, tmpFile string) (*OpenResult, error) {
 		}
 		return err
 	}
+	// A crash between the swap and the metadata must not leave an old slice
+	// looking current: the marker makes the next read mark every plate changed.
+	pending := *meta0
+	pending.Pending = true
+	if err := s.writeMeta(id, &pending); err != nil {
+		return nil, errf(CodeInternal, "", "saving the project metadata failed: %v", err)
+	}
+	clearPending := func() { _ = s.writeMeta(id, meta0) }
 	_ = os.Remove(old)
 	if err := retry(dst, old); err != nil {
-		return nil, errf(CodeInternal, "the project file may be in use by another reader; try again in a moment", "replacing the project failed: %v", err)
+		clearPending()
+		return nil, conflictf("project.3mf is held by another program: close it in Creality Print or wait, then repeat the call", "replacing the project failed: %v", err)
 	}
 	done := false
 	defer func() {
@@ -457,15 +467,17 @@ func (s *Store) openInto(ref, source, tmpFile string) (*OpenResult, error) {
 		}
 		_ = os.Remove(dst)
 		_ = retry(old, dst)
+		clearPending()
 	}()
 	if err := retry(tmpFile, dst); err != nil {
-		return nil, errf(CodeInternal, "the project file may be in use by another reader; try again in a moment", "replacing the project failed: %v", err)
+		return nil, conflictf("project.3mf is held by another program: close it in Creality Print or wait, then repeat the call", "replacing the project failed: %v", err)
 	}
 	h, err := s.openLocked(id)
 	if err != nil {
 		return nil, err
 	}
 	defer h.close()
+	h.meta.Revision = meta0.Revision // the marker's recovery raised it; this call raises it once
 	h.meta.Revision++
 	h.meta.Updated = s.now()
 	h.meta.SourcePath = source

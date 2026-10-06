@@ -89,6 +89,8 @@ type Project struct {
 	modelDirty    bool
 	settingsDirty bool
 	rangesDirty   bool
+	hasIndexed    bool   // one of the per object members was read
+	brimVersion   string // brim_points_format_version of the file
 	gcodesDirty   bool
 	hasRanges     bool
 	hasGCodes     bool
@@ -281,6 +283,7 @@ func (p *Project) load() error {
 			}
 		}
 	}
+	p.loadIndexed()
 	if data, err := p.Read(memberLayerRanges); err == nil {
 		p.hasRanges = true
 		if err := p.loadLayerRanges(data); err != nil {
@@ -560,7 +563,7 @@ func parsePlate(n *node) *Plate {
 }
 
 // loadLayerRanges reads layer_config_ranges.xml. Object ids in the file are
-// 1 based positions in the object list.
+// 1 based positions in the objects as the app numbers them (builtObjects).
 func (p *Project) loadLayerRanges(data []byte) error {
 	root, err := parseTree(data)
 	if err != nil {
@@ -571,10 +574,11 @@ func (p *Project) loadLayerRanges(data []byte) error {
 			continue
 		}
 		idx, err := strconv.Atoi(on.attrValue("id"))
-		if err != nil || idx < 1 || idx > len(p.Objects) {
+		built := p.builtObjects()
+		if err != nil || idx < 1 || idx > len(built) {
 			return fmt.Errorf("layer ranges name object %q, which does not exist", on.attrValue("id"))
 		}
-		o := p.Objects[idx-1]
+		o := built[idx-1]
 		for _, rn := range on.Children {
 			if rn.Name != "range" {
 				continue

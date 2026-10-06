@@ -15,3 +15,7 @@
 /tools/catalog-gen/settings-catalog-*.json
 /tools/catalog-gen/diff*.json
 /tools/catalog-gen/*.exe
+
+# Go test binaries
+*.test.exe
+*.test

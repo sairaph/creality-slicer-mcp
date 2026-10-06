@@ -69,10 +69,15 @@ type PartInfo struct {
 
 // ObjectInfo is one object with its first instance.
 type ObjectInfo struct {
-	ID        int
-	Name      string
-	Plate     int
-	Instances int
+	// LayerHeightProfile is true when the object carries a variable layer height
+	// profile made in the app: while it is valid the slicer uses it and ignores
+	// the height ranges and the object's layer_height (PrintObject.cpp,
+	// update_layer_height_profile).
+	LayerHeightProfile bool
+	ID                 int
+	Name               string
+	Plate              int
+	Instances          int
 	// Size is the bounding box size in mm; Position is the centre of the box in
 	// x and y and its lowest z; Rotation is in degrees (X, Y, Z, applied in
 	// that order); Scale per axis.
@@ -318,11 +323,14 @@ func (h *handle) info() (*Info, error) {
 		}
 		in.FlushMultiplier = cfg.String("flush_multiplier")
 		in.FlushMatrix = cfg.List("flush_volumes_matrix")
-		for i, d := range cfg.List("different_settings_to_system") {
+		// One entry per setting: a filament key changed for every filament is listed
+		// once, not once per filament.
+		seenKey := map[string]bool{}
+		for _, d := range cfg.List("different_settings_to_system") {
 			for _, k := range strings.Split(d, ";") {
-				if k != "" {
+				if k != "" && !seenKey[k] {
+					seenKey[k] = true
 					in.OverrideKeys = append(in.OverrideKeys, k)
-					_ = i
 				}
 			}
 		}
@@ -373,7 +381,7 @@ func (h *handle) appVersion() string {
 }
 
 func (h *handle) objectInfo(o *threemf.Object, geo geometry) ObjectInfo {
-	oi := ObjectInfo{ID: o.ID, Name: o.Name, Filament: o.Extruder(), Overrides: overrideCount(o.Config), Ranges: len(o.LayerRanges), Painted: o.Painted().Any()}
+	oi := ObjectInfo{LayerHeightProfile: o.LayerHeightProfile != "", ID: o.ID, Name: o.Name, Filament: o.Extruder(), Overrides: overrideCount(o.Config), Ranges: len(o.LayerRanges), Painted: o.Painted().Any()}
 	if oi.Filament == 0 {
 		oi.Filament = 1
 	}
@@ -386,7 +394,7 @@ func (h *handle) objectInfo(o *threemf.Object, geo geometry) ObjectInfo {
 		oi.HeightRanges = append(oi.HeightRanges, ri)
 	}
 	for _, part := range o.Parts {
-		oi.Parts = append(oi.Parts, PartInfo{ID: part.ID, Name: part.Name, Subtype: part.Subtype, Overrides: overrideCount(part.Config), Painted: part.Mesh.Painted.Any(), Filament: atoi0(part.Config.Value("extruder"))})
+		oi.Parts = append(oi.Parts, PartInfo{ID: part.ID, Name: part.Name, Subtype: part.Subtype, Overrides: overrideCount(part.Config), Painted: part.Mesh.Painted.Any(), Filament: atoi0(partConfig(o, part).Value("extruder"))})
 		if part.Subtype == threemf.SubtypeNormal {
 			oi.Triangles += part.Mesh.Triangles
 		}
@@ -429,11 +437,22 @@ func (h *handle) objectInfo(o *threemf.Object, geo geometry) ObjectInfo {
 	return oi
 }
 
+// layerProfileText says what a variable layer height profile does to the
+// settings of an object. The profile is the user's own edit (the app's variable
+// layer height tool), not a cache, so the tools never drop it: the app's Reset
+// button of that tool does.
+func layerProfileText(object string) string {
+	return fmt.Sprintf("object %q has a variable layer height profile made in the app: the slicer uses it and ignores this object's height ranges and layer_height while it is valid; reset it with the Reset button of the app's variable layer height tool (the tools do not remove it, it is your own edit)", object)
+}
+
 // warnings lists what is wrong or worth knowing about a project.
 func (h *handle) warnings(in *Info, geo geometry) []Warning {
 	var w []Warning
 	add := func(code, format string, a ...any) { w = append(w, Warning{code, fmt.Sprintf(format, a...)}) }
 	for _, o := range in.Objects {
+		if o.LayerHeightProfile {
+			add("layer_height_profile", "%s", layerProfileText(o.Name))
+		}
 		if o.Outside {
 			add("outside_bed", "object %q (id %d) is not fully inside the printable area of plate %d", o.Name, o.ID, o.Plate)
 		}
@@ -511,8 +530,11 @@ func (h *handle) warnings(in *Info, geo geometry) []Warning {
 			if top > 0 && a.Z > top+1e-6 {
 				add("action_above_model", "the %s at layer %d (z %.2f mm) on plate %d is above the top of its objects (%.2f mm) and does nothing", strings.ReplaceAll(a.Kind, "_", " "), a.Layer, a.Z, pl.Index, top)
 			}
-			if a.Kind == ActionColorChange && (h.p.Settings == nil || h.p.Settings.String("color_change_gcode") == "") {
-				add("color_change_no_gcode", "the colour change at layer %d on plate %d writes nothing: the printer preset has no colour change G-code; call set_layer_actions again with the same actions to store it as a filament (tool) change", a.Layer, pl.Index)
+			if a.Kind == ActionTemplate && h.p.Settings != nil && strings.TrimSpace(h.p.Settings.String("template_custom_gcode")) == "" {
+				add("template_gcode_empty", "the template action at layer %d on plate %d writes nothing: template_custom_gcode is empty; set it with update_settings", a.Layer, pl.Index)
+			}
+			if a.Kind == ActionColorChange {
+				add("color_change_no_gcode", "the colour change at layer %d on plate %d writes nothing: Creality Print 7.2 and 7.3 never write colour change G-code (the emitter is disabled), only tool changes; call set_layer_actions again with the same actions to store it as a filament (tool) change", a.Layer, pl.Index)
 			}
 		}
 	}

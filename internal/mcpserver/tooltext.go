@@ -43,7 +43,7 @@ Rules for every call:
 - Slicing writes G-code into the project folder; uploading and printing go through the creality-k2-mcp server.
 - Setting keys are Creality's own. Find them with search_settings and read them with describe_setting; never guess a key.
 - Check spools with creality-k2-mcp get_filaments before a multi-colour print.
-- Pictures: get_view draws a plate from a named camera; the tools that change a project attach a small screenshot of the plate unless include_screenshot is false; the preview parameters of open_project and slice_project are none, small or large.
+- Pictures: get_view draws a plate from a named camera; the tools that change a project attach a small screenshot of the plate unless include_screenshot is false; the preview parameter of open_project is none or small (the thumbnail stored in the file), that of slice_project none, small or large.
 - Filament slots are numbered from 1 in the project tools; the slice handoff uses 0-based tool indexes.`
 
 // toolText is the text of one tool.
@@ -80,15 +80,16 @@ var toolAnnotations = map[string]toolAnnotation{
 	"get_slicer_status": annReadOnly, "get_guide": annReadOnly,
 	"search_settings": annReadOnly, "describe_setting": annReadOnly, "browse_settings": annReadOnly,
 	"list_presets": annReadOnly, "get_preset": annReadOnly,
-	"create_project": annAdditive, "open_project": annAdditive, "list_projects": annReadOnly, "get_project": annReadOnly, "get_view": annReadOnly,
+	"create_project": annAdditive, "open_project": annChanging, "list_projects": annReadOnly, "get_project": annReadOnly, "get_view": annReadOnly,
 	"add_model": annAdditive, "update_object": annChanging, "group_objects": annChanging, "remove_object": annChanging, "remove_part": annChanging,
 	"update_settings": annChanging, "set_presets": annChanging, "add_modifier": annAdditive,
 	"set_height_ranges": annChanging, "set_layer_actions": annChanging, "manage_plates": annChanging,
 	"export_project": annChanging, "delete_project": annChanging,
+	// open_project with into replaces a project; slice_project replaces the G-code and, with arrange or orient, the object positions.
 	// open_in_app writes a copy into the project's view folder and starts an
 	// application window: it changes the store and is open world.
 	"open_in_app":   annOpenWorld,
-	"slice_project": annAdditive, "get_slice_status": annIdempotent, "get_slice_report": annReadOnly, "analyze_toolpaths": annReadOnly,
+	"slice_project": annChanging, "get_slice_status": annIdempotent, "get_slice_report": annReadOnly, "analyze_toolpaths": annReadOnly,
 }
 
 // sharedParams are the descriptions of parameters that mean the same in every
@@ -194,7 +195,7 @@ var toolTexts = map[string]toolText{
 		Params:      map[string]string{},
 	},
 	"open_in_app": {
-		Description: `Open a project in Creality Print, in a new window that the user closes when done; windows already open are never touched, replaced or closed. mode preview (default) opens the G-code of a sliced plate in the app's Preview tab: slice_project first, the slice must be from the current revision. mode project opens the current project in the app's 3D editor for painting, cutting or checking; to bring changes back the user saves it in the app (File > Save Project) and open_project is called with that file and into set to this project. Both open a copy kept in the project's view folder. The reply names the file, the process id and the app version.`,
+		Description: `Open a project in Creality Print, in a new window that the user closes when done; windows already open are never touched, replaced or closed. mode preview (default) opens the G-code of a sliced plate in the app's Preview tab: slice_project first; the plate's own slice must be current (a change to another plate does not matter). mode project opens the current project in the app's 3D editor for painting, cutting or checking; to bring changes back the user saves it in the app (File > Save Project) and open_project is called with that file and into set to this project. Both open a copy kept in the project's view folder. The reply names the file, the process id and the app version.`,
 		Params: map[string]string{
 			"plate": "plate to show, starting at 1 (default 1); preview shows that plate's slice",
 			"mode":  "preview (default): the sliced toolpaths in the Preview tab; project: the project in the 3D editor",
@@ -246,10 +247,10 @@ var toolTexts = map[string]toolText{
 	},
 	"group_objects": {
 		Description: `Merge objects into one object with several parts. Use it to give the parts of one object different filaments or settings (update_settings scope part), or to treat a set as one object.
-- The first object is the base: it keeps its id, settings, height ranges and place.
-- Every other object becomes parts of the base. Each part keeps its position and shape, is named after its old object, and prints with the filament that object used.
-- A merged object's settings that are valid on a part move to its parts; the others, and its height ranges, are dropped and listed as warnings. Painted data is not carried.
-- Refused: fewer than 2 objects, the same object twice, an object with several instances, objects on different plates. One change, one revision.
+Base: the first object keeps its id, settings, height ranges and place.
+Parts: every other object becomes parts of the base; each part keeps its position and shape, is named after its old object, and prints with the filament that object used.
+Settings: a merged object's settings that are valid on a part move to its parts; the others, and its height ranges, are dropped and listed as warnings. Painted data is not carried.
+Refused: fewer than 2 objects, the same object twice, an object with several instances, objects on different plates. One change, one revision.
 Returns the part list (name, filament), the warnings and a screenshot.`,
 		Params: map[string]string{
 			"objects": "ids or names, at least 2; the first is the base",
@@ -271,14 +272,14 @@ Returns the part list (name, filament), the warnings and a screenshot.`,
 		Description: `Change settings at one scope: the whole project (default), an object, a part, a layer range or a plate. Every key and value is checked against Creality's catalog first (unknown key, type, choice, range, scope, vendor lock) and nothing changes unless all pass. Reports each change as old to new, warns about settings that do nothing until another is on, and applies the side effects the app would apply. For a per-filament key (a filament preset setting) a list is one value per filament slot and a single value applies to every slot; a list key of the printer takes the whole list, as describe_setting shows. Find keys with search_settings. For the same change on several objects, parts, ranges or plates give targets (a list) instead of target: one call, one revision.`,
 		Params: map[string]string{
 			"scope":        "project (default), object, part, layer_range or plate",
-			"target":       "what to change: object id or name; part as object/part; plate number; not used for project scope",
+			"target":       "what to change: object id or name; part as object/part; height range as object/N (N from 1); plate number; not used for project scope",
 			"targets":      "the same for several objects, parts, height ranges or plates in one call, instead of target; all are checked first and nothing changes unless all pass",
 			"values":       "setting key to value; a value is a string, number, boolean or list (vector keys); null removes the override and goes back to the preset value; positions such as wipe_tower_x are in mm from the corner of the plate",
 			"allow_locked": "true allows keys that Creality's system presets lock (default false)",
 		},
 	},
 	"set_presets": {
-		Description: `Change the project's printer, process or filament presets, or its flush matrix. At least one of printer, process, filaments, spools, flush_matrix or flush_multiplier. Changing a preset re-bases the project on it; keep_changes decides whether this project's own changed settings survive. Filaments is the full list in slot order; a list shorter than now is refused while objects use the removed slots. Omit flush_matrix for the automatic flush volumes.`,
+		Description: `Change the project's printer, process or filament presets, or its flush matrix. At least one of printer, process, filaments, spools, flush_matrix, auto_flush or flush_multiplier. Changing a preset re-bases the project on it; keep_changes decides whether this project's own changed settings survive. Filaments is the full list in slot order; a list shorter than now is refused while objects use the removed slots. A manual flush matrix is kept when filaments change; auto_flush goes back to the automatic one.`,
 		Params: map[string]string{
 			"printer":             "printer preset name",
 			"process":             "process preset name",
@@ -293,7 +294,8 @@ Returns the part list (name, filament), the warnings and a screenshot.`,
 			"spools[].status":     "defined, rfid, undefined or unknown",
 			"spools[].name":       "spool name, for the reply only",
 			"keep_changes":        "keep this project's changed settings when switching presets (default true)",
-			"flush_matrix":        "manual flush volumes in mm3: N*N numbers for N filaments, row by row, from filament to filament (default: automatic)",
+			"flush_matrix":        "manual flush volumes in mm3: N*N numbers for N filaments, row by row, from filament to filament (default: keep the current one)",
+			"auto_flush":          "true: drop a manual flush matrix and calculate the volumes again, as create_project does; not with flush_matrix",
 			"flush_multiplier":    "multiplier applied to the flush volumes, for example 0.8 (default: unchanged)",
 		},
 	},
@@ -303,7 +305,7 @@ Returns the part list (name, filament), the warnings and a screenshot.`,
 			"object":   "object id or unique name",
 			"kind":     "modifier, negative_part, support_enforcer or support_blocker",
 			"shape":    "box, cylinder or sphere",
-			"size":     "[x, y, z] in mm",
+			"size":     "[x, y, z] in mm. box: x, y, z; cylinder: [diameter, ignored, height]; sphere: [diameter]",
 			"position": "[x, y, z] in mm relative to the object's centre (default [0, 0, 0])",
 			"rotation": "[x, y, z] degrees that turn the shape about its centre, applied about X, then Y, then Z of the bed (default none)",
 			"values":   "settings for kind modifier, key to value, for example {\"sparse_infill_density\": \"40%\"}",
@@ -321,7 +323,7 @@ Returns the part list (name, filament), the warnings and a screenshot.`,
 		},
 	},
 	"set_layer_actions": {
-		Description: `Replace the actions of a plate: a pause, a colour change or tool change to a filament slot, or custom G-code, each at a height. The list replaces the current one. Give z in mm or a layer number (starting at 1, converted with the project's layer heights). A colour change switches to another filament slot, so it needs a second filament in the project; on printers without colour change G-code (the K2 with the CFS) it is written as a tool change that the printer performs by itself. Creality Print applies layer filament changes only when every object on the plate prints with one filament; otherwise they are dropped and the reply warns.`,
+		Description: `Replace the actions of a plate: a pause, a colour change or tool change to a filament slot, or custom G-code, each at a height. The list replaces the current one. Give z in mm or a layer number (starting at 1, converted with the project's layer heights). A colour change needs a filament slot to change to and a project with 2 or more filaments: Creality Print writes no colour change G-code, so it is always stored as a tool change. Creality Print applies layer filament changes only when every object on the plate prints with one filament; otherwise they are dropped and the reply warns.`,
 		Params: map[string]string{
 			"plate":              "plate, starting at 1 (default 1)",
 			"actions":            "the full list of actions, replacing the current one",
@@ -365,7 +367,7 @@ Returns the part list (name, filament), the warnings and a screenshot.`,
 			"background": "true returns a job_id at once without waiting (default false)",
 			"thumbnails": "put the plate pictures the printer preset asks for into the G-code (default true)",
 			"timeout":    "seconds after which a hung slicer is stopped, up to 1800 (default 1800)",
-			"preview":    "none (default), small or large: attach an isometric picture of the sliced toolpaths, layer upon layer in each filament's colour (512 or 1024 px wide), and the first layer of all objects (384 or 1024 px square)",
+			"preview":    "none (default), small or large: attach an isometric picture of the sliced toolpaths, layer upon layer in each filament's colour (512 or 1024 px wide), and the first layer of all objects (384 or 1024 px square); with several plates it pictures the first sliced plate only, get_slice_report preview does the others",
 		},
 	},
 	"get_slice_status": {
@@ -379,14 +381,14 @@ Returns the part list (name, filament), the warnings and a screenshot.`,
 	"analyze_toolpaths": {
 		Description: `Measure what the slicer really printed, from the plate G-code of the last slice. Reads only. A stale slice is answered and marked stale.
 Measures (measure, a list; default first_layers and bounds):
-- first_layers: first and last layer of each feature per object; layers with no extrusion inside an object's range.
-- bounds: XY min, max and span of the paths per object, feature, layer.
-- flow: length, E, E per mm and flow ratio (1 = the flow width and height ask for).
-- radius: distance of the paths from center.
-- short_runs: runs of extrusion shorter than min_run.
-- unsupported_starts: extrusion that starts in mid air.
-- support_contacts: support patches and what prints on them.
-- wall_order: outer or inner wall first.
+first_layers: first and last layer of each feature per object; layers with no extrusion inside an object's range.
+bounds: XY min, max and span of the paths per object, feature, layer.
+flow: length, E, E per mm and flow ratio (1 = the flow width and height ask for).
+radius: distance of the paths from center.
+short_runs: runs of extrusion shorter than min_run.
+unsupported_starts: extrusion that starts in mid air.
+support_contacts: support patches and the objects that sit on them.
+wall_order: outer or inner wall first.
 Narrow with objects, layers or z, features. Long answers are paged.`,
 		Params: map[string]string{
 			"plate":    "plate, starting at 1 (default 1)",

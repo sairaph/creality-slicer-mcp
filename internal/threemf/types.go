@@ -192,9 +192,18 @@ type Object struct {
 	Parts  []*Part
 	// LayerRanges are the height range modifiers (layer_config_ranges.xml).
 	LayerRanges []LayerRange
-	extra       []*node
-	inSettings  bool
-	backupID    int // index used in the object file name and the uuids
+	// LayerHeightProfile is the variable layer height profile the app stores for
+	// the object (layer_heights_profile.txt, values joined by ";"): when it is
+	// valid the slicer uses it and ignores the height ranges
+	// (PrintObject::update_layer_height_profile). BrimPoints and CutInfo are the
+	// brim ear points and the cut information of the object; all three are kept
+	// with the object so they follow it when the objects are numbered again.
+	LayerHeightProfile string
+	BrimPoints         string
+	CutInfo            *node
+	extra              []*node
+	inSettings         bool
+	backupID           int // index used in the object file name and the uuids
 }
 
 // Painted aggregates the painting of all parts.

@@ -16,6 +16,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -89,6 +90,7 @@ func New(cfg Config) (*Store, error) {
 	}
 	s := &Store{cfg: cfg, locks: map[string]*sync.RWMutex{}, running: map[string]string{}}
 	s.sweepTrash()
+	s.sweepLeftovers()
 	return s, nil
 }
 
@@ -146,6 +148,11 @@ type meta struct {
 	// open_project of such a file, re-saved by the app without our member, still
 	// finds the spool links of this project.
 	Exports []string `json:"exports,omitempty"`
+	// Pending is set while a save is under way: job.json is written with it before
+	// project.3mf is replaced and again, without it, after. A crash in between
+	// leaves it set, and the next read treats every sliced plate as changed (see
+	// recoverInterruptedSave), because it cannot know whether the new file landed.
+	Pending bool `json:"pending,omitempty"`
 }
 
 func (s *Store) dir(id string) string { return filepath.Join(s.cfg.Root, id) }
@@ -158,6 +165,9 @@ func (s *Store) readMeta(id string) (*meta, error) {
 	var m meta
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("%s of project %s is damaged: %w", metaFile, id, err)
+	}
+	if m.Pending {
+		m.recoverInterruptedSave()
 	}
 	return &m, nil
 }
@@ -200,8 +210,18 @@ func (s *Store) resolve(ref string) (string, error) {
 	if strings.ContainsAny(ref, `/\`) || ref == "." || ref == ".." || strings.HasPrefix(ref, trashPrefix) {
 		return "", invalidf("give the project id or name from list_projects", "%q is not a project id or name", ref)
 	}
+	// The id is the store folder's real name, matched ignoring case on every
+	// system (ids are generated in lower case), so every lock and table keys on
+	// one string whatever the file system does with case.
+	if id, ok := s.realID(ref); ok {
+		if info, err := os.Stat(filepath.Join(s.dir(id), metaFile)); err == nil && !info.IsDir() {
+			return id, nil
+		}
+	}
+	// Windows also finds a folder with trailing dots or by its 8.3 short name:
+	// such a spelling is refused, not mapped.
 	if info, err := os.Stat(filepath.Join(s.dir(ref), metaFile)); err == nil && !info.IsDir() {
-		return ref, nil
+		return "", invalidf("give the project id exactly as list_projects shows it", "%q is not a project id (it names a folder of the store by another spelling)", ref)
 	}
 	items, err := s.List()
 	if err != nil {
@@ -379,6 +399,9 @@ func (s *Store) open(ref string, write bool) (*handle, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := s.recoverAside(id); err != nil {
+		return nil, err
+	}
 	var unlock func()
 	if write {
 		if unlock, err = s.lock(id); err != nil {
@@ -405,7 +428,8 @@ func (s *Store) openLocked(id string) (*handle, error) {
 	if err != nil {
 		return nil, notFoundf("call list_projects to see the projects", "project %s cannot be read: %v", id, err)
 	}
-	p, err := threemf.Open(filepath.Join(s.dir(id), projectFile))
+	file := filepath.Join(s.dir(id), projectFile)
+	p, err := threemf.Open(file)
 	if err != nil {
 		return nil, errf(CodeInternal, "the project file may be damaged; export what you can or delete the project", "project %s: %v", id, err)
 	}
@@ -434,17 +458,30 @@ func (h *handle) commit() error {
 		return err
 	}
 	path := filepath.Join(h.dir, projectFile)
-	var err error
-	for attempt := 0; attempt < 30; attempt++ {
-		if err = h.p.Save(path); err == nil {
-			break
-		}
-		// A virus scanner can hold the file for a moment on Windows.
-		time.Sleep(100 * time.Millisecond)
-	}
+	// Record that a save is under way before project.3mf is replaced (the record
+	// as it is on disk, plus the flag): a crash between the two writes then
+	// cannot leave an old slice looking current.
+	onDisk, err := h.s.readMeta(h.id)
 	if err != nil {
-		return errf(CodeInternal, "the project file may be in use by another reader (another program or server); try again in a moment", "saving the project failed: %v", err)
+		return errf(CodeInternal, "", "reading the project metadata failed: %v", err)
 	}
+	onDisk.Pending = true
+	if err := h.s.writeMeta(h.id, onDisk); err != nil {
+		return errf(CodeInternal, "", "saving the project metadata failed: %v", err)
+	}
+	// One attempt: Save itself retries the replacement for a few seconds and
+	// keeps the pending edit when the file stays held.
+	err = h.p.Save(path)
+	if err != nil {
+		// The file was not replaced: the record is as it was.
+		onDisk.Pending = false
+		_ = h.s.writeMeta(h.id, onDisk)
+		if errors.Is(err, threemf.ErrReplace) {
+			return conflictf("project.3mf is held by another program: close it in Creality Print or wait, then repeat the call", "saving the project failed: %v", err)
+		}
+		return errf(CodeInternal, "check that the projects folder is writable and has room, then repeat the call", "saving the project failed: %v", err)
+	}
+	h.meta.Pending = false
 	h.meta.Revision++
 	h.meta.Updated = h.s.now()
 	h.recordSaved()
@@ -663,4 +700,115 @@ func (h *handle) recordSaved() {
 	if h.p.Settings != nil {
 		h.meta.Printer = h.p.Settings.String("printer_settings_id")
 	}
+}
+
+// realID returns the folder name of the store that equals ref apart from case.
+func (s *Store) realID(ref string) (string, bool) {
+	entries, err := os.ReadDir(s.cfg.Root)
+	if err != nil {
+		return "", false
+	}
+	for _, e := range entries {
+		if e.IsDir() && strings.EqualFold(e.Name(), ref) {
+			return e.Name(), true
+		}
+	}
+	return "", false
+}
+
+// recoverInterruptedSave marks every sliced plate as changed after a save that
+// did not finish: the revision goes up and each plate takes it, so no old slice
+// looks current. The next save writes the repaired record.
+func (m *meta) recoverInterruptedSave() {
+	m.Pending = false
+	m.Revision++
+	if m.PlateRev == nil {
+		m.PlateRev = map[int]int{}
+	}
+	for idx := range m.PlateRev {
+		m.PlateRev[idx] = m.Revision
+	}
+	if m.LastSlice != nil {
+		for _, p := range m.LastSlice.Plates {
+			m.PlateRev[p.Plate] = m.Revision
+		}
+	}
+}
+
+// Leftovers of a crashed write: the temporary files of an atomic write, of a
+// project save and of the thumbnail writer, and the work folder of a slice. They
+// are only swept when they are older than their grace time, because another
+// server using the same store may be writing one right now.
+const (
+	leftoverFileAge = 10 * time.Minute
+	leftoverDirAge  = slicer.MaxTimeout + 10*time.Minute
+)
+
+func isLeftoverFile(name string) bool {
+	return strings.HasPrefix(name, ".tmp-") || strings.HasPrefix(name, ".thumbnails-") ||
+		(strings.HasPrefix(name, ".project-") && strings.HasSuffix(name, ".tmp"))
+}
+
+// sweepLeftovers removes old leftovers in the store folder, in each project
+// folder and in the folders directly below those, best effort. It never follows
+// a link and never leaves the store.
+func (s *Store) sweepLeftovers() {
+	now := time.Now()
+	var sweep func(dir string, depth int)
+	sweep = func(dir string, depth int) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.Type()&os.ModeSymlink != 0 {
+				continue
+			}
+			path := filepath.Join(dir, name)
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			switch {
+			case !e.IsDir() && isLeftoverFile(name) && now.Sub(info.ModTime()) > leftoverFileAge:
+				_ = os.Remove(path)
+			case e.IsDir() && strings.HasPrefix(name, ".run-") && now.Sub(info.ModTime()) > leftoverDirAge:
+				_ = os.RemoveAll(path)
+			case e.IsDir() && depth < 2 && !strings.HasPrefix(name, trashPrefix):
+				sweep(path, depth+1)
+			}
+		}
+	}
+	sweep(s.cfg.Root, 0)
+}
+
+// recoverAside puts project.3mf.old back when project.3mf is missing: an
+// open_project into the project was interrupted after it moved the file aside.
+// It runs under the project's write lock (the file lock too), after checking
+// again, so it never races an open_project into that is still running, in this
+// process or another; a lock that cannot be had means one is.
+func (s *Store) recoverAside(id string) error {
+	file := filepath.Join(s.dir(id), projectFile)
+	if _, err := os.Stat(file); err == nil || !os.IsNotExist(err) {
+		return nil
+	}
+	if _, err := os.Stat(file + ".old"); err != nil {
+		return nil
+	}
+	unlock, err := s.lock(id)
+	if err != nil {
+		return conflictf("the project is being replaced by open_project: repeat the call in a moment", "project %s is being replaced", id)
+	}
+	defer unlock()
+	if _, err := os.Stat(file); os.IsNotExist(err) {
+		if _, err := os.Stat(file + ".old"); err == nil {
+			if m, merr := s.readMeta(id); merr == nil {
+				m.recoverInterruptedSave()
+				_ = s.writeMeta(id, m)
+			}
+			_ = os.Rename(file+".old", file)
+		}
+	}
+	return nil
 }

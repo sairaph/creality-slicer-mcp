@@ -205,7 +205,7 @@ func (s *Store) StoredThumbnail(ref string, plate int) ([]byte, error) {
 		var err error
 		data, err = h.p.Thumbnail(plate, threemf.ThumbPlate)
 		if err != nil {
-			return notFoundf("", "plate %d has no stored picture", plate)
+			return notFoundf("slice_project the plate first, then get_view or open_in_app", "plate %d has no stored picture", plate)
 		}
 		return nil
 	})

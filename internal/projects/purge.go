@@ -13,6 +13,24 @@ import (
 // object's own filament.
 var roleFilamentKeys = []string{"wall_filament", "sparse_infill_filament", "solid_infill_filament", "support_filament", "support_interface_filament"}
 
+// partConfig is the setting overrides of a part as the slicer sees them. The
+// importer erases the extruder of the only part of an object
+// (bbs_3mf.cpp:2917-2919: a single volume never keeps its own filament), so
+// that key is left out for a single part object; the filament lives on the
+// object then.
+func partConfig(o *threemf.Object, p *threemf.Part) threemf.KVs {
+	if len(o.Parts) != 1 {
+		return p.Config
+	}
+	var out threemf.KVs
+	for _, kv := range p.Config {
+		if kv.Key != "extruder" {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
 func atoi0(s string) int {
 	n, _ := strconv.Atoi(strings.TrimSpace(s))
 	return n
@@ -64,7 +82,7 @@ func (h *handle) plateObjectsUseOneFilament(plate int) bool {
 			return false
 		}
 		for _, p := range o.Parts {
-			if mixesFilaments(p.Config, ext) {
+			if mixesFilaments(partConfig(o, p), ext) {
 				return false
 			}
 		}
@@ -204,8 +222,8 @@ func (h *handle) plateExtruders(plate int) (filaments []int, painted bool) {
 		}
 		region(o.Config)
 		for _, p := range o.Parts {
-			if len(p.Config) > 0 {
-				region(p.Config, o.Config)
+			if cfg := partConfig(o, p); len(cfg) > 0 {
+				region(cfg, o.Config)
 			}
 		}
 		for _, r := range o.LayerRanges {

@@ -229,7 +229,7 @@ func (h *handle) plateFilamentCount(plate int) int {
 		if o := h.p.Object(in.ObjectID); o != nil {
 			slots[max(o.Extruder(), 1)] = true
 			for _, p := range o.Parts {
-				if n := atoi0(p.Config.Value("extruder")); n > 0 {
+				if n := atoi0(partConfig(o, p).Value("extruder")); n > 0 {
 					slots[n] = true
 				}
 			}

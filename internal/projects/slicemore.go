@@ -39,6 +39,9 @@ type ActionResult struct {
 	// the objects of the plate use several filaments (see layer_tool_change_ignored):
 	// the T lines the G-code has at that height are the objects' own swaps.
 	Ignored bool
+	// EmptyTemplate is true for a template action whose template_custom_gcode is
+	// empty: the slicer has nothing to write.
+	EmptyTemplate bool
 }
 
 // labelRE parses <name>_id_<n>_copy_<k>.
@@ -130,8 +133,25 @@ func scanActions(gcode string, actions []ActionInfo) []ActionResult {
 	sc.Buffer(make([]byte, 1<<20), 64<<20)
 	z := 0.0
 	firstTool := true
+	afterMarker := false // the line before was ;CUSTOM_GCODE
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
+		// 7.3 writes ;CUSTOM_GCODE and then the text of a custom action or the
+		// processed template (GCode.cpp emit_custom_gcode_per_print_z). Only the
+		// line right after the marker counts: with an empty template it is a
+		// blank line, a comment (; OBJECT_ID) or an EXCLUDE_OBJECT line, and
+		// nothing was inserted. Other text that is no custom action is the template.
+		if afterMarker {
+			afterMarker = false
+			if line != "" && !strings.HasPrefix(line, ";") && !strings.HasPrefix(line, "EXCLUDE_OBJECT") && !customs[line] &&
+				!strings.HasPrefix(line, "M600") && !toolLineRE.MatchString(line) {
+				events = append(events, event{kind: ActionTemplate, z: z})
+			}
+		}
+		if line == ";CUSTOM_GCODE" {
+			afterMarker = true
+			continue
+		}
 		switch {
 		case zLineRE.MatchString(line):
 			z, _ = strconv.ParseFloat(zLineRE.FindStringSubmatch(line)[1], 64)
@@ -348,10 +368,65 @@ func (s *Store) ExplainSettings(ref string, used map[string]string) ([]SettingDi
 			}
 			out = append(out, d)
 		}
+		out = append(out, h.explainOtherLevels(used, cfg, changed, out)...)
 		sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 		return nil
 	})
 	return out, err
+}
+
+// explainOtherLevels lists the changes the project holds on the filament and
+// printer presets (different_settings_to_system, entries after the process one):
+// the process preset does not know those keys, so the process comparison skips
+// them. Each is compared with the value of the preset it belongs to, per filament.
+func (h *handle) explainOtherLevels(used map[string]string, cfg *threemf.Config, processChanged map[string]bool, done []SettingDiff) []SettingDiff {
+	diffs := cfg.List("different_settings_to_system")
+	have := map[string]bool{}
+	for _, d := range done {
+		have[d.Key] = true
+	}
+	fils := cfg.List("filament_settings_id")
+	var out []SettingDiff
+	for slot := 1; slot < len(diffs); slot++ {
+		for _, k := range strings.Split(diffs[slot], ";") {
+			if k == "" || have[k] || processChanged[k] {
+				continue
+			}
+			got, ok := used[k]
+			if !ok {
+				continue
+			}
+			var preset string
+			if slot <= len(fils) {
+				// the value of every filament preset, as the config block writes a vector
+				var vals []string
+				for _, name := range fils {
+					v := ""
+					if fp, err := h.s.cfg.Profiles.Get(profiles.TypeFilament, name); err == nil {
+						if raw, ok := fp.Values[k]; ok {
+							v = strings.Split(showAny(raw), ",")[0]
+						}
+					}
+					vals = append(vals, v)
+				}
+				preset = strings.Join(vals, ",")
+			} else if pp, err := h.s.cfg.Profiles.Get(profiles.TypePrinter, cfg.String("printer_settings_id")); err == nil {
+				if raw, ok := pp.Values[k]; ok {
+					preset = showAny(raw)
+				}
+			}
+			if normSetting(got) == normSetting(preset) {
+				continue
+			}
+			have[k] = true
+			why := "changed in this project"
+			if slot <= len(fils) {
+				why = "changed in this project (a filament setting)"
+			}
+			out = append(out, SettingDiff{Key: k, Preset: preset, Used: got, Origin: "project", Why: why})
+		}
+	}
+	return out
 }
 
 // forcedWhy names the rule of the app that sets an option to the used value.

@@ -774,7 +774,7 @@ func TestSliceReportsLayerActionsFound(t *testing.T) {
 	info := e.newProject(t, "Found")
 	e.addBox(t, info.ID, "cube", 20, 20, 20)
 	if _, err := e.st.SetLayerActions(info.ID, 1, []LayerAction{
-		{Layer: 3, Kind: ActionPause}, {Layer: 5, Kind: ActionCustom, GCode: "M117 hello\nM117 again"}, {Layer: 7, Kind: ActionToolChange, Filament: 2}, {Layer: 9, Kind: ActionColorChange, Colour: "#FF0000"},
+		{Layer: 3, Kind: ActionPause}, {Layer: 5, Kind: ActionCustom, GCode: "M117 hello\nM117 again"}, {Layer: 7, Kind: ActionToolChange, Filament: 2}, {Layer: 9, Kind: ActionColorChange, Filament: 1},
 	}); err != nil {
 		t.Fatal(err)
 	}

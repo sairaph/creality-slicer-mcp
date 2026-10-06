@@ -40,7 +40,7 @@ You ask: "Make it white with a black logo, and check my spools."
    ```
 
 3. `add_model` twice, for the base and for the logo: `{"project": "logo", "path": "C:\\Models\\base.stl", "filament": 1}` and `{"project": "logo", "path": "C:\\Models\\logo.stl", "filament": 2, "position": [130, 130]}`. `position` is `[x, y]` in mm from the corner of the object's plate.
-4. Optional: `set_presets` with `{"project": "logo", "flush_multiplier": 0.8}` lowers the purge between colours. The reply shows the flush matrix (`auto` or `manual`) and its volumes. Passing `flush_matrix` sets it by hand; leaving it out keeps the automatic one.
+4. Optional: `set_presets` with `{"project": "logo", "flush_multiplier": 0.8}` lowers the purge between colours. The reply shows the flush matrix (`auto` or `manual`) and its volumes. Passing `flush_matrix` sets it by hand and keeps it; `auto_flush` true goes back to the automatic one.
 5. `slice_project` with `{"project": "logo"}`. The `handoff` in the reply has, per plate, `gcode_path`, `upload_name` (for example `logo_plate1.gcode`), the `tools` table (`T0` is filament 0 with its preset, type, colour and `filament_id`) and `exclude_names`, the labels the printer's exclusion takes; the body shows the same once, with each object next to its label.
 6. Now the creality-k2-mcp server, as the reply's body spells out:
    - `get_filaments` with `{}` lists the loaded spools with their slots (`T1A` to `T4D`). Match each tool to a slot of the same material type and a close colour.
@@ -52,7 +52,7 @@ You ask: "Make it white with a black logo, and check my spools."
       "slot_map": [{"filament": 0, "slot": "T1A"}, {"filament": 1, "slot": "T1C"}]}
      ```
 
-     Ask the person before starting a print.
+     This is call 1, without `confirm_token`: it sends nothing and returns a mapping proposal with warnings. Show the person the proposal and every warning, get their word that the spools are in place and the bed is clear, then call again with the same arguments plus the returned `confirm_token`.
    - During the print, `exclude_object` with `{"object_name": "base_id_0_copy_0"}` (a label from the reply; an object that came from the app may be named like the file, for example `cube.stl_id_0_copy_0`) skips a failed object.
 
 ## 3. A functional part: stronger only where it matters

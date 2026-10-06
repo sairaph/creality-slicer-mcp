@@ -238,6 +238,7 @@ func (s *Server) removeObject(ctx context.Context, _ *mcp.CallToolRequest, in re
 		return fail, nil, nil
 	}
 	plate := 1
+	before := warnCodesBefore(be, in.Project)
 	if before, err := be.Store.GetProject(in.Project); err == nil {
 		plate = plateOfObject(before, in.Object, plate)
 	}
@@ -246,7 +247,7 @@ func (s *Server) removeObject(ctx context.Context, _ *mcp.CallToolRequest, in re
 		return projFailure(err), nil, nil
 	}
 	out := successResult(removeObjectFront{baseFront: base(info), Removed: in.Object},
-		nextLine(fmt.Sprintf("Removed object `%s`. The project now has %d object(s).", in.Object, len(info.Objects)), "get_view to check the plate, add_model, or slice_project."))
+		nextLine(fmt.Sprintf("Removed object `%s`. The project now has %d object(s).", in.Object, len(info.Objects))+warningLines(withIntroduced(nil, before, info)), "get_view to check the plate, add_model, or slice_project."))
 	return s.withScreenshot(be, out, in.IncludeScreenshot, in.Project, plate, nil, false), nil, nil
 }
 
@@ -383,6 +384,7 @@ type setPresetsInput struct {
 	KeepChanges       *bool           `json:"keep_changes,omitempty"`
 	FlushMatrix       []int           `json:"flush_matrix,omitempty"`
 	FlushMultiplier   *float64        `json:"flush_multiplier,omitempty"`
+	AutoFlush         *bool           `json:"auto_flush,omitempty"`
 	IncludeScreenshot *bool           `json:"include_screenshot,omitempty"`
 }
 
@@ -401,13 +403,13 @@ func (s *Server) setPresets(ctx context.Context, _ *mcp.CallToolRequest, in setP
 		return fail, nil, nil
 	}
 	before := warnCodesBefore(be, in.Project)
-	if deref(in.Printer) == "" && deref(in.Process) == "" && len(in.Filaments) == 0 && len(in.Spools) == 0 && len(in.FlushMatrix) == 0 && in.FlushMultiplier == nil {
-		return invalidInput("Nothing to change: give at least one of printer, process, filaments, spools, flush_matrix or flush_multiplier",
+	if deref(in.Printer) == "" && deref(in.Process) == "" && len(in.Filaments) == 0 && len(in.Spools) == 0 && len(in.FlushMatrix) == 0 && in.FlushMultiplier == nil && !boolOr(in.AutoFlush, false) {
+		return invalidInput("Nothing to change: give at least one of printer, process, filaments, spools, flush_matrix, auto_flush or flush_multiplier",
 			"Call set_presets with the presets to change, for example {\"project\": \"<id>\", \"process\": \"0.28mm Standard @Creality K2 0.4 nozzle\"}."), nil, nil
 	}
 	req := projects.PresetsRequest{
 		Printer: strings.TrimSpace(deref(in.Printer)), Process: strings.TrimSpace(deref(in.Process)), Filaments: filamentSpecs(in.Filaments), Spools: spoolSpecs(in.Spools),
-		KeepChanges: boolOr(in.KeepChanges, true), FlushMatrix: in.FlushMatrix,
+		KeepChanges: boolOr(in.KeepChanges, true), FlushMatrix: in.FlushMatrix, AutoFlush: boolOr(in.AutoFlush, false),
 	}
 	if in.FlushMultiplier != nil {
 		req.FlushMultiplier = strconv.FormatFloat(*in.FlushMultiplier, 'g', -1, 64)
@@ -622,8 +624,8 @@ func (s *Server) setLayerActions(ctx context.Context, _ *mcp.CallToolRequest, in
 		default:
 			return invalidInput(fmt.Sprintf("Action %d: unknown type %q", i+1, a.Type), "Use type pause, color_change, tool_change or custom."), nil, nil
 		}
-		if a.Type == projects.ActionToolChange && a.Filament == nil {
-			return invalidInput(fmt.Sprintf("Action %d: a tool_change needs filament", i+1), "Give filament, the slot to change to (1 to the number of filaments)."), nil, nil
+		if (a.Type == projects.ActionToolChange || a.Type == projects.ActionColorChange) && a.Filament == nil {
+			return invalidInput(fmt.Sprintf("Action %d: a %s needs filament", i+1, a.Type), "Give filament, the slot to change to (1 to the number of filaments)."), nil, nil
 		}
 		if a.Type == projects.ActionColorChange || a.Type == projects.ActionToolChange {
 			// The new colour is the colour of the filament the print changes to.
@@ -634,7 +636,7 @@ func (s *Server) setLayerActions(ctx context.Context, _ *mcp.CallToolRequest, in
 				}
 			}
 			slot := max(act.Filament, 1)
-			if slot > len(info.Filaments) || (a.Type == projects.ActionToolChange && act.Filament < 1) {
+			if slot > len(info.Filaments) || act.Filament < 1 {
 				return invalidInput(fmt.Sprintf("Action %d: filament %d does not exist", i+1, act.Filament), fmt.Sprintf("Use a filament from 1 to %d.", len(info.Filaments))), nil, nil
 			}
 			act.Filament, act.Colour = slot, info.Filaments[slot-1].Colour
@@ -794,6 +796,7 @@ func (s *Server) removePart(ctx context.Context, _ *mcp.CallToolRequest, in remo
 	if fail != nil {
 		return fail, nil, nil
 	}
+	before := warnCodesBefore(be, in.Project)
 	res, err := be.Store.RemovePart(in.Project, in.Object, in.Part)
 	if err != nil {
 		return projFailure(err), nil, nil
@@ -806,7 +809,7 @@ func (s *Server) removePart(ctx context.Context, _ *mcp.CallToolRequest, in remo
 	}
 	kind := strings.ReplaceAll(res.Part.Subtype, "_", " ")
 	out := successResult(removePartFront{baseFront: base(res.Info), Object: res.Object, Removed: res.Removed, Kind: res.Part.Subtype, Parts: parts},
-		nextLine(fmt.Sprintf("Removed the %s `%s` from object `%s`. The object has %d part(s) left.", kind, res.Removed, res.Object, parts), "get_project to see the parts, add_modifier to add another, or slice_project."))
+		nextLine(fmt.Sprintf("Removed the %s `%s` from object `%s`. The object has %d part(s) left.", kind, res.Removed, res.Object, parts)+noteLine(res.Note)+warningLines(withIntroduced(nil, before, res.Info)), "get_project to see the parts, add_modifier to add another, or slice_project."))
 	return s.withPartScreenshot(be, out, in.IncludeScreenshot, in.Project, plateOfObject(res.Info, in.Object, 1), in.Object), nil, nil
 }
 
@@ -853,4 +856,12 @@ func changeLine(c projects.Change, withTarget bool) string {
 		return c.Target + ": " + settingChangeText(c)
 	}
 	return settingChangeText(c)
+}
+
+// noteLine is a note on its own line after a reply's first sentence, or nothing.
+func noteLine(n string) string {
+	if n == "" {
+		return ""
+	}
+	return "\n\nNote: " + n + "."
 }

@@ -87,14 +87,28 @@ func loadModel(path string) ([]mesh.Placed, error) {
 	case ".3mf":
 		items, e := mesh.Read3MF(path)
 		if e != nil {
-			return nil, invalidf("", "%q is not a readable 3MF: %v", path, e)
+			return nil, invalidf("export the file from Creality Print as a 3MF project, or add_model a mesh (STL, OBJ, 3MF) instead", "%q is not a readable 3MF: %v", path, e)
 		}
 		if len(items) == 0 {
-			return nil, invalidf("", "%q holds no models", path)
+			return nil, invalidf("the file has no model objects; add_model another file", "%q holds no models", path)
 		}
 		// A slicer project keeps the object names in its own settings, not in the
 		// model file: take them from there when the items line up.
 		if sp, oerr := threemf.Open(path); oerr == nil {
+			// A slicer project: only the model parts of each object count. Modifiers,
+			// negative parts and support blockers or enforcers are volumes that shape
+			// the print, not geometry (Read3MF would merge them into the solid).
+			if sp.IsSlicerProject {
+				if own, ok := modelPartsOf(sp); ok {
+					sp.Close()
+					for i := range own {
+						if own[i].Unnamed {
+							own[i].Name, own[i].Unnamed = fmt.Sprintf("%s %d", name, i+1), false
+						}
+					}
+					return own, nil
+				}
+			}
 			if sp.IsSlicerProject && len(sp.Items) == len(items) {
 				w, d := bedSize(sp.Settings)
 				seen := map[int]int{}
@@ -124,7 +138,7 @@ func loadModel(path string) ([]mesh.Placed, error) {
 		return nil, invalidf("add_model reads .stl, .obj and .3mf files", "%q is not a supported model file", path)
 	}
 	if err != nil {
-		return nil, invalidf("", "%q is not a readable model: %v", path, err)
+		return nil, invalidf("add_model takes STL, OBJ or 3MF meshes; check the path is absolute and the file is not empty", "%q is not a readable model: %v", path, err)
 	}
 	return []mesh.Placed{{Name: name, Mesh: m}}, nil
 }
@@ -163,6 +177,13 @@ func (h *handle) occupied(plate, skipObject, skipInstance int) []rect {
 // findSpot looks for a place for a w by d footprint on a plate: the free spot
 // nearest the bed centre, spiralling outward (margin from the edge, gap to
 // the other objects, wipe tower kept free). It returns the centre.
+//
+// The candidates are the combinations of a left edge from xs and a bottom edge
+// from ys. They are visited nearest to the bed centre first without building
+// or sorting all of them: xs and ys are sorted by their own distance from the
+// centre, and a heap walks the grid of pairs outward, so a free spot is found
+// after looking at a few more candidates than there are objects around the
+// centre. Obstacles sit in a grid, so one candidate costs a few cell lookups.
 func (h *handle) findSpot(plate int, w, d float64, taken []rect) (cx, cy float64, ok bool) {
 	usable := h.geometry().rect()
 	usable = rect{usable.x0 + PlacementMargin, usable.y0 + PlacementMargin, usable.x1 - PlacementMargin, usable.y1 - PlacementMargin}
@@ -179,55 +200,186 @@ func (h *handle) findSpot(plate int, w, d float64, taken []rect) (cx, cy float64
 	half := math.Max(0, (gap-1)/2)
 	tallNew := byObject && h.placeHeight > rod
 	heights := h.takenHeights
-	rodOK := func(c rect) bool {
-		if !byObject {
-			return true
-		}
+	var bands []rect // the obstacles whose Y band a candidate must keep clear
+	if byObject {
 		for i, t := range taken {
-			tall := tallNew || (i < len(heights) && len(heights) == len(taken) && heights[i] > rod)
-			if tall && c.y0 < t.y1+half && t.y0 < c.y1+half {
+			if tallNew || (i < len(heights) && len(heights) == len(taken) && heights[i] > rod) {
+				bands = append(bands, t)
+			}
+		}
+	}
+	rodOK := func(c rect) bool {
+		for _, t := range bands {
+			if c.y0 < t.y1+half && t.y0 < c.y1+half {
 				return false
 			}
 		}
 		return true
 	}
-	// Candidate left and bottom edges: the bed centre, the usable edges, and
-	// the spots touching each obstacle's clearance zone on either side. Every
-	// combination is tried nearest to the bed centre first, so the first object
-	// sits at the centre and later ones spiral outward around it.
 	ccx, ccy := (usable.x0+usable.x1)/2, (usable.y0+usable.y1)/2
+	// Candidate left and bottom edges: the bed centre, the usable edges, and
+	// the spots touching each obstacle's clearance zone on either side.
 	xs := []float64{ccx - w/2, usable.x0, usable.x1 - w}
 	ys := []float64{ccy - d/2, usable.y0, usable.y1 - d}
 	for _, r := range obstacles {
 		xs = append(xs, r.x1+gap, r.x0-gap-w)
 		ys = append(ys, r.y1+gap, r.y0-gap-d)
 	}
-	type cand struct{ x, y, dist float64 }
-	var cands []cand
-	for _, y := range ys {
-		for _, x := range xs {
-			c := rect{x, y, x + w, y + d}
-			if !usable.contains(c) {
-				continue
-			}
-			cands = append(cands, cand{x, y, math.Hypot(x+w/2-ccx, y+d/2-ccy)})
-		}
+	sx, sy := sortedEdges(xs, w, ccx), sortedEdges(ys, d, ccy)
+	grid := newRectGrid(obstacles, gap-1e-6, usable)
+	// The heap holds, for every row of the y list, the next x to try.
+	type item struct {
+		i, j int // index in sy, sx
+		dist float64
 	}
-	sort.SliceStable(cands, func(i, j int) bool { return cands[i].dist < cands[j].dist })
-	for _, cd := range cands {
-		c := rect{cd.x, cd.y, cd.x + w, cd.y + d}
-		clear := rodOK(c)
-		for _, o := range obstacles {
-			if c.overlaps(o.inflate(gap - 1e-6)) {
-				clear = false
+	less := func(a, b item) bool {
+		if a.dist != b.dist {
+			return a.dist < b.dist
+		}
+		if sy[a.i].orig != sy[b.i].orig {
+			return sy[a.i].orig < sy[b.i].orig
+		}
+		return sx[a.j].orig < sx[b.j].orig
+	}
+	var heap []item
+	push := func(it item) {
+		heap = append(heap, it)
+		for k := len(heap) - 1; k > 0; {
+			p := (k - 1) / 2
+			if !less(heap[k], heap[p]) {
 				break
 			}
-		}
-		if clear {
-			return cd.x + w/2, cd.y + d/2, true
+			heap[k], heap[p] = heap[p], heap[k]
+			k = p
 		}
 	}
+	pop := func() item {
+		top := heap[0]
+		last := len(heap) - 1
+		heap[0] = heap[last]
+		heap = heap[:last]
+		for k := 0; ; {
+			l, r, m := 2*k+1, 2*k+2, k
+			if l < len(heap) && less(heap[l], heap[m]) {
+				m = l
+			}
+			if r < len(heap) && less(heap[r], heap[m]) {
+				m = r
+			}
+			if m == k {
+				break
+			}
+			heap[k], heap[m] = heap[m], heap[k]
+			k = m
+		}
+		return top
+	}
+	distOf := func(i, j int) float64 { return math.Hypot(sx[j].off, sy[i].off) }
+	// Only the first column of each row starts in the heap; a popped item adds
+	// the next one to its right. That visits the pairs in increasing distance.
+	for i := range sy {
+		push(item{i, 0, distOf(i, 0)})
+	}
+	for len(heap) > 0 && len(sx) > 0 {
+		it := pop()
+		if it.j+1 < len(sx) {
+			push(item{it.i, it.j + 1, distOf(it.i, it.j+1)})
+		}
+		x, y := sx[it.j].v, sy[it.i].v
+		c := rect{x, y, x + w, y + d}
+		if !usable.contains(c) || !rodOK(c) || grid.hits(c) {
+			continue
+		}
+		return x + w/2, y + d/2, true
+	}
 	return 0, 0, false
+}
+
+// rectGrid finds rectangles by position: each one, grown by a margin, is listed
+// in every cell it touches.
+type rectGrid struct {
+	cell  float64
+	cells map[[2]int][]rect
+}
+
+func newRectGrid(rs []rect, grow float64, clip rect) *rectGrid {
+	g := &rectGrid{cell: 25, cells: map[[2]int][]rect{}}
+	for _, r := range rs {
+		r = r.inflate(grow)
+		// Only the part inside the clip rectangle can be asked about: a huge
+		// obstacle (a bad bounding box) must not fill millions of cells.
+		x0, x1 := math.Max(r.x0, clip.x0), math.Min(r.x1, clip.x1)
+		y0, y1 := math.Max(r.y0, clip.y0), math.Min(r.y1, clip.y1)
+		if x0 > x1 || y0 > y1 {
+			continue
+		}
+		for ix := g.at(x0); ix <= g.at(x1); ix++ {
+			for iy := g.at(y0); iy <= g.at(y1); iy++ {
+				k := [2]int{ix, iy}
+				g.cells[k] = append(g.cells[k], r)
+			}
+		}
+	}
+	return g
+}
+
+func (g *rectGrid) at(v float64) int { return int(math.Floor(v / g.cell)) }
+
+// hits reports whether c overlaps any rectangle of the grid.
+func (g *rectGrid) hits(c rect) bool {
+	for ix := g.at(c.x0); ix <= g.at(c.x1); ix++ {
+		for iy := g.at(c.y0); iy <= g.at(c.y1); iy++ {
+			for _, r := range g.cells[[2]int{ix, iy}] {
+				if c.overlaps(r) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// modelPartsOf builds one Placed per printable build item of a slicer project
+// from the normal (model) parts of its object, in file coordinates, with the
+// origin of its plate. It reports false when a part cannot be read, so the caller
+// can fall back to the plain 3MF reader.
+func modelPartsOf(sp *threemf.Project) ([]mesh.Placed, bool) {
+	w, d := bedSize(sp.Settings)
+	var out []mesh.Placed
+	seen := map[int]int{}
+	for _, it := range sp.Items {
+		inst := seen[it.ObjectID]
+		seen[it.ObjectID]++
+		if !it.Printable {
+			continue
+		}
+		o := sp.Object(it.ObjectID)
+		if o == nil {
+			continue
+		}
+		merged := &mesh.Mesh{}
+		var skipped []string
+		for _, p := range o.Parts {
+			if p.Subtype != threemf.SubtypeNormal {
+				skipped = append(skipped, p.Name)
+				continue
+			}
+			m, err := sp.LoadMesh(p)
+			if err != nil {
+				return nil, false
+			}
+			merged.Append(m.Transformed(p.ComponentTransform))
+		}
+		if len(merged.Triangles) == 0 {
+			continue
+		}
+		pl := mesh.Placed{Name: o.Name, Mesh: merged.Transformed(it.Transform), Unnamed: o.Name == "", Skipped: skipped}
+		if plate := sp.PlateOf(it.ObjectID, inst); plate != nil && w > 0 {
+			pl.Origin = threemf.PlateOrigin(plate.Index, len(sp.Plates), w, d)
+		}
+		out = append(out, pl)
+	}
+	return out, len(out) > 0
 }
 
 // bedSize is the width and depth of the printable area in whole millimetres
@@ -283,7 +435,7 @@ func (s *Store) AddModel(ref string, req AddModelRequest) (*AddModelResult, erro
 		return nil, invalidf("keep_positions places every object where the file has it: leave out position and copies", "keep_positions cannot go with position or copies above 1")
 	}
 	if copies < 1 {
-		return nil, invalidf("", "copies must be at least 1")
+		return nil, invalidf("give copies of 1 or more", "copies must be at least 1")
 	}
 	if (req.X != nil || req.Y != nil) && (copies > 1 || len(items) > 1) {
 		return nil, invalidf("add the models one at a time, or leave x and y out for automatic placement", "x and y place one object; %d objects were requested", copies*len(items))
@@ -362,6 +514,9 @@ func (s *Store) AddModel(ref string, req AddModelRequest) (*AddModelResult, erro
 			}
 			if g := mesh.GuessUnits(bb); g.Suspicious {
 				res.Warnings = append(res.Warnings, fmt.Sprintf("%s: %s", base, g.Reason))
+			}
+			if len(it.Skipped) > 0 {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("%s: %d modifier, negative or support part(s) of the project were not imported (%s); add_model takes the model parts, open_project keeps them all", base, len(it.Skipped), strings.Join(it.Skipped, ", ")))
 			}
 			size := size3(bb)
 			c := center3(bb)
@@ -503,7 +658,7 @@ func (s *Store) UpdateObject(ref string, req UpdateObjectRequest) (*UpdateObject
 		cur := h.itemT(o.ID, req.Instance)
 		if req.Name != nil {
 			if strings.TrimSpace(*req.Name) == "" {
-				return invalidf("", "the name cannot be empty")
+				return invalidf("give a name with at least one character", "the name cannot be empty")
 			}
 			if err := h.p.RenameObject(o.ID, *req.Name); err != nil {
 				return threemfError(err)
@@ -742,7 +897,7 @@ func (s *Store) AddModifier(ref string, req ModifierRequest) (*ModifierResult, e
 				continue
 			}
 			if opt, ok := h.validate(key, v, catalog.ScopePart, false, &errs); ok {
-				if key == "extruder" {
+				if isFilamentKey(key) {
 					h.checkExtruder(key, opt, v, 0, &errs)
 				}
 				cfgKV.Set(key, objectValue(opt, v))
@@ -840,6 +995,9 @@ type RemovePartResult struct {
 	Part    PartInfo
 	Object  string
 	Removed string
+	// Note says what else changed: the filament of the part left alone moved to
+	// the object.
+	Note string
 }
 
 // RemovePart removes one part (a modifier, negative part, support blocker or
@@ -876,6 +1034,20 @@ func (s *Store) RemovePart(ref, object, part string) (*RemovePartResult, error) 
 		if err := h.p.RemovePart(o.ID, pt.ID); err != nil {
 			return threemfError(err)
 		}
+		// One part left: the importer would erase its own filament, so it moves to the object.
+		if len(o.Parts) == 1 {
+			if v := o.Parts[0].Config.Value("extruder"); v != "" {
+				if n := atoi0(v); n > 0 {
+					if err := h.p.SetObjectOverride(o.ID, "extruder", strconv.Itoa(n)); err != nil {
+						return errf(CodeInternal, "", "%v", err)
+					}
+					res.Note = fmt.Sprintf("object %q has one part left, which kept its own filament %d: Creality Print keeps the filament of a single part on the object, so it was moved there", o.Name, n)
+				}
+				if _, err := h.p.DeletePartOverride(o.ID, o.Parts[0].ID, "extruder"); err != nil {
+					return errf(CodeInternal, "", "%v", err)
+				}
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -883,4 +1055,36 @@ func (s *Store) RemovePart(ref, object, part string) (*RemovePartResult, error) 
 	}
 	res.Info, err = s.info(ref)
 	return res, err
+}
+
+// edge is one candidate left or bottom edge of a footprint.
+type edge struct {
+	v    float64
+	off  float64 // distance of the footprint centre from the bed centre, on this axis
+	orig int     // position in the unsorted list: the tie break the old full sort had
+}
+
+// sortedEdges orders candidate edges by how far the footprint centre is from the
+// bed centre. Equal edges give the same candidates: the first of each value is
+// kept, so a grid of copies (the same few columns and rows over and over) costs
+// little. Only bit-identical values are equal: two edges a fraction of a micron
+// apart are different candidates, and one of them may be the free one.
+func sortedEdges(vs []float64, size, centre float64) []edge {
+	seen := map[uint64]bool{}
+	var out []edge
+	for i, v := range vs {
+		k := math.Float64bits(v)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, edge{v, math.Abs(v + size/2 - centre), i})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].off != out[j].off {
+			return out[i].off < out[j].off
+		}
+		return out[i].orig < out[j].orig
+	})
+	return out
 }

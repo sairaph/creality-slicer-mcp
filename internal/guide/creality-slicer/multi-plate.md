@@ -43,5 +43,5 @@ get_slice_report has a `plate` parameter; the default is plate 1. Totals across 
 ## Things to know
 
 - Each plate is a separate print job for the printer: a multi-colour project with several plates needs its own spool check per plate.
-- Changing anything on a plate discards its earlier slice result; slice again.
+- Changing a plate marks its earlier slice as stale (the files stay, reports say so); slice again.
 - Plate numbers start at 1.

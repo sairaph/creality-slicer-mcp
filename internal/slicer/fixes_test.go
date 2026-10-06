@@ -18,7 +18,9 @@ func writePlate(dir string, n int) string {
 	return p
 }
 
-func TestRunDeletesEarlierPlateFilesSoAFailedRunNeverReportsThem(t *testing.T) {
+// A run that fails leaves the earlier G-code where it was, and never reports it
+// as its own result: the files of the folder change only when a run succeeds.
+func TestFailedRunKeepsTheEarlierPlateFilesAndNeverReportsThem(t *testing.T) {
 	wrote := true
 	ex := &fakeExec{fn: func(_ context.Context, spec ExecSpec) (ExecResult, error) {
 		if wrote {
@@ -30,7 +32,6 @@ func TestRunDeletesEarlierPlateFilesSoAFailedRunNeverReportsThem(t *testing.T) {
 	req := request(t)
 	other := filepath.Join(req.OutputDir, "notes.txt")
 	os.WriteFile(other, []byte("keep"), 0o644)
-	os.WriteFile(filepath.Join(req.OutputDir, "plate_2.gcode.tmp"), []byte("half"), 0o644)
 
 	first, err := r.Run(context.Background(), req)
 	if err != nil || !first.Outcome.OK || len(first.GCodeFiles) != 1 {
@@ -48,21 +49,85 @@ func TestRunDeletesEarlierPlateFilesSoAFailedRunNeverReportsThem(t *testing.T) {
 	if !strings.Contains(second.Outcome.Hint, "without writing G-code") {
 		t.Errorf("hint %q", second.Outcome.Hint)
 	}
-	if _, err := os.Stat(filepath.Join(req.OutputDir, "plate_1.gcode")); !os.IsNotExist(err) {
-		t.Error("the earlier plate file must be deleted before the run")
-	}
-	if _, err := os.Stat(filepath.Join(req.OutputDir, "plate_2.gcode.tmp")); !os.IsNotExist(err) {
-		t.Error("a leftover .tmp of the slicer must be deleted too")
+	if b, err := os.ReadFile(filepath.Join(req.OutputDir, "plate_1.gcode")); err != nil || string(b) != "; fake\n" {
+		t.Errorf("the earlier plate file must stay after a failed run: %q %v", b, err)
 	}
 	if _, err := os.Stat(other); err != nil {
 		t.Error("files that are not plate G-code must stay")
 	}
-	// A fresh file that is newer than the run start is also deleted: there is
-	// no mtime grace at all.
-	writePlate(req.OutputDir, 1)
-	third, _ := r.Run(context.Background(), req)
-	if len(third.GCodeFiles) != 0 || third.Outcome.Name != OutcomeNoOutput {
-		t.Errorf("%+v", third)
+}
+
+// A killed (cancelled or timed out) run, also a plate 0 run that wrote some of
+// its plates first, leaves no mix of new and old files.
+func TestKilledRunLeavesNoMixOfNewAndOldFiles(t *testing.T) {
+	ex := &fakeExec{fn: func(_ context.Context, spec ExecSpec) (ExecResult, error) {
+		writeOut(spec, "plate_1.gcode") // the first plate was written, then the run was killed
+		return ExecResult{Killed: true}, nil
+	}}
+	r, _ := newRunner(t, ex)
+	req := request(t)
+	for _, n := range []string{"plate_1.gcode", "plate_2.gcode"} {
+		os.WriteFile(filepath.Join(req.OutputDir, n), []byte("old"), 0o644)
+	}
+	res, err := r.Run(context.Background(), req)
+	if err != nil || res.Ending != EndTimedOut || len(res.GCodeFiles) != 0 {
+		t.Fatalf("%v %+v", err, res)
+	}
+	for _, n := range []string{"plate_1.gcode", "plate_2.gcode"} {
+		if b, _ := os.ReadFile(filepath.Join(req.OutputDir, n)); string(b) != "old" {
+			t.Errorf("%s = %q after a killed run, want the old file", n, b)
+		}
+	}
+}
+
+// With an empty plate the slicer is started once per plate that has objects
+// (the 7.3 command line fails -50 for plate 0 when any plate is empty).
+func TestPlatesListSlicesOnePlateAtATime(t *testing.T) {
+	var plates []string
+	ex := &fakeExec{fn: func(_ context.Context, spec ExecSpec) (ExecResult, error) {
+		for i, a := range spec.Args {
+			if a == "--slice" {
+				plates = append(plates, spec.Args[i+1])
+				if spec.Args[i+1] == "0" {
+					return ExecResult{ExitCode: -50}, nil // an empty plate somewhere
+				}
+				writeOut(spec, "plate_"+spec.Args[i+1]+".gcode")
+			}
+		}
+		return ExecResult{}, nil
+	}}
+	r, _ := newRunner(t, ex)
+	req := request(t)
+	req.Plate, req.Plates = 0, []int{1, 3}
+	res, err := r.Run(context.Background(), req)
+	if err != nil || !res.Outcome.OK {
+		t.Fatalf("%v %+v", err, res)
+	}
+	if strings.Join(plates, ",") != "1,3" || len(res.GCodeFiles) != 2 || filepath.Base(res.GCodeFiles[0]) != "plate_1.gcode" || filepath.Base(res.GCodeFiles[1]) != "plate_3.gcode" {
+		t.Fatalf("plates run %v, files %v", plates, res.GCodeFiles)
+	}
+	// The first failing plate stops the run and nothing is moved into the folder.
+	os.Remove(filepath.Join(req.OutputDir, "plate_1.gcode"))
+	os.Remove(filepath.Join(req.OutputDir, "plate_3.gcode"))
+	plates = nil
+	ex.fn = func(_ context.Context, spec ExecSpec) (ExecResult, error) {
+		for i, a := range spec.Args {
+			if a == "--slice" {
+				plates = append(plates, spec.Args[i+1])
+				if spec.Args[i+1] == "3" {
+					return ExecResult{ExitCode: -17}, nil
+				}
+				writeOut(spec, "plate_"+spec.Args[i+1]+".gcode")
+			}
+		}
+		return ExecResult{}, nil
+	}
+	res, err = r.Run(context.Background(), req)
+	if err != nil || res.Outcome.OK || len(res.GCodeFiles) != 0 {
+		t.Fatalf("%v %+v", err, res)
+	}
+	if _, err := os.Stat(filepath.Join(req.OutputDir, "plate_1.gcode")); err == nil {
+		t.Error("plate 1 was moved into the folder although plate 3 failed")
 	}
 }
 

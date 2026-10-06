@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -25,7 +26,12 @@ func (s *Server) registerProjectTools() {
 func (s *Server) projectsOrFail(ctx context.Context) (ProjectBackend, *toolResult) {
 	be, err := s.env.projectBackend(ctx)
 	if err != nil {
-		return ProjectBackend{}, unavailable("use projects", err)
+		res := unavailable("use projects", err)
+		if errors.Is(err, errProjectsStart) {
+			res = render.ErrorResult(render.Error{Code: render.CodeUnavailable, Message: shortMessage("Cannot use projects: " + err.Error()),
+				Hint: "The project store could not start: check that the folder in the message exists and can be written to, then call get_slicer_status."})
+		}
+		return ProjectBackend{}, res
 	}
 	return be, nil
 }

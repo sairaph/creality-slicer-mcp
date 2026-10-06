@@ -133,6 +133,9 @@ type fakeSlicer struct {
 	started chan struct{} // closed when the first run has begun
 	once    sync.Once
 	gcode   string // the G-code to write instead of sliceGCode, when set
+	slices  []int  // the --slice arguments of every run
+	failAll bool   // --slice 0 fails with -50, as the slicer does when a plate is empty
+	plates  int    // --slice 0 writes this many plate files, when set
 }
 
 func (f *fakeSlicer) Run(ctx context.Context, spec slicer.ExecSpec) (slicer.ExecResult, error) {
@@ -152,11 +155,19 @@ func (f *fakeSlicer) Run(ctx context.Context, spec slicer.ExecSpec) (slicer.Exec
 			return slicer.ExecResult{Killed: true}, nil
 		}
 	}
-	plate, out := 1, ""
+	plate, out, zero := 1, "", false
 	for i, a := range spec.Args {
 		switch a {
 		case "--slice":
-			if n, _ := strconv.Atoi(spec.Args[i+1]); n > 0 {
+			n, _ := strconv.Atoi(spec.Args[i+1])
+			f.mu.Lock()
+			f.slices = append(f.slices, n)
+			f.mu.Unlock()
+			zero = n == 0
+			if n == 0 && f.failAll {
+				return slicer.ExecResult{ExitCode: -50}, nil
+			}
+			if n > 0 {
 				plate = n
 			}
 		case "--outputdir":
@@ -166,6 +177,14 @@ func (f *fakeSlicer) Run(ctx context.Context, spec slicer.ExecSpec) (slicer.Exec
 	text := sliceGCode
 	if f.gcode != "" {
 		text = f.gcode
+	}
+	if f.plates > 0 && zero {
+		for p := 1; p <= f.plates; p++ {
+			if err := os.WriteFile(filepath.Join(out, fmt.Sprintf("plate_%d.gcode", p)), []byte(text), 0o644); err != nil {
+				return slicer.ExecResult{}, err
+			}
+		}
+		return slicer.ExecResult{}, nil
 	}
 	err := os.WriteFile(filepath.Join(out, fmt.Sprintf("plate_%d.gcode", plate)), []byte(text), 0o644)
 	return slicer.ExecResult{}, err

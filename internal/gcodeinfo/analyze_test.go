@@ -575,3 +575,158 @@ func TestAnalyzeFeatureFilterKeepsTheRaster(t *testing.T) {
 		t.Errorf("labels %q", got)
 	}
 }
+
+const supportCfg = "; CONFIG_BLOCK_START\n; support_interface_spacing = 0.5\n; support_base_pattern_spacing = 2.5\n; support_line_width = 0.42\n; support_top_z_distance = 0.2\n; support_object_xy_distance = 0.35\n; CONFIG_BLOCK_END\n"
+
+// stripes prints n parallel interface lines 1.2 mm long, a line pitch apart.
+func (b *gcodeBuilder) stripes(x, y float64, n int, pitch float64) {
+	b.typ("Support interface", 0.42)
+	for i := 0; i < n; i++ {
+		yy := y + float64(i)*pitch
+		b.travel(x, yy)
+		b.line(x, yy, x+1.2, yy, 0.42)
+	}
+}
+
+// The object prints a z gap above the support (support_top_z_distance), so the
+// contact is found a few layers up, and the support in another object's block
+// still names the object that sits on it.
+func TestAnalyzeSupportContactsAcrossTheZGapAndBlocks(t *testing.T) {
+	b := newBuilder(false)
+	b.layer(0.2)
+	b.begin("Owner_id_0_copy_0") // the support is printed in this block ...
+	b.stripes(100, 100, 3, 0.9)
+	b.end("Owner_id_0_copy_0")
+	b.layer(0.4) // ... the gap layer: nothing above yet
+	b.begin("Owner_id_0_copy_0")
+	b.typ("Outer wall", 0.45)
+	b.square(300, 300, 3, 0.45)
+	b.end("Owner_id_0_copy_0")
+	b.layer(0.6) // ... and Sitter prints on it
+	b.begin("Sitter_id_1_copy_0")
+	b.typ("Outer wall", 0.45)
+	b.square(99.5, 99.5, 4, 0.45)
+	b.end("Sitter_id_1_copy_0")
+	b.layer(0.8)
+	b.begin("Sitter_id_1_copy_0")
+	b.typ("Outer wall", 0.45)
+	b.square(99.5, 99.5, 4, 0.45)
+	b.end("Sitter_id_1_copy_0")
+	b.raw(supportCfg)
+	res, err := Analyze(b.write(t), AnalyzeOptions{Measures: []string{MeasureSupportContacts}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.SupportContacts) != 1 {
+		t.Fatalf("clusters %+v", res.SupportContacts)
+	}
+	c := res.SupportContacts[0]
+	if c.Object != "Owner" || len(c.Above) != 1 || c.Above[0] != "Sitter" {
+		t.Fatalf("contact %+v, want Sitter (the support is Owner's block, the object above is Sitter)", c)
+	}
+	// no object near: the patch names nobody
+	far := newBuilder(false)
+	far.layer(0.2)
+	far.begin("Owner_id_0_copy_0")
+	far.stripes(100, 100, 3, 0.9)
+	far.end("Owner_id_0_copy_0")
+	far.layer(0.4)
+	far.begin("Owner_id_0_copy_0")
+	far.typ("Outer wall", 0.45)
+	far.square(300, 300, 3, 0.45)
+	far.end("Owner_id_0_copy_0")
+	far.raw(supportCfg)
+	res, err = Analyze(far.write(t), AnalyzeOptions{Measures: []string{MeasureSupportContacts}})
+	if err != nil || len(res.SupportContacts) != 1 || len(res.SupportContacts[0].Above) != 0 {
+		t.Fatalf("far: %v %+v", err, res.SupportContacts)
+	}
+}
+
+// Strips one line pitch apart are one patch; farther apart (a wider spacing in
+// the config) they are separate patches.
+func TestAnalyzeSupportInterfaceStripsMerge(t *testing.T) {
+	build := func(cfg string, pitch float64) *Analysis {
+		b := newBuilder(false)
+		b.layer(0.2)
+		b.begin("S_id_0_copy_0")
+		b.stripes(100, 100, 15, pitch)
+		b.end("S_id_0_copy_0")
+		b.raw(cfg)
+		res, err := Analyze(b.write(t), AnalyzeOptions{Measures: []string{MeasureSupportContacts}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	one := build(supportCfg, 0.92) // the pitch is spacing 0.5 plus line width 0.42
+	if len(one.SupportContacts) != 1 {
+		t.Fatalf("%d patches, want one", len(one.SupportContacts))
+	}
+	c := one.SupportContacts[0]
+	if !near(c.MinY, 99.8, 0.15) || !near(c.MaxY, 100+14*0.92+0.2, 0.2) || c.AreaMM2 < 9 {
+		t.Fatalf("patch %+v", c)
+	}
+	wide := build(supportCfg, 3) // strips 2.6 mm apart: far beyond the line pitch
+	if len(wide.SupportContacts) != 15 {
+		t.Fatalf("strips far apart must not merge: %d patches", len(wide.SupportContacts))
+	}
+}
+
+// 7.2.2 writes ";:<z>" where 7.3 writes ";Z:<z>": the analysis reads both.
+func TestAnalyzeReadsThe72LayerMarker(t *testing.T) {
+	res, err := Analyze(oneFilament, AnalyzeOptions{Measures: []string{MeasureFirstLayers, MeasureBounds}, UseZ: true, ZFrom: 0.2, ZTo: 0.6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Layers != 100 || len(res.FirstLayers) != 1 {
+		t.Fatalf("layers %d rows %+v", res.Layers, res.FirstLayers)
+	}
+	r := res.FirstLayers[0]
+	if r.FirstLayer != 1 || r.LastLayer != 3 {
+		t.Fatalf("z 0.2 to 0.6 is layers 1 to 3, got %d to %d", r.FirstLayer, r.LastLayer)
+	}
+	for _, b := range res.Bounds {
+		if b.Layer > 0 && (b.Z < 0.19 || b.Z > 0.61) {
+			t.Fatalf("bounds row at z %v", b.Z)
+		}
+	}
+}
+
+// With independent support layer heights the slicer writes layers that hold
+// only support between object layers: a stem standing on the object layer
+// before them is not in mid air.
+func TestAnalyzeUnsupportedStartsWithSupportOnlyLayers(t *testing.T) {
+	build := func(island bool) *gcodeBuilder {
+		b := newBuilder(false)
+		step := func(z float64, object bool) {
+			b.layer(z)
+			b.begin("C_id_0_copy_0")
+			if object {
+				b.typ("Outer wall", 0.45)
+				b.square(100, 100, 10, 0.45)
+			}
+			b.typ("Support", 0.45)
+			b.square(60, 60, 4, 0.45)
+			b.end("C_id_0_copy_0")
+		}
+		step(0.2, true)
+		step(0.3, false) // support only
+		step(0.4, false)
+		step(0.6, true) // the stem again, above two support-only layers
+		if island {
+			b.begin("C_id_0_copy_0")
+			b.typ("Outer wall", 0.45)
+			b.square(130, 130, 2, 0.45)
+			b.end("C_id_0_copy_0")
+		}
+		return b
+	}
+	res, err := Analyze(build(false).write(t), AnalyzeOptions{Measures: []string{MeasureUnsupportedStart}})
+	if err != nil || len(res.UnsupportedStarts) != 0 {
+		t.Fatalf("false islands after support-only layers: %v %+v", err, res.UnsupportedStarts)
+	}
+	res, err = Analyze(build(true).write(t), AnalyzeOptions{Measures: []string{MeasureUnsupportedStart}})
+	if err != nil || len(res.UnsupportedStarts) != 1 || !near(res.UnsupportedStarts[0].MinX, 129.7, 0.2) {
+		t.Fatalf("the real mid-air island: %v %+v", err, res.UnsupportedStarts)
+	}
+}

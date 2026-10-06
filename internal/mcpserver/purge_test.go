@@ -1,11 +1,14 @@
 package mcpserver
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sairaph/creality-slicer-mcp/internal/projects"
 )
 
@@ -170,7 +173,7 @@ func TestGroupObjectsThroughTheTool(t *testing.T) {
 	id := namedModel(t, pf, "", "First", 1)
 	namedModel(t, pf, id, "Second", 2)
 	out := pf.ok(t, "group_objects", map[string]any{"project": id, "objects": []string{"First", "Second"}, "name": "Pair", "include_screenshot": false})
-	contains(t, "group_objects", out, "Grouped 2 objects", "Second | ", "| 2")
+	contains(t, "group_objects", out, "Grouped 2 objects into `Pair` (id 2) on plate 1", "Parts (name | kind | filament):\nFirst | normal_part | 1\nSecond | normal_part | 2\n")
 	e := pf.errText(t, "group_objects", map[string]any{"project": id, "objects": []string{"Pair"}})
 	if e == "" {
 		t.Fatal("one object accepted")
@@ -245,16 +248,20 @@ func TestAnalyzeToolpathsTool(t *testing.T) {
 	contains(t, "stale", stale, "this is the old toolpath", "stale: true")
 }
 
-func TestAnalyzeToolpathsNoObjectMatchedListsTheLabels(t *testing.T) {
+func TestAnalyzeToolpathsUnknownObjectIsAnError(t *testing.T) {
 	pf := newProjFixture(t)
 	pf.exec.gcode = analyzeG
 	id := namedModel(t, pf, "", "Cube", 1)
 	pf.ok(t, "slice_project", map[string]any{"project": id, "preview": "none", "background": false})
-	out := pf.ok(t, "analyze_toolpaths", map[string]any{"project": id, "objects": []string{"nothing"}})
-	contains(t, "no match", out, "No object matched", "in the G-code are Cube.")
-	if strings.Contains(out, "_id_0_copy_0") {
-		t.Errorf("the hint shows the G-code label: %s", out)
+	for name, objs := range map[string][]string{"none matches": {"nothing"}, "some match": {"cube", "nothing", "other"}} {
+		e := pf.errText(t, "analyze_toolpaths", map[string]any{"project": id, "objects": objs})
+		contains(t, name, e, "not_found", "No object named ", "Names as get_project shows them: Cube.")
+		if strings.Contains(e, "_id_0_copy_0") || strings.Contains(e, "cube,") {
+			t.Errorf("%s: %s", name, e)
+		}
 	}
+	// a known name still works, whatever its spelling
+	pf.ok(t, "analyze_toolpaths", map[string]any{"project": id, "objects": []string{"CUBE"}})
 }
 
 // Every page shows every measure that still has rows, findings first, and says
@@ -378,4 +385,179 @@ func TestAnalyzeNoFindingsLine(t *testing.T) {
 	if strings.Contains(out, "## support_contacts") || strings.Contains(out, "## short_runs") {
 		t.Errorf("empty sections are shown:\n%s", out)
 	}
+}
+
+// Later pages carry no per object summary; page 1 has it.
+func TestAnalyzeToolpathsSummaryOnPageOneOnly(t *testing.T) {
+	pf := newProjFixture(t)
+	pf.exec.gcode = analyzeG
+	id := namedModel(t, pf, "", "Cube", 1)
+	pf.ok(t, "slice_project", map[string]any{"project": id, "preview": "none", "background": false})
+	one := pf.ok(t, "analyze_toolpaths", map[string]any{"project": id})
+	if !strings.Contains(one, "objects:") || !strings.Contains(one, "first_layer: 1") {
+		t.Errorf("page 1 lacks the object summary:\n%s", one)
+	}
+	// a page past the end is an empty page, as in the other paged tools
+	e := pf.ok(t, "analyze_toolpaths", map[string]any{"project": id, "page": 2})
+	contains(t, "page 2", e, "past the end")
+}
+
+func TestHandoffDescribesTheTwoStepStartPrint(t *testing.T) {
+	text := handoffText(nil)
+	for _, want := range []string{"two calls", "confirm_token", "no confirm_token", "sends nothing", "every warning", "spools are in place and the bed is clear"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("handoff lacks %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestUpdateSettingsRouteReplyListsTheIgnoredToolChange(t *testing.T) {
+	pf := newProjFixture(t)
+	id := namedModel(t, pf, "", "A", 1)
+	namedModel(t, pf, id, "B", 1)
+	pf.ok(t, "set_layer_actions", map[string]any{"project": id, "actions": []map[string]any{{"layer": 2, "type": "tool_change", "filament": 2}}})
+	out := pf.ok(t, "update_settings", map[string]any{"project": id, "scope": "object", "target": "B", "values": map[string]any{"extruder": 2}})
+	contains(t, "update_settings", out, "Warnings:", "have no effect")
+}
+
+// A client that gives up (its request context ends) stops the wait at once and
+// the job it started is cancelled.
+func TestSliceProjectStopsWhenTheClientCancels(t *testing.T) {
+	pf := newProjFixture(t)
+	id := namedModel(t, pf, "", "Cube", 1)
+	pf.exec.block = make(chan struct{})
+	pf.exec.killed = make(chan struct{})
+	pf.exec.started = make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	wait := 600.0
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		_, _, _ = pf.srv.sliceProject(ctx, nil, sliceInput{Project: id, Wait: &wait})
+	}()
+	select {
+	case <-pf.exec.started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the slicer run did not start")
+	}
+	cancel()
+	select {
+	case <-finished:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the call kept waiting after the client cancelled")
+	}
+	select {
+	case <-pf.exec.killed:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the job was not cancelled")
+	}
+}
+
+// The slice reply is stale only for the plates it shows: a change on another
+// plate does not make it stale.
+func TestSliceReplyStaleIsPerPlate(t *testing.T) {
+	pf := newProjFixture(t)
+	id := namedModel(t, pf, "", "A", 1)
+	pf.ok(t, "manage_plates", map[string]any{"project": id, "action": "add", "include_screenshot": false})
+	pf.ok(t, "add_model", map[string]any{"project": id, "path": pf.stl, "name": "B", "plate": 2, "include_screenshot": false})
+	pf.ok(t, "slice_project", map[string]any{"project": id, "preview": "none", "background": false})
+	// plate 2 changes after the slice; plate 1 does not
+	pf.ok(t, "update_object", map[string]any{"project": id, "object": "B", "position": []float64{130, 130}, "include_screenshot": false})
+	out := pf.ok(t, "slice_project", map[string]any{"project": id, "plate": 1, "preview": "none", "background": false})
+	if strings.Contains(out, "stale: true") || strings.Contains(out, "The project changed after this slice") {
+		t.Errorf("a plate 1 slice was called stale because of plate 2:\n%.400s", out)
+	}
+}
+
+func TestColourChangeWithoutFilamentIsRefusedThroughTheTool(t *testing.T) {
+	pf := newProjFixture(t)
+	id := pf.withModel(t, "NoFilament")
+	e := pf.errText(t, "set_layer_actions", map[string]any{"project": id, "actions": []map[string]any{{"layer": 2, "type": "color_change"}}})
+	contains(t, "color_change", e, "needs filament", "hint: Give filament")
+}
+
+// Plate 0 with an empty plate slices only the plates that have objects, one
+// slicer call per plate; the all-in-one call (which the slicer fails with -50
+// on an empty plate) is never made.
+func TestSliceAllPlatesSkipsAnEmptyPlateThroughTheTool(t *testing.T) {
+	pf := newProjFixture(t)
+	pf.exec.failAll = true
+	id := pf.withModel(t, "Empty2")
+	pf.ok(t, "manage_plates", map[string]any{"project": id, "action": "add"})
+	out := pf.ok(t, "slice_project", map[string]any{"project": id, "preview": "none", "background": false})
+	contains(t, "slice", out, "Sliced 1 plate(s)")
+	if got := fmt.Sprint(pf.exec.slices); got != "[1]" {
+		t.Fatalf("slicer calls %s, want [1]", got)
+	}
+}
+
+// Every error of the projects layer says what to call next.
+func TestEveryProjectErrorHasAHint(t *testing.T) {
+	for _, code := range []string{projects.CodeInvalidInput, projects.CodeNotFound, projects.CodeConflict, projects.CodeUnavailable, projects.CodeInternal, projects.CodeSlicerError} {
+		res := projFailure(&projects.Error{Code: code, Message: "x"})
+		if text := fmt.Sprint(res.Content[0].(*mcp.TextContent).Text); !strings.Contains(text, "hint:") {
+			t.Errorf("%s has no hint:\n%s", code, text)
+		}
+	}
+	pf := newProjFixture(t)
+	for name, call := range map[string]func() string{
+		"unknown project": func() string { return pf.errText(t, "get_project", map[string]any{"project": "nope"}) },
+		"unknown job": func() string {
+			return pf.errText(t, "get_slice_status", map[string]any{"project": pf.withModel(t, "H"), "job_id": "nope"})
+		},
+		"bad model": func() string {
+			return pf.errText(t, "add_model", map[string]any{"project": pf.create(t, "H2"), "path": filepath.Join(t.TempDir(), "x.stl")})
+		},
+	} {
+		if text := call(); !strings.Contains(text, "hint:") {
+			t.Errorf("%s has no hint:\n%s", name, text)
+		}
+	}
+}
+
+func TestSetPresetsAutoFlushThroughTheTool(t *testing.T) {
+	pf := newProjFixture(t)
+	id := pf.create(t, "Flush")
+	out := pf.ok(t, "set_presets", map[string]any{"project": id, "flush_matrix": []int{0, 111, 222, 0}})
+	contains(t, "manual", out, "flush_matrix: manual")
+	out = pf.ok(t, "set_presets", map[string]any{"project": id, "auto_flush": true})
+	contains(t, "auto", out, "flush_matrix: auto", "flush matrix back to automatic")
+	e := pf.errText(t, "set_presets", map[string]any{"project": id, "auto_flush": true, "flush_matrix": []int{0, 1, 2, 0}})
+	contains(t, "both", e, "contradict")
+}
+
+// The settings digest: no slice, an empty list, and the plate that was asked for.
+func TestOverridesDigestCases(t *testing.T) {
+	pf := newProjFixture(t)
+	pf.exec.plates = 2
+	id := namedModel(t, pf, "", "Plain", 1)
+	be := ProjectBackend{Store: pf.store}
+	if got := overridesDigest(be, id, 1); !strings.Contains(got, "cannot be read") || !strings.Contains(got, "has not been sliced") {
+		t.Errorf("no slice: %q", got)
+	}
+	pf.ok(t, "manage_plates", map[string]any{"project": id, "action": "add"})
+	namedModelOnPlate(t, pf, id, "Second", 2)
+	pf.ok(t, "update_settings", map[string]any{"project": id, "scope": "object", "target": "Second", "values": map[string]any{"wall_loops": 5}})
+	pf.ok(t, "slice_project", map[string]any{"project": id, "preview": "none", "background": false})
+	// Nothing overrides the project on plate 1: the empty list is said so.
+	one := overridesDigest(be, id, 1)
+	if !strings.Contains(one, "plate 1") || !strings.Contains(one, "None: no plate, object, part or height range overrides") {
+		t.Errorf("plate 1: %q", one)
+	}
+	// Plate 2 shows its own object, and plate 0 means the first sliced plate.
+	two := overridesDigest(be, id, 2)
+	if !strings.Contains(two, "plate 2") || !strings.Contains(two, "Object `Second`") || !strings.Contains(two, "wall_loops: 5") || strings.Contains(two, "Plain") {
+		t.Errorf("plate 2: %q", two)
+	}
+	if zero := overridesDigest(be, id, 0); !strings.Contains(zero, "plate 1") {
+		t.Errorf("plate 0: %q", zero)
+	}
+	if bad := overridesDigest(be, id, 7); !strings.Contains(bad, "plate 7 has not been sliced") {
+		t.Errorf("plate 7: %q", bad)
+	}
+}
+
+func namedModelOnPlate(t *testing.T, pf *projFixture, project, name string, plate int) {
+	t.Helper()
+	pf.ok(t, "add_model", map[string]any{"project": project, "path": pf.stl, "name": name, "plate": plate})
 }

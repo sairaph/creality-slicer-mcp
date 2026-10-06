@@ -399,8 +399,15 @@ func uninstallExe(s string) string {
 	return s
 }
 
+// sameDir reports whether two paths name the same folder: equal after cleaning
+// and case folding, or equal once links and short (8.3) names are resolved.
 func sameDir(a, b string) bool {
-	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+	if strings.EqualFold(filepath.Clean(a), filepath.Clean(b)) {
+		return true
+	}
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && strings.EqualFold(filepath.Clean(ra), filepath.Clean(rb))
 }
 
 // versionParts returns major and minor of "7.2.2"; -1 when unparsable.

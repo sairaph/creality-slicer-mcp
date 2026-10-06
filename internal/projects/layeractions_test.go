@@ -2,6 +2,7 @@ package projects
 
 import (
 	"archive/zip"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -84,15 +85,17 @@ func TestColourChangeNeedsASecondFilamentWithoutGCode(t *testing.T) {
 	e := newEnv(t)
 	info := e.newProject(t, "One", FilamentSpec{Preset: testPLA, Colour: "#FFFFFF"})
 	e.addBox(t, info.ID, "cube", 20, 20, 20)
-	_, err := e.st.SetLayerActions(info.ID, 1, []LayerAction{{Layer: 10, Kind: ActionColorChange, Colour: "#FF0000"}})
+	_, err := e.st.SetLayerActions(info.ID, 1, []LayerAction{{Layer: 10, Kind: ActionColorChange, Filament: 1}})
 	ae := wantCode(t, err, CodeInvalidInput)
-	if !strings.Contains(ae.Message, "no colour change G-code (M600), so a colour change needs a second filament slot") || !strings.Contains(ae.Hint, "set_presets") {
+	if !strings.Contains(ae.Message, "does not write colour change G-code (M600)") || !strings.Contains(ae.Message, "this project has one") || !strings.Contains(ae.Hint, "set_presets") || !strings.Contains(ae.Hint, "pause") {
 		t.Fatalf("error %q hint %q", ae.Message, ae.Hint)
 	}
 }
 
-// A printer preset with colour change G-code keeps the classic colour change.
-func TestColourChangeStaysWithGCode(t *testing.T) {
+// Creality Print never writes M600 (the emitter is disabled in GCode.cpp), so
+// a colour change is a tool change whatever color_change_gcode says, and it needs
+// the filament to change to.
+func TestColourChangeIsAlwaysAToolChange(t *testing.T) {
 	e := newEnv(t)
 	info := e.newProject(t, "Classic")
 	e.addBox(t, info.ID, "cube", 20, 20, 20)
@@ -108,14 +111,54 @@ func TestColourChangeStaysWithGCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := res.Plates[0].Actions[0]
-	if a.Kind != ActionColorChange || a.Colour != "#FF0000" {
+	if a.Kind != ActionToolChange || a.Filament != 2 || a.Colour != "#000000" {
 		t.Fatalf("stored %+v", a)
 	}
-	if x := gcodeXML(t, e, info.ID); !strings.Contains(x, `type="0"`) {
-		t.Errorf("not type 0:\n%s", x)
+	if x := gcodeXML(t, e, info.ID); !strings.Contains(x, `type="2"`) || strings.Contains(x, `type="0"`) {
+		t.Errorf("not type 2:\n%s", x)
 	}
-	if hasWarning(res, "color_change_no_gcode") {
-		t.Errorf("warning although the printer has the G-code: %+v", res.Warnings)
+	// without the filament it is refused
+	_, err = e.st.SetLayerActions(info.ID, 1, []LayerAction{{Layer: 10, Kind: ActionColorChange}})
+	ae := wantCode(t, err, CodeInvalidInput)
+	if !strings.Contains(ae.Message, "a color_change needs filament") {
+		t.Errorf("message %q", ae.Message)
+	}
+}
+
+// A stored colour change (type 0, from an opened file) is warned about with the
+// real reason, and the G-code check finds a template action (;CUSTOM_GCODE and
+// the processed template).
+func TestStoredColourChangeWarningAndTemplateDetection(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Type0")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	if err := e.st.write(info.ID, func(h *handle) error {
+		h.touchPlate(1)
+		return h.p.SetCustomGCodes(1, h.p.CustomGCodes(1).Mode, []threemf.GCodeItem{{TopZ: 1, Type: threemf.GCodeColorChange, Extruder: 2, Color: "#FF0000"}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.st.GetProject(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg string
+	for _, w := range got.Warnings {
+		if w.Code == "color_change_no_gcode" {
+			msg = w.Message
+		}
+	}
+	if !strings.Contains(msg, "never write colour change G-code") {
+		t.Fatalf("warning %q", msg)
+	}
+	g := filepath.Join(t.TempDir(), "t.gcode")
+	text := ";Z:0.2\n;CUSTOM_GCODE\nM117 mine\n;Z:0.4\n;CUSTOM_GCODE\nM104 S215 ; processed template\n"
+	if err := os.WriteFile(g, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := scanActions(g, []ActionInfo{{Layer: 2, Z: 0.4, Kind: ActionTemplate}, {Layer: 1, Z: 0.2, Kind: ActionCustom, GCode: "M117 mine"}})
+	if len(res) != 2 || !res[0].Found || !res[1].Found {
+		t.Fatalf("results %+v", res)
 	}
 }
 
@@ -286,5 +329,53 @@ func TestRoleFilamentCountsOnlyWhereItPrints(t *testing.T) {
 	set(map[string]any{"top_shell_layers": 3})
 	if f := fils(); len(f) != 2 {
 		t.Fatalf("solid filament with shells: %v", f)
+	}
+}
+
+// With an empty template_custom_gcode 7.3 writes ;CUSTOM_GCODE, a blank line and
+// then the next comment: only the line right after the marker counts.
+func TestEmptyTemplateIsNotFound(t *testing.T) {
+	g := filepath.Join(t.TempDir(), "e.gcode")
+	for name, text := range map[string]string{
+		"blank then comment": ";Z:0.4\n;CUSTOM_GCODE\n\n; OBJECT_ID: 1\nG1 X1 Y1 E1\n",
+		"comment":            ";Z:0.4\n;CUSTOM_GCODE\n; OBJECT_ID: 1\n",
+		"exclude":            ";Z:0.4\n;CUSTOM_GCODE\nEXCLUDE_OBJECT_START NAME=a\n",
+	} {
+		if err := os.WriteFile(g, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		res := scanActions(g, []ActionInfo{{Layer: 2, Z: 0.4, Kind: ActionTemplate}})
+		if len(res) != 1 || res[0].Found {
+			t.Errorf("%s: an empty template was reported found: %+v", name, res)
+		}
+	}
+	if err := os.WriteFile(g, []byte(";Z:0.4\n;CUSTOM_GCODE\nM104 S215\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if res := scanActions(g, []ActionInfo{{Layer: 2, Z: 0.4, Kind: ActionTemplate}}); !res[0].Found {
+		t.Errorf("a written template is not found: %+v", res)
+	}
+}
+
+func TestTemplateActionWithEmptyTemplateWarnsAndSaysSo(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Tpl")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	if err := e.st.write(info.ID, func(h *handle) error {
+		h.touchPlate(1)
+		return h.p.SetCustomGCodes(1, h.p.CustomGCodes(1).Mode, []threemf.GCodeItem{{TopZ: 1, Type: threemf.GCodeTemplate, Extruder: 1}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.st.GetProject(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, w := range got.Warnings {
+		found = found || (w.Code == "template_gcode_empty" && strings.Contains(w.Message, "template_custom_gcode is empty"))
+	}
+	if !found {
+		t.Fatalf("no warning: %+v", got.Warnings)
 	}
 }

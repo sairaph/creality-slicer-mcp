@@ -22,6 +22,19 @@ const (
 	xmlDecl        = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
 )
 
+// forceMillimetre returns a model root tag with unit="millimeter".
+func forceMillimetre(root string) string {
+	if root == "" {
+		return defaultRootTag
+	}
+	if i := strings.Index(root, " unit=\""); i >= 0 {
+		if j := strings.Index(root[i+7:], "\""); j >= 0 {
+			return root[:i] + " unit=\"millimeter\"" + root[i+7+j+1:]
+		}
+	}
+	return strings.Replace(root, "<model", "<model unit=\"millimeter\"", 1)
+}
+
 func hex8(n int) string { return fmt.Sprintf("%08x", uint32(n)) }
 
 // genModel renders 3D/3dmodel.model.
@@ -95,10 +108,9 @@ func (p *Project) genModel() []byte {
 func (p *Project) genObjectModel(o *Object, parts []*Part) []byte {
 	var b strings.Builder
 	b.WriteString(xmlDecl)
-	root := p.rootTag
-	if root == "" {
-		root = defaultRootTag
-	}
+	// The meshes are written in millimetres whatever unit the file's own root
+	// tag declares (the app writes them so).
+	root := forceMillimetre(p.rootTag)
 	b.WriteString(root + "\n")
 	b.WriteString(" <metadata name=\"BambuStudio:3mfVersion\">1</metadata>\n")
 	b.WriteString(" <resources>\n")
@@ -324,7 +336,7 @@ func (p *Project) genModelSettings() []byte {
 func (p *Project) genLayerRanges() []byte {
 	var b strings.Builder
 	any := false
-	for i, o := range p.Objects {
+	for i, o := range p.builtObjects() {
 		if len(o.LayerRanges) == 0 {
 			continue
 		}

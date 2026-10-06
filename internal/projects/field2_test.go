@@ -7,6 +7,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"github.com/sairaph/creality-slicer-mcp/internal/mesh"
+	"github.com/sairaph/creality-slicer-mcp/internal/slicer"
 	"github.com/sairaph/creality-slicer-mcp/internal/threemf"
 	"os"
 	"path/filepath"
@@ -807,5 +808,429 @@ func TestToolsAreSortedByIndex(t *testing.T) {
 		if tools[i-1].Tool > tools[i].Tool {
 			t.Fatalf("tools not sorted: %+v", tools)
 		}
+	}
+}
+
+// A change to a filament level key (here at project scope, with two filaments) is
+// listed by get_project once and explained by the settings report.
+func TestFilamentLevelChangesAreListedAndExplained(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "FilamentKeys")
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Values: map[string]any{"slow_down_min_speed": 40, "wall_loops": 5}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.st.GetProject(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Overrides != 2 || strings.Join(got.OverrideKeys, ",") != "wall_loops,slow_down_min_speed" && strings.Join(got.OverrideKeys, ",") != "slow_down_min_speed,wall_loops" {
+		t.Fatalf("override keys %v (count %d), want each key once", got.OverrideKeys, got.Overrides)
+	}
+	diffs, err := e.st.ExplainSettings(info.ID, map[string]string{"slow_down_min_speed": "40,40", "wall_loops": "5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *SettingDiff
+	for i := range diffs {
+		if diffs[i].Key == "slow_down_min_speed" {
+			found = &diffs[i]
+		}
+	}
+	if found == nil || found.Origin != "project" || found.Used != "40,40" || !strings.Contains(found.Why, "filament") {
+		t.Fatalf("diffs %+v", diffs)
+	}
+}
+
+// Role filament keys are checked against the filaments like extruder: 0 (the
+// object's own) to the number of filaments, at every scope.
+func TestRoleFilamentKeysAreChecked(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "RoleCheck", FilamentSpec{Preset: testPLA, Colour: "#FFFFFF"})
+	e.addBox(t, info.ID, "box", 30, 30, 30)
+	if _, err := e.st.AddModifier(info.ID, ModifierRequest{Object: "box", Name: "mod", Shape: ShapeBox, Size: [3]float64{10, 10, 10}, Settings: map[string]any{"wall_loops": 2}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"wall_filament", "sparse_infill_filament", "solid_infill_filament", "support_filament", "support_interface_filament"} {
+		for scope, target := range map[string]string{"object": "box", "part": "box/mod", "project": ""} {
+			if scope == "part" && strings.HasPrefix(key, "support") {
+				continue // support filaments are object and project settings only
+			}
+			// the app hides the project value of the feature filaments: allow it here, the check is the point
+			_, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: scope, Target: target, Values: map[string]any{key: 2}, AllowLocked: true})
+			ae := wantCode(t, err, CodeInvalidInput)
+			if !strings.Contains(ae.Message, "add a filament with set_presets first") {
+				t.Errorf("%s at %s scope: %q", key, scope, ae.Message)
+			}
+			if scope != "project" {
+				if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: scope, Target: target, Values: map[string]any{key: 0}}); err != nil {
+					t.Errorf("%s 0 at %s scope: %v", key, scope, err)
+				}
+			}
+		}
+	}
+	// height range, through set_height_ranges and update_settings
+	_, err := e.st.SetHeightRanges(info.ID, "box", []RangeSpec{{From: 0, To: 10, Settings: map[string]any{"wall_filament": 3}}})
+	wantCode(t, err, CodeInvalidInput)
+	// in a two filament project 2 is fine
+	two := e.newProject(t, "RoleOk")
+	e.addBox(t, two.ID, "box", 30, 30, 30)
+	if _, err := e.st.UpdateSettings(two.ID, SettingsRequest{Scope: "object", Target: "box", Values: map[string]any{"wall_filament": 2}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Setting an object's extruder to make the plate mixed (the update_settings
+// route) shows the ignored layer tool change in that reply.
+func TestUpdateSettingsRouteShowsTheIgnoredToolChange(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "RouteMixed")
+	e.addBox(t, info.ID, "a", 20, 20, 20)
+	if _, err := e.st.AddModel(info.ID, AddModelRequest{Path: writeSTL(t, "b", 20, 20, 20), Name: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.SetLayerActions(info.ID, 1, []LayerAction{{Layer: 5, Kind: ActionToolChange, Filament: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "object", Target: "b", Values: map[string]any{"extruder": 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasWarning(res.Info, "layer_tool_change_ignored") {
+		t.Fatalf("warnings %+v", res.Info.Warnings)
+	}
+}
+
+// The importer reads the plate's spiral_mode with std::boolalpha (bbs_3mf.cpp:5284):
+// "1" would read as false, so it is written as true and false.
+func TestPlateSpiralModeIsWrittenAsABoolalpha(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Vase")
+	e.addBox(t, info.ID, "a", 20, 20, 20)
+	res, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "plate", Target: "1", Values: map[string]any{"spiral_mode": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Changed) != 1 || res.Changed[0].New != "true" {
+		t.Fatalf("changed %+v", res.Changed)
+	}
+	read := func() string {
+		var v string
+		if err := e.st.read(info.ID, func(h *handle) error { v = h.p.Plate(1).Config.Value("spiral_mode"); return nil }); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	if got := read(); got != "true" {
+		t.Fatalf("stored %q", got)
+	}
+	file := filepath.Join(t.TempDir(), "vase.3mf")
+	if _, err := e.st.Export(info.ID, file, false); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := e.st.OpenProject(OpenRequest{Path: file, Name: "Reopened"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var again string
+	if err := e.st.read(opened.Info.ID, func(h *handle) error { again = h.p.Plate(1).Config.Value("spiral_mode"); return nil }); err != nil || again != "true" {
+		t.Fatalf("reopened %q %v", again, err)
+	}
+	// 0 and 1 from a file (an older write) read the same as false and true
+	res, err = e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "plate", Target: "1", Values: map[string]any{"spiral_mode": false}})
+	if err != nil || res.Changed[0].New != "false" {
+		t.Fatalf("off: %v %+v", err, res.Changed)
+	}
+	if err := e.st.write(info.ID, func(h *handle) error {
+		h.touchPlate(1)
+		return h.p.SetPlateKey(1, "spiral_mode", "1")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err = e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "plate", Target: "1", Values: map[string]any{"spiral_mode": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Changed) != 1 || res.Changed[0].Note != "unchanged" {
+		t.Errorf("a stored 1 is the same as true: %+v", res.Changed)
+	}
+}
+
+// add_model from a slicer project takes the model parts only: a modifier and a
+// negative part are not merged into the solid.
+func TestAddModelFromAProjectSkipsModifiersAndNegativeParts(t *testing.T) {
+	e := newEnv(t)
+	src := e.newProject(t, "WithVolumes")
+	e.addBox(t, src.ID, "solid", 20, 20, 20)
+	big := [3]float64{60, 60, 60}
+	if _, err := e.st.AddModifier(src.ID, ModifierRequest{Object: "solid", Name: "mod", Shape: ShapeBox, Size: big, Settings: map[string]any{"wall_loops": 3}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.AddModifier(src.ID, ModifierRequest{Object: "solid", Subtype: "negative", Name: "hole", Shape: ShapeBox, Size: big}); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "volumes.3mf")
+	if _, err := e.st.Export(src.ID, file, false); err != nil {
+		t.Fatal(err)
+	}
+	dst := e.newProject(t, "Target")
+	res, err := e.st.AddModel(dst.ID, AddModelRequest{Path: file})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Added) != 1 {
+		t.Fatalf("added %+v", res.Added)
+	}
+	o := res.Added[0]
+	if o.Name != "solid" || math.Abs(o.Size[0]-20) > 1e-3 || math.Abs(o.Size[1]-20) > 1e-3 || math.Abs(o.Size[2]-20) > 1e-3 {
+		t.Fatalf("the object is %v %q, want the 20 mm solid alone", o.Size, o.Name)
+	}
+	if len(o.Parts) != 1 {
+		t.Errorf("parts %+v", o.Parts)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "2 modifier, negative or support part(s)") || !strings.Contains(res.Warnings[0], "open_project keeps them all") {
+		t.Fatalf("warnings %v", res.Warnings)
+	}
+	// open_project keeps them
+	opened, err := e.st.OpenProject(OpenRequest{Path: file, Name: "Kept"})
+	if err != nil || len(opened.Info.Objects[0].Parts) != 3 {
+		t.Fatalf("open_project: %v %+v", err, opened.Info.Objects)
+	}
+}
+
+// An object with a variable layer height profile ignores its height ranges
+// (PrintObject::update_layer_height_profile): the tools warn and never drop it.
+func TestLayerHeightProfileIsWarnedAbout(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Profile")
+	e.addBox(t, info.ID, "tall", 20, 20, 20)
+	if err := e.st.write(info.ID, func(h *handle) error {
+		h.touchObject(h.p.Objects[0].ID)
+		return h.p.SetLayerHeightProfile(h.p.Objects[0].ID, "0.000000;0.200000;20.000000;0.200000")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.st.GetProject(info.ID)
+	if err != nil || !hasWarning(got, "layer_height_profile") || !got.Objects[0].LayerHeightProfile {
+		t.Fatalf("get_project: %v %+v", err, got.Warnings)
+	}
+	hr, err := e.st.SetHeightRangesDetailed(info.ID, "tall", []RangeSpec{{From: 0, To: 5, Settings: map[string]any{"layer_height": 0.1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, n := range hr.Notes {
+		found = found || strings.Contains(n, "variable layer height profile")
+	}
+	if !found {
+		t.Errorf("set_height_ranges notes %v", hr.Notes)
+	}
+	res, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "object", Target: "tall", Values: map[string]any{"layer_height": 0.12}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	warned := false
+	for _, w := range res.Warnings {
+		warned = warned || strings.Contains(w, "variable layer height profile")
+	}
+	if !warned {
+		t.Errorf("update_settings warnings %v", res.Warnings)
+	}
+	// The profile is kept: it is the user's edit.
+	again, _ := e.st.GetProject(info.ID)
+	if !again.Objects[0].LayerHeightProfile {
+		t.Error("the profile was dropped")
+	}
+}
+
+// The importer erases the extruder of an object's only part (bbs_3mf.cpp:2917-2919):
+// the filament goes on the object.
+func TestSinglePartFilamentLivesOnTheObject(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "OnePart")
+	e.addBox(t, info.ID, "box", 30, 30, 30)
+	res, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "part", Target: "box/box", Values: map[string]any{"extruder": 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(res.Warnings, "|")
+	if !strings.Contains(joined, "one part") || !strings.Contains(joined, "set on the object") {
+		t.Fatalf("warnings %v", res.Warnings)
+	}
+	if res.Changed[0].Scope != ScopeObject || res.Info.Objects[0].Filament != 2 {
+		t.Fatalf("changed %+v, object filament %d", res.Changed, res.Info.Objects[0].Filament)
+	}
+	saved := openSaved(t, e, info.ID)
+	if saved.Objects[0].Extruder() != 2 || saved.Objects[0].Parts[0].Config.Value("extruder") != "" {
+		t.Fatalf("object %q part %q", saved.Objects[0].Config.Value("extruder"), saved.Objects[0].Parts[0].Config.Value("extruder"))
+	}
+	// 0 on a single part is a no-op for the filament
+	if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "part", Target: "box/box", Values: map[string]any{"extruder": 0}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Removing the other part leaves one: its own filament moves to the object.
+	two := e.newProject(t, "TwoParts")
+	e.addBox(t, two.ID, "box", 30, 30, 30)
+	if _, err := e.st.AddModifier(two.ID, ModifierRequest{Object: "box", Name: "mod", Shape: ShapeBox, Size: [3]float64{10, 10, 10}, Settings: map[string]any{"wall_loops": 2}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.UpdateSettings(two.ID, SettingsRequest{Scope: "part", Target: "box/box", Values: map[string]any{"extruder": 2}}); err != nil {
+		t.Fatal(err)
+	}
+	rm, err := e.st.RemovePart(two.ID, "box", "mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rm.Note, "moved there") || rm.Info.Objects[0].Filament != 2 {
+		t.Fatalf("note %q, filament %d", rm.Note, rm.Info.Objects[0].Filament)
+	}
+	again := openSaved(t, e, two.ID)
+	if again.Objects[0].Extruder() != 2 || again.Objects[0].Parts[0].Config.Value("extruder") != "" {
+		t.Fatalf("object %q part %q", again.Objects[0].Config.Value("extruder"), again.Objects[0].Parts[0].Config.Value("extruder"))
+	}
+	// A file that still has a part extruder on a one part object: the code reads the object's.
+	if err := e.st.write(two.ID, func(h *handle) error {
+		h.touchAll()
+		return h.p.SetPartOverride(h.p.Objects[0].ID, h.p.Objects[0].Parts[0].ID, "extruder", "1")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.read(two.ID, func(h *handle) error {
+		if f, _ := h.plateExtruders(1); len(f) != 1 || f[0] != 2 {
+			t.Errorf("plate extruders %v, want just the object's filament 2", f)
+		}
+		if n := h.plateFilamentCount(1); n != 1 {
+			t.Errorf("plate filament count %d", n)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// plate 0 with an empty plate in the project: the slicer is started per plate
+// that has objects (the 7.3 command line fails -50 for plate 0 otherwise).
+func TestSliceEveryPlateWithAnEmptyPlate(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "EmptyPlate")
+	e.addBox(t, info.ID, "a", 20, 20, 20)
+	if _, err := e.st.ManagePlates(info.ID, PlatesRequest{Action: PlateAdd}); err != nil { // plate 2, empty
+		t.Fatal(err)
+	}
+	if _, err := e.st.ManagePlates(info.ID, PlatesRequest{Action: PlateAdd}); err != nil { // plate 3
+		t.Fatal(err)
+	}
+	if _, err := e.st.AddModel(info.ID, AddModelRequest{Path: writeSTL(t, "b", 20, 20, 20), Name: "b", Plate: 3}); err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	e.exec.fn = func(spec slicer.ExecSpec) (slicer.ExecResult, error) {
+		out := spec.Args[argIndex(spec.Args, "--outputdir")+1]
+		plate := spec.Args[argIndex(spec.Args, "--slice")+1]
+		calls = append(calls, plate)
+		if plate == "0" {
+			return slicer.ExecResult{ExitCode: -50}, nil
+		}
+		return slicer.ExecResult{}, os.WriteFile(filepath.Join(out, "plate_"+plate+".gcode"), []byte(defaultGCode), 0o644)
+	}
+	res, err := e.st.Slice(info.ID, SliceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(calls, ",") != "1,3" || len(res.Last.Plates) != 2 || res.Last.Plates[0].Plate != 1 || res.Last.Plates[1].Plate != 3 {
+		t.Fatalf("slicer calls %v, plates %+v", calls, res.Last.Plates)
+	}
+	// Every plate empty is refused up front.
+	empty := e.newProject(t, "AllEmpty")
+	e.addBox(t, empty.ID, "a", 20, 20, 20)
+	if err := e.st.write(empty.ID, func(h *handle) error {
+		h.touchAll()
+		return h.p.MoveInstance(h.p.Objects[0].ID, 0, 1)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.RemoveObject(empty.ID, "a"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.st.Slice(empty.ID, SliceOptions{})
+	wantCode(t, err, CodeInvalidInput)
+}
+
+// A failed slice keeps the G-code of the earlier one, and the records that list
+// it stay true (the runner moves new files in only when a run succeeds).
+func TestFailedSliceKeepsTheEarlierResultValid(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "KeepOld")
+	e.addBox(t, info.ID, "a", 20, 20, 20)
+	first, err := e.st.Slice(info.ID, SliceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := first.Last.Plates[0].GCodePath
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.exec.fn = func(spec slicer.ExecSpec) (slicer.ExecResult, error) { return slicer.ExecResult{ExitCode: -17}, nil }
+	if _, err := e.st.Slice(info.ID, SliceOptions{}); err == nil {
+		t.Fatal("the failing slice succeeded")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("the earlier G-code changed or is gone: %v", err)
+	}
+	rep, err := e.st.Report(info.ID, 1)
+	if err != nil || rep.Plate.GCodePath != path {
+		t.Fatalf("report after a failed slice: %v", err)
+	}
+	// the project did not change: the earlier slice is current and its file is there
+	got, err := e.st.GetProject(info.ID)
+	if err != nil || got.LastSlice == nil || got.LastSlice.Stale || len(got.LastSlice.StalePlates) != 0 {
+		t.Fatalf("last slice after a failed slice: %v %+v", err, got.LastSlice)
+	}
+}
+
+// The -24 retry writes its own log: the first run's log is not overwritten.
+func TestNewerFileRetryUsesADistinctLogFile(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "RetryLog")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	var logs []string
+	e.exec.fn = func(spec slicer.ExecSpec) (slicer.ExecResult, error) {
+		if i := argIndex(spec.Args, "--logfile"); i >= 0 {
+			logs = append(logs, spec.Args[i+1])
+		}
+		if !strings.Contains(strings.Join(spec.Args, " "), "--allow-newer-file=1") {
+			return slicer.ExecResult{ExitCode: -24}, nil
+		}
+		out := spec.Args[argIndex(spec.Args, "--outputdir")+1]
+		return slicer.ExecResult{}, os.WriteFile(filepath.Join(out, "plate_1.gcode"), []byte(defaultGCode), 0o644)
+	}
+	if _, err := e.st.Slice(info.ID, SliceOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 2 || logs[0] == logs[1] || !strings.Contains(logs[1], "retry") {
+		t.Fatalf("log files %v", logs)
+	}
+}
+
+// String lists go to the command line C-style escaped and joined with ";" (the
+// 7.3 parser: unescape_strings_cstyle), number lists with ",".
+func TestListOverridesUseTheSeparatorOfTheirType(t *testing.T) {
+	e := newEnv(t)
+	got, err := e.st.overrideStrings(map[string]any{"filament_type": []any{"PETG", "PLA"}, "nozzle_temperature": []any{210, 220}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["filament_type"] != "PETG;PLA" || got["nozzle_temperature"] != "210,220" {
+		t.Fatalf("overrides %v", got)
+	}
+	for in, want := range map[string]string{`a b;c`: `"a b;c"`, `x"y`: `"x\"y"`, "p\nq": `"p\nq"`, `back\slash`: `"back\\slash"`, ``: `""`, `plain`: `plain`} {
+		if g := escapeStringsCstyle([]string{in}); g != want {
+			t.Errorf("escape(%q) = %q, want %q", in, g, want)
+		}
+	}
+	if g := escapeStringsCstyle([]string{"a", "", "b c"}); g != `a;;"b c"` {
+		t.Errorf("several: %q", g)
 	}
 }

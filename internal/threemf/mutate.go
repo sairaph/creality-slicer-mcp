@@ -310,6 +310,81 @@ func (p *Project) RemoveObject(id int) error {
 	return nil
 }
 
+// pruneUnreferenced drops from a sub model file the mesh objects that no part
+// points at any more (a removed part leaves its mesh behind in a file other parts
+// still use).
+func (p *Project) pruneUnreferenced(name string) {
+	ref := map[int]bool{}
+	for _, o := range p.Objects {
+		for _, part := range o.Parts {
+			if strings.TrimPrefix(part.Mesh.Path, "/") == name {
+				ref[part.Mesh.ObjectID] = true
+			}
+		}
+	}
+	data, err := p.Read(name)
+	if err != nil {
+		return
+	}
+	text := string(data)
+	changed := false
+	for {
+		i := objectBlockStart(text, ref)
+		if i < 0 {
+			break
+		}
+		end := strings.Index(text[i:], "</object>")
+		if end < 0 {
+			break
+		}
+		end += i + len("</object>")
+		for end < len(text) && (text[end] == '\n' || text[end] == '\r') {
+			end++
+			break
+		}
+		// take the indentation before the tag too
+		start := i
+		for start > 0 && (text[start-1] == ' ' || text[start-1] == '\t') {
+			start--
+		}
+		text = text[:start] + text[end:]
+		changed = true
+	}
+	if changed {
+		p.setMember(name, []byte(text))
+		delete(p.objectFiles, name)
+	}
+}
+
+// objectBlockStart finds the next <object ...> start tag in a model file whose
+// id is not in keep, or -1.
+func objectBlockStart(text string, keep map[int]bool) int {
+	pos := 0
+	for {
+		i := strings.Index(text[pos:], "<object ")
+		if i < 0 {
+			return -1
+		}
+		i += pos
+		tagEnd := strings.Index(text[i:], ">")
+		if tagEnd < 0 {
+			return -1
+		}
+		tag := text[i : i+tagEnd]
+		id := -1
+		if j := strings.Index(tag, " id=\""); j >= 0 {
+			rest := tag[j+5:]
+			if k := strings.Index(rest, "\""); k >= 0 {
+				fmt.Sscanf(rest[:k], "%d", &id)
+			}
+		}
+		if !keep[id] {
+			return i
+		}
+		pos = i + tagEnd
+	}
+}
+
 // pruneMeshFiles removes the sub model files a removed object used, unless a
 // remaining part still uses them (shared meshes), and its empty stub file.
 func (p *Project) pruneMeshFiles(gone *Object) {
@@ -327,7 +402,11 @@ func (p *Project) pruneMeshFiles(gone *Object) {
 		candidates["3D/Objects/object_"+strconv.Itoa(gone.backupID)+".model"] = true
 	}
 	for name := range candidates {
-		if !strings.HasPrefix(name, "3D/Objects/") || used[name] {
+		if !strings.HasPrefix(name, "3D/Objects/") {
+			continue
+		}
+		if used[name] {
+			p.pruneUnreferenced(name) // a shared file keeps only the meshes some part still names
 			continue
 		}
 		p.removeMember(name)

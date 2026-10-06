@@ -317,7 +317,8 @@ func (s *Server) getPreset(ctx context.Context, _ *mcp.CallToolRequest, in getPr
 	if len(wanted) == 0 && level != catalog.LevelAll {
 		body += "\n\nShowing " + string(level) + " level settings; pass level \"all\" for every key, or keys for specific ones."
 	}
-	return successResult(front, capText(body, maxOutputBytes, "pass keys for the settings you need, or a lower level")), nil, nil
+	body = nextLine(capText(body, maxOutputBytes, "pass keys for the settings you need, or a lower level"), "describe_setting for what a key does, or create_project and set_presets to use this preset.")
+	return successResult(front, body), nil, nil
 }
 
 func levelAllows(l catalog.Level, o *catalog.Option) bool {

@@ -134,8 +134,8 @@ func newJobID() string {
 // passes, Cancel or StopAll. The error is for a request that cannot start
 // (invalid request, missing output or log folder, timeout above MaxTimeout,
 // unwritable job folder); a slicer that fails to launch shows up in the job's
-// Error. Like Runner.Run, the job deletes the plate_*.gcode of req.OutputDir
-// before it starts the slicer.
+// Error. Like Runner.Run, the job swaps the plate files into req.OutputDir
+// only when the whole run succeeded.
 func (m *Jobs) Start(req SliceRequest, timeout time.Duration, opts ...JobOption) (*Job, error) {
 	var cfg jobConfig
 	for _, o := range opts {
@@ -243,6 +243,11 @@ func (j *Job) state() string {
 	case j.result != nil && j.result.Ending == EndCancelled,
 		j.result == nil && j.cancelRequested:
 		return StateCancelled
+	case j.cancelRequested && j.result != nil && !j.result.Outcome.OK:
+		// The cancel reached the work after the run (the -24 retry, post-processing)
+		// and that work did not complete: cancelled. A run that completed anyway
+		// stays finished.
+		return StateCancelled
 	}
 	return StateFinished
 }
@@ -273,7 +278,8 @@ func (j *Job) Snapshot() Snapshot {
 }
 
 // Cancel stops the job's process tree and waits briefly for it to end. It
-// reports false when the job had already finished.
+// reports true when the job ended cancelled (or is still stopping), false when
+// it had already finished or finished anyway.
 func (j *Job) Cancel() bool {
 	j.mu.Lock()
 	if !j.finished.IsZero() {
@@ -285,6 +291,11 @@ func (j *Job) Cancel() bool {
 	j.stop()
 	select {
 	case <-j.done:
+		// The true outcome: a job whose run finished in the instant of the cancel
+		// (it was in post-processing) is finished, not cancelled.
+		j.mu.Lock()
+		defer j.mu.Unlock()
+		return j.state() == StateCancelled
 	case <-time.After(10 * time.Second):
 	}
 	return true

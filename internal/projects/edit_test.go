@@ -336,7 +336,7 @@ func TestLayerActions(t *testing.T) {
 	info := e.newProject(t, "Actions")
 	e.addBox(t, info.ID, "one", 20, 20, 10)
 	res, err := e.st.SetLayerActions(info.ID, 1, []LayerAction{
-		{Layer: 10, Kind: ActionColorChange, Colour: "#ff0000"},
+		{Layer: 10, Kind: ActionColorChange, Filament: 2, Colour: "#ff0000"},
 		{Z: 3.2, Kind: ActionPause},
 		{Layer: 20, Kind: ActionToolChange, Filament: 2},
 		{Layer: 30, Kind: ActionCustom, GCode: "M117 hi"},
@@ -349,7 +349,7 @@ func TestLayerActions(t *testing.T) {
 		t.Fatalf("actions: %+v", acts)
 	}
 	// layer 10 = 0.2 + 9 * 0.2 = 2.0
-	if math.Abs(acts[0].Z-2.0) > 1e-9 || acts[0].Layer != 10 || acts[0].Kind != ActionToolChange || acts[0].Filament != 1 || acts[0].Colour != "#FFFFFF" {
+	if math.Abs(acts[0].Z-2.0) > 1e-9 || acts[0].Layer != 10 || acts[0].Kind != ActionToolChange || acts[0].Filament != 2 || acts[0].Colour != "#000000" {
 		t.Fatalf("first action: %+v", acts[0])
 	}
 	if acts[1].Kind != ActionPause || math.Abs(acts[1].Z-3.2) > 1e-9 || acts[1].Layer != 16 {

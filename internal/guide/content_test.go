@@ -97,7 +97,7 @@ var guideParams = []string{
 	"orient", "overrides", "background", "timeout", "thumbnails", "job_id", "cancel", "section", "layer",
 	"spools", "into", "mode", "slot", "catalog_id", "material", "status", "color_by", "lay_flat", "colour", "filament", "scale", "focus", "view_name", "include_screenshot", "show_parts", "show_labels", "show_ranges", "hide", "isolate", "width", "height",
 	// creality-k2-mcp parameters (23 section 8).
-	"slot_map", "self_test", "object_name",
+	"slot_map", "self_test", "object_name", "confirm_token",
 }
 
 var guideWords = []string{

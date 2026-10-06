@@ -232,7 +232,8 @@ func TestSystemPresetMirror(t *testing.T) {
 	}
 }
 
-// A run for one plate leaves the G-code of the other plates alone (SL1).
+// A run for one plate leaves the G-code of the other plates alone (SL1), and
+// replaces only the plate it sliced.
 func TestRunOnlyClearsAndReportsTheRequestedPlate(t *testing.T) {
 	ex := &fakeExec{fn: func(_ context.Context, spec ExecSpec) (ExecResult, error) {
 		writeOut(spec, "plate_2.gcode")
@@ -243,7 +244,6 @@ func TestRunOnlyClearsAndReportsTheRequestedPlate(t *testing.T) {
 	req.Plate = 2
 	os.WriteFile(filepath.Join(req.OutputDir, "plate_1.gcode"), []byte("keep"), 0o644)
 	os.WriteFile(filepath.Join(req.OutputDir, "plate_2.gcode"), []byte("stale"), 0o644)
-	os.WriteFile(filepath.Join(req.OutputDir, "plate_2.gcode.tmp"), []byte("stale"), 0o644)
 	os.WriteFile(filepath.Join(req.OutputDir, "plate_20.gcode"), []byte("keep"), 0o644)
 	res, err := r.Run(context.Background(), req)
 	if err != nil || !res.Outcome.OK {
@@ -257,15 +257,22 @@ func TestRunOnlyClearsAndReportsTheRequestedPlate(t *testing.T) {
 			t.Errorf("%s = %q, want %q", name, b, want)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(req.OutputDir, "plate_2.gcode.tmp")); err == nil {
-		t.Error("stale tmp not removed")
-	}
-	// Plate 0 clears everything.
+	// Plate 0 reports what this run wrote and leaves the other files alone.
 	req.Plate = 0
-	os.WriteFile(filepath.Join(req.OutputDir, "plate_1.gcode"), []byte("stale"), 0o644)
+	os.WriteFile(filepath.Join(req.OutputDir, "plate_1.gcode"), []byte("old"), 0o644)
 	res, _ = r.Run(context.Background(), req)
 	if len(res.GCodeFiles) != 1 || filepath.Base(res.GCodeFiles[0]) != "plate_2.gcode" {
 		t.Fatalf("plate 0: %v", res.GCodeFiles)
+	}
+	if b, _ := os.ReadFile(filepath.Join(req.OutputDir, "plate_1.gcode")); string(b) != "old" {
+		t.Errorf("a plate the run did not slice was touched: %q", b)
+	}
+	// Nothing of the work folder stays behind.
+	entries, _ := os.ReadDir(req.OutputDir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".run-") {
+			t.Errorf("work folder %s left behind", e.Name())
+		}
 	}
 }
 

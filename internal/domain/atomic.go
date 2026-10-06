@@ -49,3 +49,8 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	}
 	return nil
 }
+
+// ReplaceFile moves source over destination the way WriteFileAtomic does,
+// with the same retries on Windows when another program holds a file for a
+// moment. It returns the last error when the replacement cannot be done.
+func ReplaceFile(source, destination string) error { return replaceFile(source, destination) }

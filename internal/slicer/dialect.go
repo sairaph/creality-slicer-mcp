@@ -34,9 +34,13 @@ const (
 
 // SliceRequest is everything a slice run needs; a Dialect turns it into argv.
 type SliceRequest struct {
-	Inputs          []string // input files, a project 3MF first if any
-	Plate           int      // 0 = all plates, n = plate n (1-based)
-	OutputDir       string   // absolute, must exist; plate_N.gcode files land here. The Runner owns it for the run and deletes its plate_*.gcode first
+	Inputs []string // input files, a project 3MF first if any
+	Plate  int      // 0 = all plates, n = plate n (1-based)
+	// Plates, when it has entries, lists the plates to slice and replaces Plate:
+	// the Runner starts the slicer once for each, in order (a project with an
+	// empty plate cannot be sliced with plate 0, the 7.3 command line fails -50).
+	Plates          []int
+	OutputDir       string   // absolute, must exist; plate_N.gcode files land here. The Runner slices in a work folder inside it and swaps the plate files in only on success
 	LogFile         string   // absolute, in an existing folder: the slicer own --logfile ("" = none)
 	DebugLevel      int      // --debug level, 0 means the default 3
 	Settings        []string // flattened machine/process JSON paths (--load-settings)

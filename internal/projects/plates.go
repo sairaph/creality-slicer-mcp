@@ -219,7 +219,7 @@ func (s *Store) SetHeightRangesDetailed(ref, object string, ranges []RangeSpec) 
 					continue
 				}
 				if opt, ok := h.validate(key, v, catalog.ScopeLayerRange, false, &errs); ok {
-					if key == "extruder" {
+					if isFilamentKey(key) {
 						h.checkExtruder(key, opt, v, 0, &errs)
 					}
 					lr.Options.Set(key, objectValue(opt, v))
@@ -251,6 +251,13 @@ func (s *Store) SetHeightRangesDetailed(ref, object string, ranges []RangeSpec) 
 	info, err := s.info(ref)
 	if err != nil {
 		return nil, err
+	}
+	if len(ranges) > 0 {
+		for _, o := range info.Objects {
+			if o.LayerHeightProfile && (strings.EqualFold(o.Name, object) || strconv.Itoa(o.ID) == strings.TrimSpace(object)) {
+				notes = append(notes, layerProfileText(o.Name))
+			}
+		}
 	}
 	return &HeightRangesResult{Info: info, Notes: notes}, nil
 }
@@ -341,9 +348,11 @@ func (s *Store) SetLayerActions(ref string, plate int, actions []LayerAction) (*
 			return notFoundf("call get_project to see the plates", "project %s has no plate %d", h.id, plate)
 		}
 		nfil := len(cfg.List("filament_settings_id"))
-		// A printer without colour change G-code (the K2 with the CFS) changes colour
-		// by switching to another filament: M600 would write nothing.
-		noColourGCode := strings.TrimSpace(cfg.String("color_change_gcode")) == ""
+		// Creality Print never writes a colour change (M600): the emitter of
+		// ColorChange items is disabled in GCode.cpp (emit_custom_gcode_per_print_z,
+		// "BBS: inserting color gcode is removed", #if 0), and only ToolChange items
+		// change the filament (custom_tool_changes, CustomGCode.cpp). A colour change
+		// is therefore always a switch to another filament slot.
 		filColour := func(slot int, fallback string) string {
 			if l := cfg.List("filament_colour"); slot >= 1 && slot <= len(l) {
 				if c, ok := normColour(l[slot-1]); ok {
@@ -377,23 +386,17 @@ func (s *Store) SetLayerActions(ref string, plate int, actions []LayerAction) (*
 			it := threemf.GCodeItem{TopZ: z, Type: typ}
 			switch a.Kind {
 			case ActionColorChange:
-				if noColourGCode {
-					if nfil < 2 {
-						return invalidf("the K2 changes colour by switching to another CFS filament: add a filament with set_presets, then use color_change or tool_change to it",
-							"action %d: this printer has no colour change G-code (M600), so a colour change needs a second filament slot", i+1)
-					}
-					slot := max(a.Filament, 1)
-					if slot > nfil {
-						return invalidf(fmt.Sprintf("use a filament from 1 to %d", nfil), "action %d: filament %d does not exist", i+1, slot)
-					}
-					it.Type, it.Extruder, it.Color = threemf.GCodeToolChange, slot, filColour(slot, a.Colour)
-					break
+				if nfil < 2 {
+					return invalidf("add a filament with set_presets and change to it, or use a pause and swap the spool by hand",
+						"action %d: Creality Print does not write colour change G-code (M600): a colour change switches to another filament slot, and this project has one", i+1)
 				}
-				if !colourRE.MatchString(a.Colour) {
-					return invalidf("write the colour as #RRGGBB", "action %d: a color_change needs the new colour, got %q", i+1, a.Colour)
+				if a.Filament < 1 {
+					return invalidf(fmt.Sprintf("give filament, the slot to change to (1 to %d)", nfil), "action %d: a color_change needs filament", i+1)
 				}
-				it.Color = strings.ToUpper(a.Colour)
-				it.Extruder = max(a.Filament, 1)
+				if a.Filament > nfil {
+					return invalidf(fmt.Sprintf("use a filament from 1 to %d", nfil), "action %d: filament %d does not exist", i+1, a.Filament)
+				}
+				it.Type, it.Extruder, it.Color = threemf.GCodeToolChange, a.Filament, filColour(a.Filament, a.Colour)
 			case ActionToolChange:
 				if a.Filament < 1 || a.Filament > nfil {
 					return invalidf(fmt.Sprintf("use a filament from 1 to %d", nfil), "action %d: filament %d does not exist", i+1, a.Filament)

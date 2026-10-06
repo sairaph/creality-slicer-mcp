@@ -227,7 +227,14 @@ func (s *Store) overrideStrings(over map[string]any, allowLocked bool) (map[stri
 		}
 		vv := anyToVal(o, v)
 		if vv.IsList {
-			out[key] = strings.Join(vv.List, ",")
+			// The command line parses a list with the option's own deserialiser: string
+			// lists are C-style escaped and joined with ";" (unescape_strings_cstyle,
+			// Config.cpp:149), number lists are split on ",".
+			if o.ValueType == "string" {
+				out[key] = escapeStringsCstyle(vv.List)
+			} else {
+				out[key] = strings.Join(vv.List, ",")
+			}
 		} else {
 			out[key] = vv.Str
 		}
@@ -261,7 +268,7 @@ func (s *Store) Slice(ref string, opts SliceOptions) (*SliceOutcome, error) {
 		timeout = slicer.DefaultTimeout
 	}
 	if timeout > slicer.MaxTimeout {
-		return nil, invalidf("", "timeout %s is above the maximum of %s", timeout, slicer.MaxTimeout)
+		return nil, invalidf("give a timeout in seconds up to the maximum, or omit it", "timeout %s is above the maximum of %s", timeout, slicer.MaxTimeout)
 	}
 	s.mu.Lock()
 	if job := s.running[id]; job != "" {
@@ -348,7 +355,16 @@ func (s *Store) Slice(ref string, opts SliceOptions) (*SliceOutcome, error) {
 		}
 		seqHint = h.seqHintText(platesOut, s.cfg.Install.Dialect)
 		if len(platesOut) == 0 {
+			if opts.Plate == 0 {
+				return invalidf("move an object onto a plate", "no plate of project %s has an object", id)
+			}
 			return invalidf("move an object onto the plate or choose another plate", "plate %d has no objects", opts.Plate)
+		}
+		// The 7.3 command line fails (-50) when any plate it would slice is empty,
+		// so with an empty plate the plates that have objects are sliced one by one.
+		var plateList []int
+		if opts.Plate == 0 && len(platesOut) < len(h.p.Plates) {
+			plateList = append(plateList, platesOut...)
 		}
 		outDir := filepath.Join(h.dir, outDirName)
 		if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -361,7 +377,7 @@ func (s *Store) Slice(ref string, opts SliceOptions) (*SliceOutcome, error) {
 		logPath = filepath.Join(outDir, sliceLogName)
 		_ = os.Remove(logPath) // the log of an earlier slice is not this one's
 		req = slicer.SliceRequest{
-			Inputs: []string{snap}, Plate: opts.Plate, OutputDir: outDir,
+			Inputs: []string{snap}, Plate: opts.Plate, Plates: plateList, OutputDir: outDir,
 			LogFile:    logPath,
 			Overrides:  over,
 			AllowNewer: threemfNewer(h.appVersion(), s.version()),
@@ -384,8 +400,17 @@ func (s *Store) Slice(ref string, opts SliceOptions) (*SliceOutcome, error) {
 		if runErr == nil && res.Ending == slicer.EndExited && res.ExitCode == -24 && !req.AllowNewer {
 			req2 := req
 			req2.AllowNewer = true
+			// The first run's log stays: the retry writes its own.
+			if req2.LogFile != "" {
+				ext := filepath.Ext(req2.LogFile)
+				req2.LogFile = strings.TrimSuffix(req2.LogFile, ext) + "-retry" + ext
+				_ = os.Remove(req2.LogFile)
+			}
 			if r2, e2 := s.cfg.Runner.Run(ctx, req2, slicer.WithTimeout(timeout)); e2 == nil {
 				res, retried = r2, true
+				if req2.LogFile != "" {
+					logPath = req2.LogFile
+				}
 			}
 		}
 		if runErr != nil || !res.Outcome.OK {
@@ -406,14 +431,14 @@ func (s *Store) Slice(ref string, opts SliceOptions) (*SliceOutcome, error) {
 	if opts.Background || opts.Wait > 0 {
 		if s.cfg.Jobs == nil {
 			release()
-			return nil, errf(CodeUnavailable, "", "background slicing is not available")
+			return nil, errf(CodeUnavailable, "call slice_project with background false and wait, or retry later", "background slicing is not available")
 		}
 		var job *slicer.Job
 		done := func(j *slicer.Job, res slicer.Result, runErr error) {
 			last, ferr := finish(j.Context(), res, runErr, j.ID)
 			end := &sliceEnd{last: last, err: ferr}
 			s.mu.Lock()
-			s.ends()[j.ID] = end
+			s.recordEnd(j.ID, end)
 			s.mu.Unlock()
 		}
 		job, err = s.cfg.Jobs.Start(req, timeout, slicer.WithTag(id), slicer.WithOnDone(done))
@@ -429,7 +454,7 @@ func (s *Store) Slice(ref string, opts SliceOptions) (*SliceOutcome, error) {
 		if _, still := s.running[id]; still {
 			s.running[id] = job.ID
 		}
-		s.hints()[job.ID] = crashCtx{crashFil, crashSeq, seqHint}
+		s.recordHint(job.ID, crashCtx{crashFil, crashSeq, seqHint})
 		s.mu.Unlock()
 		if !opts.Background && opts.Wait > 0 {
 			// Wait for the job in the foreground up to Wait; a slice that takes
@@ -589,6 +614,13 @@ func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res
 		}
 		pr.ObjectLabels = objectLabels(sp, plate, pr.ExcludeNames)
 		pr.Actions = scanActions(file, snap.layerActions(plate))
+		if sp.Settings != nil && strings.TrimSpace(sp.Settings.String("template_custom_gcode")) == "" {
+			for i := range pr.Actions {
+				if pr.Actions[i].Kind == ActionTemplate && !pr.Actions[i].Found {
+					pr.Actions[i].EmptyTemplate = true
+				}
+			}
+		}
 		// Evaluated on the sliced project, with the same rule as the warning.
 		if fils, painted := snap.plateExtruders(plate); len(fils) >= 2 || painted {
 			for i := range pr.Actions {
@@ -754,7 +786,7 @@ type SliceStatus struct {
 func (s *Store) SliceStatus(ref string) (*SliceStatus, error) {
 	if isJobRef(ref) {
 		if s.cfg.Jobs == nil {
-			return nil, notFoundf("", "no slice job %q", ref)
+			return nil, notFoundf("slice_project starts a job; get_slice_status shows the job_id", "no slice job %q", ref)
 		}
 		j := s.cfg.Jobs.Get(ref)
 		if j == nil {
@@ -777,7 +809,7 @@ func (s *Store) SliceStatus(ref string) (*SliceStatus, error) {
 			case snap.Result != nil && !snap.Result.Outcome.OK:
 				st.State, st.Error = "failed", s.failedJobError(snap.ID, *snap.Result)
 			case snap.Error != "":
-				st.State, st.Error = "failed", errf(CodeSlicerError, "", "%s", snap.Error)
+				st.State, st.Error = "failed", errf(CodeSlicerError, "slice_project again; get_slicer_status shows whether the slicer works", "%s", snap.Error)
 			}
 			if st.Last != nil && st.ProjectID != "" {
 				st.Stale = s.isStale(st.ProjectID, st.Last)
@@ -829,11 +861,11 @@ func (s *Store) isStale(id string, l *LastSlice) bool {
 // CancelSlice stops a running slice job.
 func (s *Store) CancelSlice(jobID string) (bool, error) {
 	if s.cfg.Jobs == nil || !isJobRef(jobID) {
-		return false, notFoundf("", "no slice job %q", jobID)
+		return false, notFoundf("get_slice_status without job_id lists the jobs of the project; slice_project starts one", "no slice job %q", jobID)
 	}
 	j := s.cfg.Jobs.Get(jobID)
 	if j == nil {
-		return false, notFoundf("", "no slice job %q", jobID)
+		return false, notFoundf("get_slice_status without job_id lists the jobs of the project; slice_project starts one", "no slice job %q", jobID)
 	}
 	return j.Cancel(), nil
 }
@@ -1050,3 +1082,47 @@ func flushCost(file string, sum gcodeinfo.Summary, cfg *threemf.Config) (grams f
 	}
 	return grams, changes, true
 }
+
+// escapeStringsCstyle joins strings the way Slic3r::escape_strings_cstyle does
+// (Config.cpp:74): separated by ";", a string with a ";", space, tab, backslash,
+// double quote or line break is quoted with those characters escaped, and an empty
+// string alone is quoted.
+func escapeStringsCstyle(strs []string) string {
+	var b strings.Builder
+	for j, str := range strs {
+		if j > 0 {
+			b.WriteByte(';')
+		}
+		quote := len(strs) == 1 && str == ""
+		if strings.ContainsAny(str, "; \t\\\"\r\n") {
+			quote = true
+		}
+		if !quote {
+			b.WriteString(str)
+			continue
+		}
+		b.WriteByte('"')
+		for _, c := range str {
+			switch c {
+			case '\\', '"':
+				b.WriteByte('\\')
+				b.WriteRune(c)
+			case '\r':
+				b.WriteString("\\r")
+			case '\n':
+				b.WriteString("\\n")
+			default:
+				b.WriteRune(c)
+			}
+		}
+		b.WriteByte('"')
+	}
+	return b.String()
+}
+
+// recordEnd remembers how a job ended; call with s.mu held. The records are a
+// few words each, so they are not capped.
+func (s *Store) recordEnd(id string, end *sliceEnd) { s.ends()[id] = end }
+
+// recordHint remembers the crash context of a job; call with s.mu held.
+func (s *Store) recordHint(id string, c crashCtx) { s.hints()[id] = c }

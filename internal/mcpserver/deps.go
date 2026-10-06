@@ -387,7 +387,7 @@ func (e *env) projectBackend(ctx context.Context) (ProjectBackend, error) {
 		be, err := e.deps.NewProjects(in, ps, cat)
 		if err != nil {
 			e.mu.Unlock()
-			return ProjectBackend{}, fmt.Errorf("the projects layer cannot start: %w", err)
+			return ProjectBackend{}, fmt.Errorf("%w: %w", errProjectsStart, err)
 		}
 		e.backend = &be
 		e.mu.Unlock()
@@ -507,3 +507,7 @@ func (d *k2Defaults) value(o *catalog.Option) (string, bool) {
 	}
 	return "", false
 }
+
+// errProjectsStart is wrapped in the error of a projects layer that could not be
+// built (the store folder, for example).
+var errProjectsStart = errors.New("the projects layer cannot start")

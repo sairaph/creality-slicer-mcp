@@ -23,20 +23,19 @@ For the K2 Combo with Creality Print 7.2 or 7.3. The CFS holds four spools; the 
 
 Send that to set_presets, or pass the same list to create_project (then you build the `slot_map` yourself, below). Colours are not taken from the preset: always give one `#RRGGBB` per filament, close to the spool's actual colour, because the purge calculation and the previews use it.
 
-Mixing materials in one print needs their temperatures to be compatible. A big temperature gap between filaments makes the slicer refuse (exit code -62, see `troubleshooting`).
+Mixing materials needs compatible temperatures: a big gap makes the slicer refuse (exit code -62, see `troubleshooting`).
 
 ## Assigning colours to objects
 
-add_model takes `filament` (1-based) for a whole object, and update_object changes it later. Colour inside one object (painting, colour OBJ import, gradients) is done in the app: see `gui-handoff`. `set_layer_actions` `color_change` (stored as a tool change on the K2) with a `filament` switches colour at a height.
+add_model takes `filament` (1-based) for a whole object, and update_object changes it later. Colour inside one object (painting, colour OBJ import, gradients) is done in the app: see `gui-handoff`. `set_layer_actions` `color_change` (always stored as a tool change) with a `filament` switches colour at a height.
 
 ## Flush and the prime tower
 
 - Every colour change pushes old material out of the nozzle (flush). The amount is a matrix: from filament A to filament B. Dark to light needs much more than light to dark.
 - The slicer computes the matrix from the colours you gave. `set_presets` accepts `flush_matrix` (an N by N list, row by row, from-filament in rows) to override it, and `flush_multiplier` to scale everything.
-- The prime tower catches the purge and primes the nozzle. It is on in the K2 process presets (`enable_prime_tower`, width `prime_tower_width`, `prime_volume`), but the slicer builds it only when the print uses two or more filaments and is printed by layer (or by object with a single object): a plate with several objects printed by object, or one that uses one filament, gets no tower, and the slice report's settings section then shows `enable_prime_tower: 1 -> 0` as a rule of Creality Print, not something you changed. Its position is chosen by the app; turning it off with several filaments makes prints messy.
+- The prime tower catches the purge and primes the nozzle. It is on in the K2 process presets (`enable_prime_tower`, width `prime_tower_width`, `prime_volume`), but the slicer builds it only when the print uses two or more filaments and is printed by layer (or by object with a single object): a plate with several objects printed by object, or one that uses one filament, gets no tower, and the slice report's settings section then shows `enable_prime_tower: 1 -> 0` as a rule of Creality Print, not something you changed. Turning it off with several filaments makes prints messy.
 - `flush_into_support`, `flush_into_infill` and `flush_into_objects` reuse the purge inside the model to save filament. Only one style at a time; the app's skeleton flush is experimental and app-only.
 - A multi-filament by-layer plate gets `Purge waste X g of Y g (Z%)` right after the `Sliced` line (see `troubleshooting`).
-- The K2 firmware may hard-code part of the purge, so a smaller matrix does not always mean less waste on the machine.
 
 ## Slice, then hand off
 
@@ -44,14 +43,16 @@ slice_project returns a `handoff` block: `gcode_path`, `upload_name`, `tools` (e
 
 1. get_filaments again if time has passed: spools change.
 2. upload_gcode_file on creality-k2-mcp with `path` set to the `gcode_path` and `filename` set to `upload_name`.
-3. For each tool, pick the slot whose material is the same type (and a close colour). Show the user the tool to slot table and get their go-ahead.
-4. start_print on creality-k2-mcp with `filename` (the uploaded name), `source` `cfs` and a `slot_map`; when the project was made from `spools`, the slice reply already gives the `slot_map`, so use it as it is. `filament` is the file's 0-based index, `slot` is T1A to T4D:
+3. For each tool, pick the slot whose material is the same type (and a close colour).
+4. start_print on creality-k2-mcp is two calls with the same `filename` (the uploaded name), `source` `cfs`, `slot_map` and optional `self_test`. When the project was made from `spools`, the slice reply gives the `slot_map`: use it as it is. `filament` is the file's 0-based index, `slot` is T1A to T4D:
 
 ```json
 {"filename": "logo_plate1.gcode", "source": "cfs", "slot_map": [{"filament": 0, "slot": "T1A"}, {"filament": 1, "slot": "T1C"}]}
 ```
 
-   `self_test` optionally asks the printer to run its self test first. That server has its own confirmation steps; follow them.
+   - Call 1, without `confirm_token`: sends nothing and returns a mapping proposal with warnings.
+   - Show the user the proposal and every warning; get their word that the spools are in place and the bed is clear.
+   - Call 2: the same arguments plus the `confirm_token` from call 1.
 5. During the print, exclude_object with `object_name` set to a label from `exclude_names` skips a failed object; it needs that server's confirmation flow too. Labels look like `part_id_0_copy_0` (the object's name, its index and the copy). The slice reply lists each object with its label, and get_project shows the label of every object once the project was sliced; use those, never guess one.
 
 ## Things that go wrong

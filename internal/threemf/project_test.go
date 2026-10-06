@@ -30,6 +30,7 @@ func saveReopen(t *testing.T, p *Project) *Project {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { q.Close() })
 	q.Now = fixedNow
 	t.Cleanup(func() { q.Close() })
 	return q
@@ -317,6 +318,7 @@ func TestRemoveObjectPrunesFilesButKeepsSharedMeshes(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := saveReopen(t, q)
+	t.Cleanup(func() { r.Close() })
 	names, _ = readZip(t, r.Path())
 	for _, n := range names {
 		if strings.HasPrefix(n, "3D/Objects/") {
@@ -377,6 +379,7 @@ func TestAddAndRemoveParts(t *testing.T) {
 		t.Error("deleting a missing key reports false")
 	}
 	r := saveReopen(t, q)
+	t.Cleanup(func() { r.Close() })
 	rm := r.Object(o.ID).Part(mod.ID)
 	if rm.Config.Value("sparse_infill_density") != "60%" || len(rm.Config) != 1 {
 		t.Errorf("%v", rm.Config)
@@ -386,6 +389,7 @@ func TestAddAndRemoveParts(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := saveReopen(t, r)
+	t.Cleanup(func() { s.Close() })
 	if len(s.Object(o.ID).Parts) != 2 {
 		t.Errorf("%d parts", len(s.Object(o.ID).Parts))
 	}
@@ -471,6 +475,7 @@ func TestOverridesAndValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := saveReopen(t, q)
+	t.Cleanup(func() { r.Close() })
 	if r.Metadata.Value("Title") != "A & B" {
 		t.Errorf("%q", r.Metadata.Value("Title"))
 	}
@@ -554,6 +559,7 @@ func TestPlates(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := saveReopen(t, q)
+	t.Cleanup(func() { r.Close() })
 	if len(r.Plates) != 2 || r.Plates[1].Index != 2 || r.Plates[1].Name != "Spare <1>" {
 		t.Errorf("%+v", r.Plates)
 	}
@@ -882,5 +888,158 @@ func TestUnsavedPartsAreReadable(t *testing.T) {
 	}
 	if !p.Plates[0].Config.Delete("x") == false {
 		t.Error("KVs delete")
+	}
+}
+
+// The app numbers objects by their first build item and leaves unbuilt resource
+// objects out (bbs_3mf.cpp:5011-5021, 4378): layer ranges follow that order in
+// both directions.
+func TestLayerRangesFollowTheBuildOrder(t *testing.T) {
+	p := newProject(t)
+	a, _ := p.AddObject(ObjectSpec{Name: "A", Mesh: mesh.Box(5, 5, 20)})
+	b, _ := p.AddObject(ObjectSpec{Name: "B", Mesh: mesh.Box(5, 5, 20)})
+	c, _ := p.AddObject(ObjectSpec{Name: "C", Mesh: mesh.Box(5, 5, 20)})
+	// Build items out of resource order (C, A) and B not built at all.
+	var kept []*BuildItem
+	for _, id := range []int{c.ID, a.ID} {
+		for _, it := range p.Items {
+			if it.ObjectID == id {
+				kept = append(kept, it)
+			}
+		}
+	}
+	p.Items = kept
+	if err := p.SetLayerRanges(a.ID, []LayerRange{{MinZ: 0, MaxZ: 5, Options: KVs{{"layer_height", "0.1"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	p.MarkModified()
+	path := filepath.Join(t.TempDir(), "order.3mf")
+	if err := p.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	p.Close()
+	_, got := readZip(t, path)
+	// built order is C (1), A (2): A's ranges are object 2, not object 1
+	if !strings.Contains(string(got["Metadata/layer_config_ranges.xml"]), `<object id="2">`) {
+		t.Fatalf("layer_config_ranges.xml:\n%s", got["Metadata/layer_config_ranges.xml"])
+	}
+	q, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { q.Close() })
+	defer q.Close()
+	if len(q.Object(a.ID).LayerRanges) != 1 || len(q.Object(c.ID).LayerRanges) != 0 || len(q.Object(b.ID).LayerRanges) != 0 {
+		t.Fatalf("ranges landed on the wrong object: A %d B %d C %d", len(q.Object(a.ID).LayerRanges), len(q.Object(b.ID).LayerRanges), len(q.Object(c.ID).LayerRanges))
+	}
+}
+
+// The per object members follow their object when objects are removed.
+func TestIndexedMembersAreRenumbered(t *testing.T) {
+	p := newProject(t)
+	a, _ := p.AddObject(ObjectSpec{Name: "A", Mesh: mesh.Box(5, 5, 20)})
+	b, _ := p.AddObject(ObjectSpec{Name: "B", Mesh: mesh.Box(5, 5, 20)})
+	c, _ := p.AddObject(ObjectSpec{Name: "C", Mesh: mesh.Box(5, 5, 20)})
+	a.LayerHeightProfile = "0.000000;0.200000;20.000000;0.200000"
+	b.LayerHeightProfile = "0.000000;0.300000;20.000000;0.300000"
+	b.BrimPoints = "1.000000 2.000000 0.000000 3.000000"
+	c.BrimPoints = "4.000000 5.000000 0.000000 6.000000"
+	p.hasIndexed, p.brimVersion = true, "1"
+	p.MarkModified()
+	path := filepath.Join(t.TempDir(), "idx.3mf")
+	if err := p.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	_, got := readZip(t, path)
+	if string(got["Metadata/layer_heights_profile.txt"]) != "object_id=1|0.000000;0.200000;20.000000;0.200000\nobject_id=2|0.000000;0.300000;20.000000;0.300000\n" {
+		t.Fatalf("layer_heights_profile.txt:\n%s", got["Metadata/layer_heights_profile.txt"])
+	}
+	q, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { q.Close() })
+	if q.Object(b.ID).LayerHeightProfile == "" || q.Object(c.ID).BrimPoints == "" || q.Object(a.ID).BrimPoints != "" {
+		t.Fatalf("not read back: %+v", q.Object(b.ID))
+	}
+	// Removing A: B is object 1 now, C object 2, and A's profile is gone.
+	if err := q.RemoveObject(a.ID); err != nil {
+		t.Fatal(err)
+	}
+	r := saveReopen(t, q)
+	t.Cleanup(func() { r.Close() })
+	_, got = readZip(t, r.Path())
+	if string(got["Metadata/layer_heights_profile.txt"]) != "object_id=1|0.000000;0.300000;20.000000;0.300000\n" {
+		t.Errorf("layer_heights_profile.txt:\n%s", got["Metadata/layer_heights_profile.txt"])
+	}
+	if string(got["Metadata/brim_ear_points.txt"]) != "brim_points_format_version=1\nobject_id=1|1.000000 2.000000 0.000000 3.000000\nobject_id=2|4.000000 5.000000 0.000000 6.000000\n" {
+		t.Errorf("brim_ear_points.txt:\n%s", got["Metadata/brim_ear_points.txt"])
+	}
+	// Removing B too: its profile and its brim entry go; the member with nothing left is removed.
+	if err := r.RemoveObject(r.Objects[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	s := saveReopen(t, r)
+	t.Cleanup(func() { s.Close() })
+	names, got := readZip(t, s.Path())
+	if strings.Contains(strings.Join(names, "|"), "layer_heights_profile.txt") {
+		t.Errorf("an empty profile member stays: %v", names)
+	}
+	if string(got["Metadata/brim_ear_points.txt"]) != "brim_points_format_version=1\nobject_id=1|4.000000 5.000000 0.000000 6.000000\n" {
+		t.Errorf("brim_ear_points.txt:\n%s", got["Metadata/brim_ear_points.txt"])
+	}
+}
+
+// A removed part leaves no mesh behind in a sub model file other parts share,
+// and new sub model files are written in millimetres.
+func TestRemovePartPrunesTheSharedSubModelFile(t *testing.T) {
+	p := newProject(t)
+	o, _ := p.AddObject(ObjectSpec{Name: "A", Mesh: mesh.Box(5, 5, 20)})
+	m1, err := p.AddPart(o.ID, PartSpec{Name: "m1", Mesh: mesh.Box(2, 2, 2)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2, err := p.AddPart(o.ID, PartSpec{Name: "m2", Mesh: mesh.Box(3, 3, 3)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2.Mesh.Path = m1.Mesh.Path // one shared file, as the app writes an object's parts
+	p.rootTag = strings.Replace(defaultRootTag, `unit="millimeter"`, `unit="inch"`, 1)
+	path := filepath.Join(t.TempDir(), "shared.3mf")
+	if err := p.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	p.Close()
+	_, got := readZip(t, path)
+	file := strings.TrimPrefix(m1.Mesh.Path, "/")
+	if !strings.Contains(string(got[file]), `unit="millimeter"`) || strings.Contains(string(got[file]), `unit="inch"`) {
+		t.Errorf("sub model unit:\n%.300s", got[file])
+	}
+	q, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { q.Close() })
+	var second *Part
+	for _, part := range q.Objects[0].Parts {
+		if part.Name == "m2" {
+			second = part
+		}
+	}
+	if second == nil || strings.Count(string(got[file]), "<object ") != 2 {
+		t.Fatalf("setup: %v, %d objects in the file", second, strings.Count(string(got[file]), "<object "))
+	}
+	if err := q.RemovePart(q.Objects[0].ID, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	r := saveReopen(t, q)
+	t.Cleanup(func() { r.Close() })
+	_, got = readZip(t, r.Path())
+	if n := strings.Count(string(got[file]), "<object "); n != 1 {
+		t.Fatalf("the shared file has %d mesh objects after the removal:\n%s", n, got[file])
+	}
+	if len(r.Objects[0].Parts) != 2 {
+		t.Errorf("parts %d", len(r.Objects[0].Parts))
 	}
 }

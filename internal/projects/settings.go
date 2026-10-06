@@ -275,6 +275,21 @@ func (h *handle) validate(key string, v any, scope catalog.Scope, allowLocked bo
 
 func label(o *catalog.Option) string { return o.Title() }
 
+// isFilamentKey is true for the settings that hold a filament number: the
+// extruder of an object, part or range and the filament of a feature (walls,
+// infill, supports).
+func isFilamentKey(key string) bool {
+	if key == "extruder" {
+		return true
+	}
+	for _, k := range roleFilamentKeys {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
 // checkExtruder checks a filament number against the project's filaments: min 1
 // for an object, min 0 for a part or a height range (0 = the object's own).
 func (h *handle) checkExtruder(key string, opt *catalog.Option, v any, min int, errs *keyErrors) {
@@ -324,6 +339,9 @@ func (h *handle) updateProject(req SettingsRequest, res *SettingsResult) error {
 		o, ok := h.validate(key, raw, catalog.ScopePreset, req.AllowLocked, &errs)
 		if !ok {
 			continue
+		}
+		if isFilamentKey(key) && raw != nil {
+			h.checkExtruder(key, o, raw, 0, &errs) // the project value of a role filament: 0 or a filament of the project
 		}
 		if _, exists := cfg.Get(key); !exists {
 			errs.add(key, "is not part of this project's settings")
@@ -474,15 +492,13 @@ func (h *handle) applyForced(cfg *threemf.Config, changed map[string]any, env co
 			}
 			cfg.Set(o.Key, nv)
 			ch := Change{Key: o.Key, Label: label(o), Scope: ScopeProject, Old: valString(old), New: valString(nv), Forced: true,
-				Note: "the app sets this automatically when " + strings.Join(condSentences(cat, f.When), " and ")}
+				Note: "the app sets this automatically when " + strings.Join(condSentences(f.When), " and ")}
 			res.Forced = append(res.Forced, ch)
 		}
 	}
 }
 
-func condSentences(cat *catalog.Catalog, cs []*catalog.Cond) []string {
-	d, _ := cat.Deps("")
-	_ = d
+func condSentences(cs []*catalog.Cond) []string {
 	var out []string
 	for _, c := range cs {
 		out = append(out, describeCond(c))
@@ -605,8 +621,12 @@ func (h *handle) updateObject(req SettingsRequest, res *SettingsResult) error {
 			continue
 		}
 		opts[key] = opt
-		if key == "extruder" && req.Values[key] != nil {
-			h.checkExtruder(key, opt, req.Values[key], 1, &errs)
+		if isFilamentKey(key) && req.Values[key] != nil {
+			min := 0
+			if key == "extruder" {
+				min = 1 // an object always prints with a filament
+			}
+			h.checkExtruder(key, opt, req.Values[key], min, &errs)
 		}
 	}
 	if err := errs.err("call describe_setting for the valid values of a setting"); err != nil {
@@ -631,6 +651,9 @@ func (h *handle) updateObject(req SettingsRequest, res *SettingsResult) error {
 		}
 		res.Changed = append(res.Changed, Change{Key: key, Label: label(opt), Scope: ScopeObject, Target: o.Name, Old: old, New: nv})
 	}
+	if _, ok := req.Values["layer_height"]; ok && o.LayerHeightProfile != "" {
+		res.Warnings = append(res.Warnings, layerProfileText(o.Name))
+	}
 	h.touchObject(o.ID)
 	return nil
 }
@@ -653,7 +676,7 @@ func (h *handle) updatePart(req SettingsRequest, res *SettingsResult) error {
 	for _, key := range sortedValueKeys(req.Values) {
 		if opt, ok := h.validate(key, req.Values[key], catalog.ScopePart, req.AllowLocked, &errs); ok {
 			opts[key] = opt
-			if key == "extruder" && req.Values[key] != nil {
+			if isFilamentKey(key) && req.Values[key] != nil {
 				h.checkExtruder(key, opt, req.Values[key], 0, &errs)
 			}
 		}
@@ -664,6 +687,31 @@ func (h *handle) updatePart(req SettingsRequest, res *SettingsResult) error {
 	for _, key := range sortedValueKeys(req.Values) {
 		opt := opts[key]
 		old := part.Config.Value(key)
+		if key == "extruder" && len(o.Parts) == 1 {
+			// The importer erases the extruder of the only part of an object
+			// (bbs_3mf.cpp:2917-2919): the filament goes on the object, where the app keeps it.
+			objOld := o.Config.Value("extruder")
+			if v := req.Values[key]; v != nil {
+				if n := atoi0(objectValue(opt, v)); n > 0 {
+					if err := h.p.SetObjectOverride(o.ID, "extruder", strconv.Itoa(n)); err != nil {
+						return errf(CodeInternal, "", "%v", err)
+					}
+				}
+			}
+			if part.Config.Value("extruder") != "" {
+				if _, err := h.p.DeletePartOverride(o.ID, part.ID, key); err != nil {
+					return errf(CodeInternal, "", "%v", err)
+				}
+			}
+			nv := "(the object's own)"
+			if v := req.Values[key]; v != nil {
+				nv = objectValue(opt, v)
+			}
+			res.Changed = append(res.Changed, Change{Key: key, Label: label(opt), Scope: ScopeObject, Target: o.Name, Old: objOld, New: nv,
+				Note: "an object with one part keeps its filament on the object; it was set there"})
+			res.Warnings = append(res.Warnings, fmt.Sprintf("object %q has one part, and Creality Print keeps the filament of a single part on the object: the filament was set on the object, not on the part", o.Name))
+			continue
+		}
 		if req.Values[key] == nil {
 			if _, err := h.p.DeletePartOverride(o.ID, part.ID, key); err != nil {
 				return errf(CodeInternal, "", "%v", err)
@@ -702,7 +750,7 @@ func (h *handle) updateRange(req SettingsRequest, res *SettingsResult) error {
 	for _, key := range sortedValueKeys(req.Values) {
 		if opt, ok := h.validate(key, req.Values[key], catalog.ScopeLayerRange, req.AllowLocked, &errs); ok {
 			opts[key] = opt
-			if key == "extruder" && req.Values[key] != nil {
+			if isFilamentKey(key) && req.Values[key] != nil {
 				h.checkExtruder(key, opt, req.Values[key], 0, &errs)
 			}
 		}
@@ -810,8 +858,10 @@ func plateSettingNames() []string {
 	return keys
 }
 
-// plateValue is the metadata text of a plate setting: booleans as 0 and 1,
-// integer lists separated by spaces.
+// plateValue is the metadata text of a plate setting: booleans as true and
+// false (the importer reads spiral_mode with std::boolalpha, so "1" would read
+// as false: bbs_3mf.cpp:5284-5287, the app writes true and false), integer lists
+// separated by spaces. Both spellings are read back (normElem).
 func plateValue(o *catalog.Option, v any) string {
 	if o == nil {
 		return fmt.Sprint(v)
@@ -819,6 +869,14 @@ func plateValue(o *catalog.Option, v any) string {
 	vv := anyToVal(o, v)
 	if vv.IsList {
 		return strings.Join(vv.List, " ")
+	}
+	if o.ValueType == "bool" {
+		switch normElem(o, vv.Str) {
+		case "1":
+			return "true"
+		case "0":
+			return "false"
+		}
 	}
 	return vv.Str
 }

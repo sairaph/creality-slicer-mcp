@@ -53,7 +53,7 @@ func (h *handle) highestSlot() (int, string) {
 	for _, o := range h.p.Objects {
 		note(o.Extruder(), fmt.Sprintf("object %q", o.Name))
 		for _, p := range o.Parts {
-			if v := p.Config.Value("extruder"); v != "" {
+			if v := partConfig(o, p).Value("extruder"); v != "" {
 				var n int
 				fmt.Sscanf(v, "%d", &n)
 				note(n, fmt.Sprintf("part %q of object %q", p.Name, o.Name))
@@ -185,7 +185,11 @@ func (s *Store) SetPresets(ref string, req PresetsRequest) (*PresetsResult, erro
 			}
 			in.Manual = man
 			res.Changed = append(res.Changed, "flush matrix edited")
-		} else if !req.AutoFlush && cfg.String("flush_volumes_changed") == "1" {
+		} else if req.AutoFlush {
+			if cfg.String("flush_volumes_changed") == "1" {
+				res.Changed = append(res.Changed, "flush matrix back to automatic")
+			}
+		} else if cfg.String("flush_volumes_changed") == "1" {
 			if m := cfg.List("flush_volumes_matrix"); len(m) == len(newFil)*len(newFil) {
 				in.Manual = m
 			} else {

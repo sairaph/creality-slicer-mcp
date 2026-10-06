@@ -2,10 +2,14 @@ package threemf
 
 import (
 	"archive/zip"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/sairaph/creality-slicer-mcp/internal/domain"
 )
 
 func (p *Project) removeMember(name string) {
@@ -89,6 +93,9 @@ func (p *Project) finalize() error {
 		} else if p.byName[memberLayerRanges] != nil {
 			p.removeMember(memberLayerRanges)
 		}
+	}
+	if p.hasIndexed && (p.modelDirty || p.rangesDirty) {
+		p.saveIndexed()
 	}
 	if p.gcodesDirty || (p.isNew && len(p.GCodes) > 0) {
 		p.syncGCodes()
@@ -192,14 +199,67 @@ func (p *Project) Save(dest string) error {
 		p.zr.Close()
 		p.zr = nil
 	}
-	if err := os.Rename(tmpName, dest); err != nil {
-		os.Remove(tmpName)
-		if reopenErr := p.rebind(p.path); reopenErr != nil && p.path != "" {
-			return fmt.Errorf("%w (and the project could not be reopened: %v)", err, reopenErr)
+	// Another reader can hold the file for a moment (a virus scanner, the app):
+	// try the replacement again, for about renameBudget in all, while the
+	// finished temporary file is kept. This is the only retry layer of a save
+	// (replaceFile has its own short one for one attempt).
+	var err2 error
+	deadline := time.Now().Add(renameBudget)
+	for {
+		if err2 = renameFile(tmpName, dest); err2 == nil || !time.Now().Add(renameRetryDelay).Before(deadline) {
+			break
 		}
-		return err
+		time.Sleep(renameRetryDelay)
+	}
+	if err2 != nil {
+		os.Remove(tmpName)
+		// The project keeps every pending change: only the reader of the old
+		// file is reopened, so a later Save writes the edit.
+		err2 = fmt.Errorf("%w: %v", ErrReplace, err2)
+		if reopenErr := p.reopenOld(); reopenErr != nil && p.path != "" {
+			return fmt.Errorf("%w (and the project could not be reopened: %v)", err2, reopenErr)
+		}
+		return err2
 	}
 	return p.rebind(dest)
+}
+
+// ErrReplace is wrapped in the error of a Save whose file could not be replaced
+// (another program holds it); the project still has every pending change.
+var ErrReplace = errors.New("the project file could not be replaced")
+
+// renameBudget is the total time Save keeps trying to replace the file.
+var renameBudget = 3 * time.Second
+
+const renameRetryDelay = 100 * time.Millisecond
+
+var renameFile = domain.ReplaceFile
+
+// reopenOld opens the file the project was read from again after a failed
+// save and points the members that were not changed at it. Changed members,
+// their data and every dirty flag stay as they are.
+func (p *Project) reopenOld() error {
+	if p.path == "" {
+		return nil
+	}
+	zr, err := zip.OpenReader(p.path)
+	if err != nil {
+		return err
+	}
+	byName := map[string]*zip.File{}
+	for _, f := range zr.File {
+		byName[f.Name] = f
+	}
+	for _, m := range p.members {
+		if m.zf == nil {
+			continue
+		}
+		if f := byName[m.name]; f != nil {
+			m.zf = f
+		}
+	}
+	p.zr = zr
+	return nil
 }
 
 // rebind opens the saved file and points every member at its entry, so the

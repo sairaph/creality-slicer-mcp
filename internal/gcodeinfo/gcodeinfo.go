@@ -605,10 +605,13 @@ type Extrusion struct {
 	ToolSeq []int
 }
 
-// ReadExtrusion adds up the E words of a G-code file per tool. The footer of
-// a multi-colour file counts the purge of each tool change too, and that purge
-// is not in the E words (the printer's tool change macro does it), so the
-// footer minus NetMM is the flush.
+// ReadExtrusion adds up the E words of a G-code file per tool. On the K2 (7.3,
+// multicolor_method 0) the footer of a multi-colour file counts the purge of each
+// tool change too, and that purge is not in the E words (the printer's tool change
+// macro does it), so the footer minus NetMM is the flush the tower does not show.
+// Verified on K2 slices only: a printer that flushes inline in change_filament_gcode
+// (multicolor_method 1, the K2 Plus) is unverified, its E words may already hold
+// the purge and the difference would then be too small.
 func ReadExtrusion(path string) (Extrusion, error) {
 	f, err := os.Open(path)
 	if err != nil {

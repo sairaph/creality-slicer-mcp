@@ -253,3 +253,34 @@ func TestJobWithRealExecHelper(t *testing.T) {
 		t.Errorf("output %q", s.Output)
 	}
 }
+
+// A cancel that arrives when the run has finished anyway (the slicer ignored it
+// and wrote its G-code) reports what happened: the job finished.
+func TestJobCancelReportsTheTrueOutcome(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	ex := &fakeExec{fn: func(ctx context.Context, spec ExecSpec) (ExecResult, error) {
+		close(started)
+		<-release // ignores the cancel and then finishes normally
+		writeOut(spec, "plate_1.gcode")
+		return ExecResult{}, nil
+	}}
+	jobs, _ := newJobs(t, ex)
+	req := request(t)
+	req.Plate = 1
+	j, err := jobs.Start(req, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(release)
+	}()
+	if j.Cancel() {
+		t.Fatal("a job that finished normally was reported cancelled")
+	}
+	if s := j.Snapshot(); s.State != StateFinished {
+		t.Fatalf("state %s", s.State)
+	}
+}

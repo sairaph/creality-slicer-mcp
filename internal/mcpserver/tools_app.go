@@ -97,5 +97,9 @@ func (s *Server) openInApp(ctx context.Context, _ *mcp.CallToolRequest, in openI
 	for _, saved := range vf.SavedFiles {
 		fmt.Fprintf(&b, "\n\nYou saved changes in `%s`: bring them back with open_project with {\"path\": \"%s\", \"into\": \"%s\"}. That file is kept as it is.", saved, saved, vf.ProjectID)
 	}
-	return successResult(front, b.String()), nil, nil
+	next := "ask the user what they saw, then change the project or slice again."
+	if vf.Mode == projects.ViewProject {
+		next = "wait until the user has saved in the app, then open_project with that path and into."
+	}
+	return successResult(front, nextLine(b.String(), next)), nil, nil
 }

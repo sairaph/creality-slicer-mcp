@@ -189,6 +189,9 @@ type Placed struct {
 	// plate relative ones: the origin of the plate the item sits on in a slicer
 	// project (zero for other files).
 	Origin [2]float64
+	// Skipped names the parts of a slicer project object that were not taken:
+	// modifiers, negative parts, support blockers and enforcers (see add_model).
+	Skipped []string
 }
 
 // Read3MF reads every build item of a 3MF as one flattened mesh: components

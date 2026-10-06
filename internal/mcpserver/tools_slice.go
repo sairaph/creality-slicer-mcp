@@ -24,7 +24,7 @@ import (
 func (s *Server) registerSliceTools() {
 	addTool(s.mcpServer, "slice_project", withRange(withPositiveMax(withEnum(withRange(inputSchema[sliceInput](map[string]string{"plate": "0", "arrange": "false", "orient": "false", "wait": "60", "thumbnails": "true", "timeout": "1800"}), 0, 1e6, "plate"), "preview", "none", "small", "large"), "timeout", 1800), 1, 600, "wait"), s.sliceProject)
 	addTool(s.mcpServer, "get_slice_status", withRange(inputSchema[sliceStatusInput](map[string]string{"cancel": "false", "wait": "0"}), 0, 600, "wait"), s.getSliceStatus)
-	addTool(s.mcpServer, "get_slice_report", withRange(withEnum(withEnum(withEnum(inputSchema[reportInput](map[string]string{"plate": "1"}), "section", "summary", "filaments", "objects", "layers", "layer", "settings"), "color_by", "feature", "filament", "speed"), "preview", "none", "small", "large"), 1, 1e6, "plate"), s.getSliceReport)
+	addTool(s.mcpServer, "get_slice_report", withRange(withEnum(withEnum(withEnum(inputSchema[reportInput](map[string]string{"plate": "1"}), "section", "summary", "filaments", "objects", "layers", "layer", "settings"), "color_by", "feature", "filament", "speed"), "preview", "none", "small", "large"), 1, 1e6, "plate", "layer"), s.getSliceReport)
 }
 
 // --- slice_project ---
@@ -111,7 +111,7 @@ func (s *Server) sliceProject(ctx context.Context, _ *mcp.CallToolRequest, in sl
 	opts := projects.SliceOptions{
 		Arrange: boolOr(in.Arrange, false), Orient: boolOr(in.Orient, false), Overrides: in.Overrides,
 		Background: boolOr(in.Background, false), Wait: time.Duration(wait * float64(time.Second)),
-		SkipThumbnails: !boolOr(in.Thumbnails, true), Timeout: time.Duration(timeout * float64(time.Second)),
+		SkipThumbnails: !boolOr(in.Thumbnails, true), Timeout: time.Duration(timeout * float64(time.Second)), Ctx: ctx,
 	}
 	if in.Plate != nil {
 		opts.Plate = *in.Plate
@@ -224,7 +224,15 @@ func sliceReply(info *projects.Info, last *projects.LastSlice, warnings []string
 			break
 		}
 	}
-	front.Stale = last.Revision < info.Revision
+	// A plate is stale when it changed after its own slice (the per plate rule of
+	// SliceStatus and the report), not when any other plate did.
+	if info.LastSlice != nil {
+		for _, p := range last.Plates {
+			if slices.Contains(info.LastSlice.StalePlates, p.Plate) {
+				front.Stale = true
+			}
+		}
+	}
 	labels := exclusionLabels(info, last)
 	var b strings.Builder
 	front.ElapsedS = round1(last.ElapsedS)
@@ -254,6 +262,8 @@ func sliceReply(info *projects.Info, last *projects.LastSlice, warnings []string
 				fmt.Fprintf(&actions, "%d | %s at layer %d (z %s mm) | ignored by Creality Print: the plate's objects use several filaments\n", p.Plate, kind, a.Layer, num(a.Z))
 			} else if a.Found {
 				fmt.Fprintf(&actions, "%d | %s at layer %d (z %s mm) | found in the G-code at z %s mm\n", p.Plate, kind, a.Layer, num(a.Z), num(a.AtZ))
+			} else if a.EmptyTemplate {
+				fmt.Fprintf(&actions, "%d | %s at layer %d (z %s mm) | wrote nothing: template_custom_gcode is empty\n", p.Plate, kind, a.Layer, num(a.Z))
 			} else {
 				fmt.Fprintf(&actions, "%d | %s at layer %d (z %s mm) | not found in the G-code: it did nothing\n", p.Plate, kind, a.Layer, num(a.Z))
 			}
@@ -358,11 +368,12 @@ func handoffText(handoff []handoffFront) string {
 		maps = append(maps, fmt.Sprintf("plate %d: [%s]", h.Plate, strings.Join(parts, ", ")))
 	}
 	if len(maps) > 0 {
-		b.WriteString("3. start_print with filename = the upload name, source = cfs and this slot_map, ready because the project was made from those spools (" + strings.Join(maps, "; ") + "). Ask the user before starting.\n")
+		b.WriteString("3. slot_map: use this one, ready because the project was made from those spools (" + strings.Join(maps, "; ") + ").\n")
 	} else {
-		b.WriteString("3. start_print with filename = the upload name, source = cfs and slot_map = a list of {filament, slot}: filament is the tool's 0-based index above, slot is the CFS slot (T1A to T4D) whose spool has the same material type. Ask the user before starting.\n")
+		b.WriteString("3. slot_map: a list of {filament, slot}; filament is the tool's 0-based index above, slot is the CFS slot (T1A to T4D) whose spool has the same material type.\n")
 	}
-	b.WriteString("4. During the print, exclude_object with object_name = one of the exclusion labels skips a failed object.")
+	b.WriteString("4. start_print is two calls with the same filename (the upload name), source cfs, slot_map and self_test. Call 1, no confirm_token: sends nothing, returns a mapping proposal with warnings. Show the user the proposal and every warning and get their word that the spools are in place and the bed is clear. Call 2: the same arguments plus the confirm_token from call 1.\n")
+	b.WriteString("5. During the print, exclude_object with object_name = one of the exclusion labels skips a failed object.")
 	return b.String()
 }
 
@@ -759,6 +770,9 @@ func (s *Server) reportFromFile(ctx context.Context, be ProjectBackend, info *pr
 	case "layer":
 		if in.Layer == nil && in.Z == nil {
 			return invalidInput("section layer needs layer or z", "Call get_slice_report with {\"section\": \"layer\", \"layer\": 1} (layers start at 1) or a z in mm."), nil, nil
+		}
+		if in.Layer != nil && *in.Layer < 1 {
+			return invalidInput("layers start at 1", "Call get_slice_report with section layers to see how many layers there are, then ask for one from 1."), nil, nil
 		}
 		layer, z := 0, 0.0
 		if in.Layer != nil {

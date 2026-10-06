@@ -153,7 +153,7 @@ var specTools = []string{
 // instructions name (23 section 8).
 var k2Tools = []string{
 	"get_filaments", "upload_gcode_file", "start_print", "exclude_object", "get_current_job", "list_printers",
-	"slot_map", "self_test", "object_name",
+	"slot_map", "self_test", "object_name", "confirm_token",
 	// Fields of the slice result the guide names.
 	"gcode_path", "upload_name", "exclude_names", "time_s", "time_text", "total_g", "slicer_error",
 	// Values of enum parameters and an example object label.

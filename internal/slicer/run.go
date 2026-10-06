@@ -52,8 +52,8 @@ type Result struct {
 	Duration time.Duration
 	Args     []string // the argv that was run (without the program)
 	// GCodeFiles are the plate_N.gcode files present in OutputDir after the
-	// run, ordered by plate number. The Runner deletes every plate_*.gcode of
-	// OutputDir before it starts the slicer, so these are this run's files.
+	// run, ordered by plate number. The slicer works in a folder inside OutputDir and the
+	// Runner moves the plate files in only when the whole run succeeded.
 	GCodeFiles []string
 	// CrashDumps are the .dmp files a crashed run left in the temp folder
 	// during its run window, moved to <OutputDir>\crash\ (their new paths).
@@ -146,19 +146,33 @@ func (r *Runner) validate(req SliceRequest, timeout time.Duration) ([]string, er
 // that cannot be launched. Everything that happens once the slicer runs, its
 // failure, a crash, a timeout, a cancellation, is a Result.
 //
-// The Runner owns req.OutputDir for the run: it deletes the plate_N.gcode of the
-// requested plate (every plate for plate 0)
-// there before starting the slicer, so the files found afterwards are this
-// run's own and a failed run can never report an earlier run's output.
+// The slicer writes into a folder of its own inside req.OutputDir. Only when the
+// whole run succeeded are the plate_N.gcode files moved over the ones in
+// req.OutputDir; a failed, cancelled or killed run leaves the earlier G-code of
+// the folder exactly as it was, and never a mix of new and old files. With
+// req.Plates (several plate numbers) the slicer is started once per plate, in
+// order, and the run fails at the first plate that fails: the 7.3 command line
+// refuses the whole call (-50) when any plate it would slice is empty, so a
+// project with an empty plate has to be sliced plate by plate.
 func (r *Runner) Run(ctx context.Context, req SliceRequest, opts ...RunOption) (Result, error) {
 	cfg := runConfig{timeout: DefaultTimeout}
 	for _, o := range opts {
 		o(&cfg)
 	}
-	args, err := r.validate(req, cfg.timeout)
-	if err != nil {
-		return Result{}, err
+	plates := req.Plates
+	if len(plates) == 0 {
+		plates = []int{req.Plate}
 	}
+	for _, pl := range plates {
+		one := req
+		one.Plate, one.Plates = pl, nil
+		if _, err := r.validate(one, cfg.timeout); err != nil {
+			return Result{}, err
+		}
+	}
+	first := req
+	first.Plate, first.Plates = plates[0], nil
+	args, _ := r.validate(first, cfg.timeout)
 	if ctx.Err() != nil {
 		// Cancelled before it began (a request cancelled while queued): a
 		// result, not an error, and nothing was touched.
@@ -176,9 +190,11 @@ func (r *Runner) Run(ctx context.Context, req SliceRequest, opts ...RunOption) (
 		return Result{}, err
 	}
 	defer releaseData() // the slicer reads the data folder for the whole run
-	if err := clearPlateFiles(req.OutputDir, req.Plate); err != nil {
-		return Result{}, err
+	work, err := os.MkdirTemp(req.OutputDir, ".run-")
+	if err != nil {
+		return Result{}, fmt.Errorf("could not make a work folder in the output folder: %w", err)
 	}
+	defer os.RemoveAll(work)
 	tempDir := os.TempDir
 	if r.TempDir != nil {
 		tempDir = r.TempDir
@@ -192,43 +208,86 @@ func (r *Runner) Run(ctx context.Context, req SliceRequest, opts ...RunOption) (
 		outW, errW = io.MultiWriter(stdout, log), io.MultiWriter(stderr, log)
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, cfg.timeout)
-	defer cancel()
+	start := time.Now()
+	deadline := start.Add(cfg.timeout)
 	win := runs.begin()
-	er, err := r.Exec.Run(runCtx, ExecSpec{Exe: r.Exe, Args: args, Stdout: outW, Stderr: errW})
+	var res Result
+	for _, pl := range plates {
+		one := req
+		one.OutputDir, one.Plate, one.Plates = work, pl, nil
+		oneArgs, aerr := r.Dialect.BuildSliceArgs(r.fill(one))
+		if aerr != nil {
+			runs.finish(win)
+			return Result{}, aerr
+		}
+		runCtx, cancel := context.WithDeadline(ctx, deadline)
+		er, err := r.Exec.Run(runCtx, ExecSpec{Exe: r.Exe, Args: oneArgs, Stdout: outW, Stderr: errW})
+		cancel()
+		if err != nil {
+			runs.finish(win)
+			return Result{}, err
+		}
+		res.Args, res.ExitCode = oneArgs, er.ExitCode
+		res.Stdout, res.Stderr = cleanOutput(stdout.Bytes()), cleanOutput(stderr.Bytes())
+		switch {
+		case er.Killed && ctx.Err() != nil:
+			res.Ending = EndCancelled
+			res.Outcome = cancelledOutcome()
+		case er.Killed:
+			res.Ending = EndTimedOut
+			res.Outcome = Outcome{
+				Code:    OutcomeTimedOut,
+				Message: fmt.Sprintf("Creality Print did not finish within %s", cfg.timeout.Round(time.Second)),
+				Hint:    "Slice again with a longer timeout, or reduce the work (fewer objects or plates, a coarser layer height).",
+			}
+		default:
+			res.Ending = EndExited
+			res.Outcome = r.Dialect.Classify(er.ExitCode, res.Stderr)
+			res.CrashName, res.Crashed = CrashName(er.ExitCode)
+		}
+		if res.Ending == EndExited && res.Outcome.OK && !hasPlateOutput(pl, plateFiles(work, pl)) {
+			res.Outcome = noOutputOutcome(pl)
+		}
+		if res.Ending != EndExited || !res.Outcome.OK {
+			break
+		}
+	}
 	end := time.Now()
 	overlapped := runs.finish(win)
-	res := Result{Duration: end.Sub(win.start), Args: args}
-	if err != nil {
-		return Result{}, err
-	}
-	res.Stdout, res.Stderr = cleanOutput(stdout.Bytes()), cleanOutput(stderr.Bytes())
-	res.ExitCode = er.ExitCode
-	switch {
-	case er.Killed && ctx.Err() != nil:
-		res.Ending = EndCancelled
-		res.Outcome = cancelledOutcome()
-	case er.Killed:
-		res.Ending = EndTimedOut
-		res.Outcome = Outcome{
-			Code:    OutcomeTimedOut,
-			Message: fmt.Sprintf("Creality Print did not finish within %s", cfg.timeout.Round(time.Second)),
-			Hint:    "Slice again with a longer timeout, or reduce the work (fewer objects or plates, a coarser layer height).",
+	res.Duration = end.Sub(start)
+	if res.Ending == EndExited && res.Outcome.OK {
+		// Success: the new G-code replaces the old, plate by plate.
+		moved, merr := swapPlateFiles(work, req.OutputDir)
+		if merr != nil {
+			res.Outcome = Outcome{Code: OutcomeFailed, Name: "OUTPUT_NOT_SAVED", Message: "the slice finished but its G-code could not be put in the output folder: " + merr.Error(),
+				Hint: "close whatever holds the old G-code open, then slice again"}
 		}
-	default:
-		res.Ending = EndExited
-		res.Outcome = r.Dialect.Classify(er.ExitCode, res.Stderr)
-		res.CrashName, res.Crashed = CrashName(er.ExitCode)
-	}
-	res.GCodeFiles = plateFiles(req.OutputDir, req.Plate)
-	if res.Ending == EndExited && res.Outcome.OK && !hasPlateOutput(req.Plate, res.GCodeFiles) {
-		res.Outcome = noOutputOutcome(req.Plate)
+		res.GCodeFiles = moved
 	}
 	if res.Crashed {
 		res.CrashDumps = collectDumps(tempDir(), dumpsBefore, req.OutputDir, win.start, end)
 		res.CrashDumpsAmbiguous = overlapped
 	}
 	return res, nil
+}
+
+// swapPlateFiles moves the plate_N.gcode of the work folder over those of dir
+// and returns the paths in dir, by plate number. A plate the run did not slice
+// keeps the file it had.
+func swapPlateFiles(work, dir string) ([]string, error) {
+	files := plateFiles(work, 0)
+	var out []string
+	for _, f := range files {
+		dst := filepath.Join(dir, filepath.Base(f))
+		if err := removeFile(dst); err != nil && !os.IsNotExist(err) {
+			return out, fmt.Errorf("%s is in use: %w", filepath.Base(dst), err)
+		}
+		if !moveFile(f, dst) {
+			return out, fmt.Errorf("could not move %s into the output folder", filepath.Base(f))
+		}
+		out = append(out, dst)
+	}
+	return out, nil
 }
 
 func cancelledOutcome() Outcome {
@@ -299,25 +358,6 @@ func (t *runTracker) finish(w *runWindow) (overlapped bool) {
 }
 
 var plateRE = regexp.MustCompile(`^plate_(\d+)\.gcode$`)
-
-// clearPlateFiles deletes every plate_N.gcode (and a leftover .tmp of the
-// slicer's write-then-rename) in dir.
-func clearPlateFiles(dir string, plate int) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("could not read the output folder: %w", err)
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !ownsPlateFile(name, plate) {
-			continue
-		}
-		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("could not clear the output folder (%s is in use?): %w", name, err)
-		}
-	}
-	return nil
-}
 
 // plateFiles lists plate_N.gcode in dir, by plate number.
 func plateFiles(dir string, only int) []string {

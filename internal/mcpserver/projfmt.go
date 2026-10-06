@@ -35,6 +35,9 @@ func projFailure(err error) *toolResult {
 	if strings.Contains(msg, "in Creality presets (the vendor fixes it)") {
 		hint = "Pass allow_locked true to override Creality's lock (the vendor fixes this setting, so change it only when you know the slicer accepts the value), or call describe_setting to see its lock and range."
 	}
+	if hint == "" {
+		hint = defaultHint(code)
+	}
 	re := render.Error{Code: code, Message: shortMessage(msg), Hint: hint}
 	var tail string
 	var logLines []string
@@ -510,4 +513,22 @@ func bedLines(in *projects.Info) string {
 		return ""
 	}
 	return "\nBed (plate: type, first layer temperature per filament; update_settings curr_bed_type or the plate's bed_type changes it):\n" + b.String()
+}
+
+// defaultHint names the next call for an error whose source gave none, so
+// every projects-layer failure says what to do next.
+func defaultHint(code string) string {
+	switch code {
+	case render.CodeInvalidInput:
+		return "Check the arguments against the tool's parameter descriptions; get_project shows the project's objects, plates and filaments."
+	case render.CodeNotFound:
+		return "Call list_projects or get_project for the ids and names that exist."
+	case render.CodeConflict:
+		return "Call get_project to see the project's current state, then try again."
+	case render.CodeUnavailable:
+		return "Call get_slicer_status to see what is missing."
+	case codeSlicer:
+		return "Call get_slice_status for the job, or slice_project again; get_slicer_status shows whether the slicer works."
+	}
+	return "Try the call again; if it fails the same way, call get_slicer_status and report the message."
 }

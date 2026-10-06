@@ -221,14 +221,6 @@ func (f *flowAcc) quantile(q float64) float64 {
 	return f.max
 }
 
-type pendingCluster struct {
-	obj     *objAcc
-	feature string
-	layer   int
-	z       float64
-	isl     island
-}
-
 // analyzer is the state of one streaming pass.
 type analyzer struct {
 	opt      AnalyzeOptions
@@ -258,12 +250,20 @@ type analyzer struct {
 		active  bool
 	}
 	// rasters of the layer being read: object label -> feature -> grid
-	rast            map[string]map[string]*grid
-	prevAll         *grid
+	rast map[string]map[string]*grid
+	// hist holds the extrusion of every object and support of the layers just
+	// below the current one (see belowGrid); older layers are dropped.
+	hist            []histLayer
+	maxH            float64
 	pending         []pendingCluster
+	cfg             map[string]string
 	startIslands    []StartIsland
 	supportClusters []SupportCluster
 }
+
+// NormObjectName is the form object names are compared in: lower case, every
+// character that is not a letter or digit written as an underscore.
+func NormObjectName(s string) string { return normName(s) }
 
 func normName(s string) string {
 	var b strings.Builder
@@ -327,7 +327,7 @@ func Analyze(path string, opt AnalyzeOptions) (*Analysis, error) {
 	}
 	defer f.Close()
 	a := &analyzer{opt: opt, res: &Analysis{Options: opt}, want: map[string]bool{}, wantObj: map[string]bool{}, wantFeat: map[string]bool{}, objs: map[string]*objAcc{},
-		minRun: opt.MinRun, rast: map[string]map[string]*grid{}, prevAll: newGrid()}
+		minRun: opt.MinRun, rast: map[string]map[string]*grid{}}
 	if a.minRun <= 0 {
 		a.minRun = 1
 	}
@@ -353,6 +353,9 @@ func Analyze(path string, opt AnalyzeOptions) (*Analysis, error) {
 	}
 	for _, ft := range opt.Features {
 		a.wantFeat[strings.ToLower(strings.TrimSpace(ft))] = true
+	}
+	if a.on(MeasureSupportContacts) {
+		a.cfg = configTail(path)
 	}
 	st := newMotionState()
 	lr := newLineReader(f, 0)
@@ -398,6 +401,7 @@ func Analyze(path string, opt AnalyzeOptions) (*Analysis, error) {
 	}
 	a.endRun()
 	a.finishLayer()
+	a.flushPending()
 	a.finish()
 	return a.res, nil
 }
@@ -422,8 +426,9 @@ func (a *analyzer) comment(text string, st *MotionState) {
 		a.layer++
 		a.newLayer = true
 		a.inWipe = false
-	case strings.HasPrefix(text, ";Z:"):
-		a.z, _ = strconv.ParseFloat(strings.TrimSpace(text[3:]), 64)
+	case strings.HasPrefix(text, ";Z:") || (a.newLayer && strings.HasPrefix(text, ";:")):
+		// 7.3 writes ";Z:<z>" after ;LAYER_CHANGE, 7.2.2 writes ";:<z>".
+		a.z, _ = strconv.ParseFloat(strings.TrimSpace(text[strings.IndexByte(text, ':')+1:]), 64)
 		if a.newLayer {
 			a.newLayer = false
 			// A layer that does not rise above the one before starts a new object
@@ -431,8 +436,8 @@ func (a *analyzer) comment(text string, st *MotionState) {
 			// begin again.
 			if a.layer > 1 && a.z <= a.lastZ+1e-9 {
 				a.layer = 1
-				a.prevAll = newGrid()
-				a.pending = nil
+				a.hist = nil
+				a.flushPending()
 				a.res.ByObject = true
 			}
 			a.lastZ = a.z
@@ -687,36 +692,11 @@ func (a *analyzer) finishLayer() {
 		labels = append(labels, l)
 	}
 	sort.Strings(labels)
-	// support patches of the layer below: who prints on them now
+	// support patches below: the objects that print on them within the z gap
 	if a.on(MeasureSupportContacts) && len(a.pending) > 0 {
-		above := map[string]*grid{}
-		for _, l := range labels {
-			g := newGrid()
-			for ft, fg := range a.rast[l] {
-				if !isSupport(ft) {
-					g.union(fg)
-				}
-			}
-			above[l] = g
-		}
-		for _, pc := range a.pending {
-			var names []string
-			for _, l := range labels {
-				for _, r := range pc.isl.runs {
-					if above[l].anyRun(r.y, r.x0, r.x1) {
-						names = append(names, l)
-						break
-					}
-				}
-			}
-			a.supportClusters = append(a.supportClusters, SupportCluster{
-				Object: pc.obj.ref.Label, Feature: pc.feature, Layer: pc.layer, Z: pc.z,
-				MinX: cellsToMM(pc.isl.minX), MaxX: cellsToMM(pc.isl.maxX + 1), MinY: cellsToMM(pc.isl.minY), MaxY: cellsToMM(pc.isl.maxY + 1),
-				AreaMM2: float64(pc.isl.cells) * gridCell * gridCell, Above: names,
-			})
-		}
-		a.pending = nil
+		a.resolvePending(labels, false)
 	}
+	below := a.belowGrid()
 	all := newGrid()
 	for _, l := range labels {
 		o := a.objs[l]
@@ -733,8 +713,9 @@ func (a *analyzer) finishLayer() {
 				union.union(byFeat[ft])
 			}
 			if a.on(MeasureSupportContacts) && inRange && isSupport(ft) && (len(a.wantFeat) == 0 || a.wantFeat[strings.ToLower(ft)]) {
-				for _, isl := range byFeat[ft].islands() {
-					a.pending = append(a.pending, pendingCluster{obj: o, feature: ft, layer: a.layer, z: a.z, isl: isl})
+				for _, p := range byFeat[ft].mergedPatches(a.mergeCells(ft)) {
+					a.pending = append(a.pending, pendingCluster{obj: o, feature: ft, layer: a.layer, z: a.z, patch: p,
+						limit: a.z + cfgNum(a.cfg, "support_top_z_distance", 0.2) + 2*math.Max(a.height, 0.05), names: map[string]bool{}})
 				}
 			}
 		}
@@ -744,7 +725,7 @@ func (a *analyzer) finishLayer() {
 		for _, isl := range union.islands() {
 			covered := 0
 			for _, r := range isl.runs {
-				covered += a.prevAll.countRun(r.y, r.x0, r.x1)
+				covered += below.countRun(r.y, r.x0, r.x1)
 			}
 			pct := 100 * float64(covered) / float64(isl.cells)
 			if pct >= 10 {
@@ -766,7 +747,7 @@ func (a *analyzer) finishLayer() {
 			a.startIslands = append(a.startIslands, si)
 		}
 	}
-	a.prevAll = all
+	a.hist = append(a.hist, histLayer{z: a.z, all: all})
 }
 
 // finish turns the accumulators into the result rows.
@@ -945,4 +926,35 @@ func hitsFeature(isl island, g *grid) bool {
 		}
 	}
 	return false
+}
+
+// histLayer is the extrusion of everything printed in one layer (objects and
+// support), kept for the layers that can still lie under a later one.
+type histLayer struct {
+	z   float64
+	all *grid
+}
+
+// belowGrid is what a layer at the current z stands on: the extrusion of every
+// layer whose top lies at most the current layer's height plus the largest layer
+// height seen below its bottom. With independent support layer heights the slicer
+// writes layers that hold only support between object layers, so the layer just
+// before the current one is not the one under it. Layers further down are dropped.
+func (a *analyzer) belowGrid() *grid {
+	a.maxH = math.Max(a.maxH, a.height)
+	low := a.z - math.Max(a.height, 0.05) - math.Max(a.maxH, 0.05) - 1e-6
+	kept := a.hist[:0]
+	for _, h := range a.hist {
+		if h.z >= low {
+			kept = append(kept, h)
+		}
+	}
+	a.hist = kept
+	below := newGrid()
+	for _, h := range a.hist {
+		if h.z < a.z-1e-9 {
+			below.union(h.all)
+		}
+	}
+	return below
 }

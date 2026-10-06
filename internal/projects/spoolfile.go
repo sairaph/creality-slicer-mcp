@@ -117,9 +117,13 @@ func samePath(a, b string) bool {
 	return eq(a, b) || eq(resolvedFile(a), resolvedFile(b))
 }
 
-// resolvedFile is a file path with the links of its folder resolved; a folder
-// that does not exist leaves the path as it is.
+// resolvedFile is a file path with its links and short (8.3) names resolved:
+// the file itself when it exists, else the folder it would be in; a folder that
+// does not exist leaves the path as it is.
 func resolvedFile(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
 	dir, base := filepath.Split(p)
 	if r, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = r

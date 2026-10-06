@@ -164,6 +164,8 @@ type pendingCluster struct {
 	patch   patch
 	limit   float64 // the z up to which an object layer counts as printed on it
 	names   map[string]bool
+	// supportAbove: more support of the same object prints over the patch.
+	supportAbove bool
 }
 
 // mergeCells is how far (in cells) the strips of a support feature are grown to
@@ -205,6 +207,15 @@ func (a *analyzer) resolvePending(labels []string, flush bool) {
 					pc.names[l] = true
 				}
 			}
+			// support of the same object printed above it: a lower support column
+			if !pc.supportAbove {
+				for ft, fg := range a.rast[pc.obj.ref.Label] {
+					if isSupport(ft) && pc.patch.touches(fg, 1) {
+						pc.supportAbove = true
+						break
+					}
+				}
+			}
 			keep = append(keep, pc)
 			continue
 		}
@@ -223,9 +234,16 @@ func (a *analyzer) recordSupport(pc pendingCluster) {
 		names = append(names, l)
 	}
 	sort.Strings(names)
+	if len(names) == 0 && pc.supportAbove {
+		names = []string{SupportAbove}
+	}
 	a.supportClusters = append(a.supportClusters, SupportCluster{
 		Object: pc.obj.ref.Label, Feature: pc.feature, Layer: pc.layer, Z: pc.z,
 		MinX: cellsToMM(pc.patch.minX), MaxX: cellsToMM(pc.patch.maxX + 1), MinY: cellsToMM(pc.patch.minY), MaxY: cellsToMM(pc.patch.maxY + 1),
 		AreaMM2: float64(pc.patch.cells) * gridCell * gridCell, Above: names,
 	})
 }
+
+// SupportAbove is the "printed on it" entry of a support patch that has more
+// support, and no object, printing over it.
+const SupportAbove = "support"

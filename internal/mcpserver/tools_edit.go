@@ -338,7 +338,7 @@ func (s *Server) updateSettings(ctx context.Context, _ *mcp.CallToolRequest, in 
 	// change from 15% to 15%.
 	var changed, same []projects.Change
 	for _, c := range res.Changed {
-		if !c.Removed && c.Old != "" && sameSetting(c.Old, c.New) {
+		if !c.Removed && (c.Note == "unchanged" || c.Old != "" && sameSetting(c.Old, c.New)) {
 			same = append(same, c)
 		} else {
 			changed = append(changed, c)

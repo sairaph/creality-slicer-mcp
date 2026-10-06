@@ -253,12 +253,16 @@ type analyzer struct {
 	rast map[string]map[string]*grid
 	// hist holds the extrusion of every object and support of the layers just
 	// below the current one (see belowGrid); older layers are dropped.
-	hist            []histLayer
-	maxH            float64
-	pending         []pendingCluster
-	cfg             map[string]string
-	startIslands    []StartIsland
-	supportClusters []SupportCluster
+	hist    []histLayer
+	maxH    float64
+	pending []pendingCluster
+	// equalZ: the layer just opened repeats the height of the one before; refObject
+	// is the object that printed last then, lastStarted the last object started.
+	equalZ                 bool
+	refObject, lastStarted string
+	cfg                    map[string]string
+	startIslands           []StartIsland
+	supportClusters        []SupportCluster
 }
 
 // NormObjectName is the form object names are compared in: lower case, every
@@ -380,7 +384,11 @@ func Analyze(path string, opt AnalyzeOptions) (*Analysis, error) {
 			a.endRun()
 			if i := strings.Index(text, "NAME="); i >= 0 {
 				if name := strings.Fields(text[i+5:]); len(name) > 0 {
+					if a.equalZ {
+						a.decideEqualZ(name[0])
+					}
 					a.cur = a.object(name[0])
+					a.lastStarted = name[0]
 				}
 			}
 			continue
@@ -434,14 +442,20 @@ func (a *analyzer) comment(text string, st *MotionState) {
 			// A layer that does not rise above the one before starts a new object
 			// sequence (print_sequence by object): numbering and the layer below
 			// begin again.
-			if a.layer > 1 && a.z <= a.lastZ+1e-9 {
-				a.layer = 1
-				a.hist = nil
-				a.flushPending()
-				a.res.ByObject = true
+			// A strictly lower z (an equal one is a repeated height, such as the
+			// closing loop of vase mode, and just another layer marker).
+			if a.layer > 1 && a.z < a.lastZ-1e-9 {
+				a.restartByObject()
+			} else if a.layer > 1 && a.z <= a.lastZ+1e-9 {
+				// The same height again: another object's first layer (by object) or
+				// the same object's closing loop (vase mode). The first object of the
+				// layer decides; until then the layer is not counted.
+				a.equalZ, a.refObject = true, a.lastStarted
 			}
 			a.lastZ = a.z
-			a.res.Layers = max(a.res.Layers, a.layer)
+			if !a.equalZ {
+				a.res.Layers = max(a.res.Layers, a.layer)
+			}
 		}
 	case strings.HasPrefix(text, ";TYPE:"):
 		a.endRun()
@@ -867,7 +881,9 @@ func (a *analyzer) finish() {
 	for _, c := range a.supportClusters {
 		c.Object = byDisplay(c.Object)
 		for i, l := range c.Above {
-			c.Above[i] = byDisplay(l)
+			if l != SupportAbove || a.objs[l] != nil {
+				c.Above[i] = byDisplay(l)
+			}
 		}
 		sort.Strings(c.Above)
 		res.SupportContacts = append(res.SupportContacts, c)
@@ -957,4 +973,27 @@ func (a *analyzer) belowGrid() *grid {
 		}
 	}
 	return below
+}
+
+// restartByObject begins the layer numbering again: the next object of a plate
+// printed by object.
+func (a *analyzer) restartByObject() {
+	a.layer = 1
+	a.hist = nil
+	a.flushPending()
+	a.res.ByObject = true
+	a.res.Layers = max(a.res.Layers, a.layer)
+}
+
+// decideEqualZ settles a layer that repeated the height of the one before, when
+// its first object is known: the same object continues its layer (the closing
+// loop of vase mode, counted with the layer before), another object starts its
+// own sequence (print by object).
+func (a *analyzer) decideEqualZ(first string) {
+	a.equalZ = false
+	if first == a.refObject || a.refObject == "" {
+		a.layer--
+		return
+	}
+	a.restartByObject()
 }

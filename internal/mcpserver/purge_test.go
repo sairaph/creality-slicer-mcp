@@ -828,3 +828,95 @@ func TestDisplayVectorUsesTheStructuredList(t *testing.T) {
 		}
 	}
 }
+
+// An empty string for an empty (or equal) string setting is a no-op: "Nothing
+// changed", and the revision stays.
+func TestEmptyValueForEmptySettingIsANoOp(t *testing.T) {
+	pf := newProjFixture(t)
+	id := pf.create(t, "Empty")
+	rev := func() any { return frontOf(t, pf.ok(t, "get_project", map[string]any{"project": id}))["revision"] }
+	before := rev()
+	for _, key := range []string{"template_custom_gcode", "filament_start_gcode"} {
+		out := pf.ok(t, "update_settings", map[string]any{"project": id, "values": map[string]any{key: ""}})
+		if !strings.Contains(out, "Nothing changed") || strings.Contains(out, "- -> -") {
+			t.Errorf("%s: an empty value for an empty setting:\n%s", key, out)
+		}
+		if got := frontOf(t, out)["revision"]; got != before {
+			t.Errorf("%s: the revision moved from %v to %v", key, before, got)
+		}
+	}
+	if after := rev(); after != before {
+		t.Errorf("revision %v -> %v", before, after)
+	}
+	// a real value is a change; the same value again is not
+	pf.ok(t, "update_settings", map[string]any{"project": id, "values": map[string]any{"template_custom_gcode": "M117 x"}})
+	out := pf.ok(t, "update_settings", map[string]any{"project": id, "values": map[string]any{"template_custom_gcode": "M117 x"}})
+	if !strings.Contains(out, "Nothing changed") {
+		t.Errorf("same value again:\n%s", out)
+	}
+}
+
+// A paged analyze reply ends with one Next line.
+func TestAnalyzePagesEndWithOneNextLine(t *testing.T) {
+	var g strings.Builder
+	g.WriteString("; filament_diameter: 1.75\nM83\n")
+	for i := 1; i <= 600; i++ {
+		fmt.Fprintf(&g, ";LAYER_CHANGE\n;Z:%.2f\n;HEIGHT:0.2\nEXCLUDE_OBJECT_START NAME=Cube_id_0_copy_0\n;TYPE:Outer wall\n;WIDTH:0.45\nG1 X%d Y10 F30000\nG1 X%d Y20 E.4 F3600\nEXCLUDE_OBJECT_END NAME=Cube_id_0_copy_0\n", float64(i)*0.2, 10+i%50, 20+i%50)
+	}
+	pf := newProjFixture(t)
+	pf.exec.gcode = g.String()
+	id := namedModel(t, pf, "", "Cube", 1)
+	pf.ok(t, "slice_project", map[string]any{"project": id, "preview": "none", "background": false})
+	out := pf.ok(t, "analyze_toolpaths", map[string]any{"project": id, "detail": "per_layer"})
+	if frontOf(t, out)["total_pages"] == nil || frontOf(t, out)["total_pages"].(int) < 2 {
+		t.Skipf("the fixture did not page: %v", frontOf(t, out)["total_pages"])
+	}
+	if n := strings.Count(out, "Next:"); n != 1 || !strings.Contains(out, "Next: page=2 of") || !strings.Contains(out, "or narrow with") {
+		t.Errorf("%d Next lines:\n%s", n, out[max(0, len(out)-400):])
+	}
+}
+
+// By object with several objects, Creality Print writes no layer action (GCode.cpp
+// emits them only in the by layer branch; the sequential branch needs more than one
+// object instance): the project says so from both directions and the slice table
+// says it too. One object takes the normal path and keeps its actions.
+func TestLayerActionsByObjectWarnsAndIsReported(t *testing.T) {
+	const want = "plate 1 prints by object with several objects, and Creality Print writes none of its layer actions"
+	pf := newProjFixture(t)
+	id := namedModel(t, pf, "", "A", 1)
+	namedModel(t, pf, id, "A2", 1)
+	// actions first, then by object
+	pf.ok(t, "set_layer_actions", map[string]any{"project": id, "actions": []map[string]any{{"layer": 2, "type": "custom", "gcode": "M117 hi"}, {"layer": 3, "type": "pause"}}})
+	out := pf.ok(t, "update_settings", map[string]any{"project": id, "scope": "plate", "target": "1", "values": map[string]any{"print_sequence": "by object"}})
+	if !strings.Contains(out, want) || !strings.Contains(out, "custom, pause") {
+		t.Errorf("setting by object does not warn:\n%s", out)
+	}
+	sl := pf.ok(t, "slice_project", map[string]any{"project": id, "preview": "none", "background": false})
+	contains(t, "slice", sl, "ignored by Creality Print: the plate prints by object with several objects", want)
+	// by object first, then an action
+	id2 := namedModel(t, pf, "", "B", 1)
+	namedModel(t, pf, id2, "B2", 1)
+	pf.ok(t, "update_settings", map[string]any{"project": id2, "scope": "plate", "target": "1", "values": map[string]any{"print_sequence": "by object"}})
+	out = pf.ok(t, "set_layer_actions", map[string]any{"project": id2, "actions": []map[string]any{{"layer": 3, "type": "pause"}}})
+	if !strings.Contains(out, want) {
+		t.Errorf("set_layer_actions does not warn:\n%s", out)
+	}
+	// one object by object: no warning, and the slice does not call the actions ignored
+	id3 := namedModel(t, pf, "", "C", 1)
+	pf.ok(t, "update_settings", map[string]any{"project": id3, "scope": "plate", "target": "1", "values": map[string]any{"print_sequence": "by object"}})
+	out = pf.ok(t, "set_layer_actions", map[string]any{"project": id3, "actions": []map[string]any{{"layer": 3, "type": "pause"}}})
+	if strings.Contains(out, "prints by object") {
+		t.Errorf("warned for a single object plate:\n%s", out)
+	}
+	sl = pf.ok(t, "slice_project", map[string]any{"project": id3, "preview": "none", "background": false})
+	if strings.Contains(sl, "prints by object") || strings.Contains(sl, "ignored by Creality Print") {
+		t.Errorf("a single object plate's action is called ignored:\n%s", sl)
+	}
+	// by layer: no such warning
+	id4 := namedModel(t, pf, "", "D", 1)
+	namedModel(t, pf, id4, "D2", 1)
+	out = pf.ok(t, "set_layer_actions", map[string]any{"project": id4, "actions": []map[string]any{{"layer": 3, "type": "pause"}}})
+	if strings.Contains(out, "prints by object") {
+		t.Errorf("warned for a by layer plate:\n%s", out)
+	}
+}

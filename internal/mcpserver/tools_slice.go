@@ -213,6 +213,16 @@ func sliceReply(info *projects.Info, last *projects.LastSlice, warnings []string
 	// The ignored layer tool changes of the sliced plates are named in the reply.
 	for _, p := range last.Plates {
 		for _, a := range p.Actions {
+			if a.ByObject {
+				for _, w := range info.Warnings {
+					if w.Code == "layer_actions_by_object" && strings.Contains(w.Message, fmt.Sprintf("plate %d ", p.Plate)) {
+						front.Warnings = dedupe(append(front.Warnings, w.Message))
+					}
+				}
+				break
+			}
+		}
+		for _, a := range p.Actions {
 			if !a.Ignored {
 				continue
 			}
@@ -261,7 +271,9 @@ func sliceReply(info *projects.Info, last *projects.LastSlice, warnings []string
 		front.Handoff = append(front.Handoff, h)
 		for _, a := range p.Actions {
 			kind := strings.ReplaceAll(a.Kind, "_", " ")
-			if a.Ignored {
+			if a.ByObject {
+				fmt.Fprintf(&actions, "%d | %s at layer %d (z %s mm) | ignored by Creality Print: the plate prints by object with several objects, and layer actions are written only when printing by layer\n", p.Plate, kind, a.Layer, num(a.Z))
+			} else if a.Ignored {
 				fmt.Fprintf(&actions, "%d | %s at layer %d (z %s mm) | ignored by Creality Print: the plate's objects use several filaments\n", p.Plate, kind, a.Layer, num(a.Z))
 			} else if a.Found {
 				fmt.Fprintf(&actions, "%d | %s at layer %d (z %s mm) | found in the G-code at z %s mm\n", p.Plate, kind, a.Layer, num(a.Z), num(a.AtZ))
@@ -576,7 +588,9 @@ func (s *Server) getSliceReport(ctx context.Context, _ *mcp.CallToolRequest, in 
 		}
 		ws = append(ws, rep.Warnings...)
 		for _, a := range p.Actions {
-			if a.Ignored {
+			if a.ByObject {
+				ws = append(ws, fmt.Sprintf("The %s at layer %d (z %s mm) is ignored by Creality Print: the plate prints by object with several objects.", strings.ReplaceAll(a.Kind, "_", " "), a.Layer, num(a.Z)))
+			} else if a.Ignored {
 				ws = append(ws, fmt.Sprintf("The %s at layer %d (z %s mm) is ignored by Creality Print: the plate's objects use several filaments.", strings.ReplaceAll(a.Kind, "_", " "), a.Layer, num(a.Z)))
 			}
 		}
@@ -762,6 +776,9 @@ func (s *Server) reportFromFile(ctx context.Context, be ProjectBackend, info *pr
 			minH, maxH = math.Min(minH, l.Height), math.Max(maxH, l.Height)
 		}
 		fmt.Fprintf(b, "%d layer(s). First layer: z %s mm, height %s mm. Last layer: z %s mm. Layer heights range from %s to %s mm.\n", len(layers), num(layers[0].Z), num(layers[0].Height), num(layers[len(layers)-1].Z), num(minH), num(maxH))
+		if p.Layers > 0 && p.Layers != len(layers) && !printsByObject(layers) {
+			fmt.Fprintf(b, "The G-code has %d layer markers and the slicer counts %d layers: a marker that repeats the height of the one before it (the closing loop of vase mode) is not a layer of its own. The layer counts of slice_project and analyze_toolpaths are the slicer's %d; layer numbers here are marker numbers.\n", len(layers), p.Layers, p.Layers)
+		}
 		if printsByObject(layers) {
 			b.WriteString("This plate is printed by object: layers are counted across all objects, one object after another, so the same height comes up once for each object and layer N is not the Nth height.\n")
 		}

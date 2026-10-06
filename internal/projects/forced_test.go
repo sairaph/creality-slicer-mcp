@@ -491,3 +491,77 @@ func TestLogTailKeepsErrorLines(t *testing.T) {
 		t.Errorf("long error line: %q", got[2])
 	}
 }
+
+// The slicer's own layer count (the footer: distinct heights) is the plate's
+// layer count, so a vase mode closing loop is not counted as a layer.
+func TestLayerCountIsTheSlicersCount(t *testing.T) {
+	e := newEnv(t)
+	info := e.newProject(t, "Vase")
+	e.addBox(t, info.ID, "cube", 20, 20, 20)
+	e.exec.gcode = func(int) string {
+		var b strings.Builder
+		b.WriteString(strings.Split(defaultGCode, "T0\n")[0] + "T0\n")
+		for _, z := range []string{"0.2", "0.4", "0.6", "0.6"} {
+			b.WriteString(";LAYER_CHANGE\n;Z:" + z + "\n;HEIGHT:0.2\n;TYPE:Outer wall\nG1 X10 Y10 E1\n")
+		}
+		b.WriteString("; EXECUTABLE_BLOCK_END\n; filament used [g] = 1.00\n; total layers count = 3\n; estimated printing time (normal mode) = 1m 5s\n")
+		return b.String()
+	}
+	out, err := e.st.Slice(info.ID, SliceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out.Last.Plates[0].Layers; got != 3 {
+		t.Errorf("layers %d, want the slicer's 3 (4 markers)", got)
+	}
+}
+
+// One object printed by object takes the normal path: its actions are written and
+// found; with two objects none is written and the table says ignored.
+func TestByObjectActionsDependOnTheObjectCount(t *testing.T) {
+	gcode := func(int) string {
+		var b strings.Builder
+		b.WriteString(strings.Split(defaultGCode, "T0\n")[0] + "T0\n")
+		for i, z := range []string{"0.2", "0.4", "0.6"} {
+			b.WriteString(";LAYER_CHANGE\n;Z:" + z + "\n;HEIGHT:0.2\n")
+			if i == 2 {
+				b.WriteString(";PAUSE_PRINT\nPAUSE\n")
+			}
+		}
+		b.WriteString("; EXECUTABLE_BLOCK_END\n; filament used [g] = 1.00\n; estimated printing time (normal mode) = 1m 5s\n")
+		return b.String()
+	}
+	for _, tc := range []struct {
+		objects int
+		ignored bool
+	}{{1, false}, {2, true}} {
+		e := newEnv(t)
+		info := e.newProject(t, "ByObj")
+		for i := 0; i < tc.objects; i++ {
+			e.addBox(t, info.ID, fmt.Sprintf("cube%d", i), 20, 20, 20)
+		}
+		if _, err := e.st.UpdateSettings(info.ID, SettingsRequest{Scope: "plate", Target: "1", Values: map[string]any{"print_sequence": "by object"}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.st.SetLayerActions(info.ID, 1, []LayerAction{{Layer: 3, Kind: ActionPause}}); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := e.st.GetProject(info.ID)
+		warned := false
+		for _, w := range got.Warnings {
+			warned = warned || w.Code == "layer_actions_by_object"
+		}
+		if warned != tc.ignored {
+			t.Errorf("%d object(s): warned %v", tc.objects, warned)
+		}
+		e.exec.gcode = gcode
+		out, err := e.st.Slice(info.ID, SliceOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := out.Last.Plates[0].Actions[0]
+		if a.ByObject != tc.ignored || a.Found == tc.ignored {
+			t.Errorf("%d object(s): %+v", tc.objects, a)
+		}
+	}
+}

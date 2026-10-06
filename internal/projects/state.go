@@ -527,6 +527,24 @@ func (h *handle) warnings(in *Info, geo geometry) []Warning {
 	if h.p.Settings != nil && len(in.Filaments) >= 2 && strings.TrimSpace(h.p.Settings.String("change_filament_gcode")) == "" {
 		add("change_filament_gcode_empty", "change_filament_gcode is empty and the project uses %d filaments: every filament change is written as a bare T command, without the printer preset's own change procedure (on the K2 that macro does the lift, the move and the purge around the change), so changes may fail or print badly; set it again with update_settings (get_preset shows the printer preset's value)", len(in.Filaments))
 	}
+	// Printing by object: GCode.cpp writes the layer actions (Model's
+	// custom_gcode_per_print_z) only in the by layer branch, and ToolOrdering never
+	// assigns them per object ("We don't allow switching of extruders per layer by
+	// Model::custom_gcode_per_print_z in sequential mode"): none is written.
+	for _, pl := range in.Plates {
+		if len(pl.Actions) == 0 || pl.Objects < 2 || h.plateSequence(pl.Index) != "by object" {
+			continue
+		}
+		kinds := map[string]bool{}
+		var list []string
+		for _, a := range pl.Actions {
+			if k := strings.ReplaceAll(a.Kind, "_", " "); !kinds[k] {
+				kinds[k] = true
+				list = append(list, k)
+			}
+		}
+		add("layer_actions_by_object", "plate %d prints by object with several objects, and Creality Print writes none of its layer actions in that mode (they are emitted only when printing by layer; a plate with one object takes the normal path and keeps them): the %s action(s) of this plate do nothing, pauses, custom G-code, templates and tool changes alike; print the plate by layer (print_sequence by layer) or remove the actions", pl.Index, strings.Join(list, ", "))
+	}
 	// K2: tool changes, pauses and custom G-code are honoured; a colour change
 	// writes nothing because the printer preset has no colour change G-code).
 	for _, pl := range in.Plates {

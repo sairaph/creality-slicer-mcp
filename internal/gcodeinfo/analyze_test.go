@@ -730,3 +730,66 @@ func TestAnalyzeUnsupportedStartsWithSupportOnlyLayers(t *testing.T) {
 		t.Fatalf("the real mid-air island: %v %+v", err, res.UnsupportedStarts)
 	}
 }
+
+// A lower support column that has more support printing on it says "support";
+// the patch an object prints on names the object; one with nothing above is "-".
+func TestAnalyzeSupportOnSupport(t *testing.T) {
+	b := newBuilder(false)
+	for _, z := range []float64{0.2, 0.4, 0.6, 0.8, 1.0, 1.2} {
+		b.layer(z)
+		b.begin("D_id_0_copy_0")
+		b.typ("Support", 0.45)
+		b.square(100, 100, 4, 0.45) // a column of three support layers
+		b.end("D_id_0_copy_0")
+	}
+	b.layer(1.4)
+	b.begin("E_id_1_copy_0")
+	b.typ("Outer wall", 0.45)
+	b.square(100.5, 100.5, 3, 0.45) // the model prints on the top of the column
+	b.end("E_id_1_copy_0")
+	res, err := Analyze(b.write(t), AnalyzeOptions{Measures: []string{MeasureSupportContacts}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byLayer := map[int][]string{}
+	for _, c := range res.SupportContacts {
+		byLayer[c.Layer] = c.Above
+	}
+	if len(byLayer) != 6 {
+		t.Fatalf("clusters %+v", res.SupportContacts)
+	}
+	if len(byLayer[1]) != 1 || byLayer[1][0] != SupportAbove || len(byLayer[2]) != 1 || byLayer[2][0] != SupportAbove {
+		t.Errorf("lower layers %v %v, want support", byLayer[1], byLayer[2])
+	}
+	if len(byLayer[6]) != 1 || byLayer[6][0] != "E" {
+		t.Errorf("the top layer 6 %v, want E", byLayer[6])
+	}
+	// a lone support patch with nothing over it stays empty
+	b2 := newBuilder(false)
+	b2.layer(0.2)
+	b2.begin("D_id_0_copy_0")
+	b2.typ("Support", 0.45)
+	b2.square(100, 100, 4, 0.45)
+	b2.end("D_id_0_copy_0")
+	res, err = Analyze(b2.write(t), AnalyzeOptions{Measures: []string{MeasureSupportContacts}})
+	if err != nil || len(res.SupportContacts) != 1 || len(res.SupportContacts[0].Above) != 0 {
+		t.Errorf("lone patch: %v %+v", err, res.SupportContacts)
+	}
+}
+
+// A vase mode file closes with a loop at the height of the layer before it: one
+// more ;LAYER_CHANGE, no new layer, and no restart of the numbering.
+func TestAnalyzeVaseClosingLoopIsNotALayer(t *testing.T) {
+	b := newBuilder(false)
+	for _, z := range []float64{0.2, 0.4, 0.6, 0.6} {
+		b.layer(z)
+		b.begin("V_id_0_copy_0")
+		b.typ("Outer wall", 0.45)
+		b.square(100, 100, 10, 0.45)
+		b.end("V_id_0_copy_0")
+	}
+	res, err := Analyze(b.write(t), AnalyzeOptions{})
+	if err != nil || res.Layers != 3 || res.ByObject {
+		t.Fatalf("vase: %v layers %d by object %v", err, res.Layers, res.ByObject)
+	}
+}

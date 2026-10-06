@@ -45,6 +45,9 @@ type ActionResult struct {
 	// pause) or change_filament_gcode (a tool change, which is then a bare T).
 	// Found is false then.
 	Empty string
+	// ByObject is true for an action of a plate printed by object: Creality Print
+	// writes no layer action in that mode.
+	ByObject bool
 }
 
 // labelRE parses <name>_id_<n>_copy_<k>.

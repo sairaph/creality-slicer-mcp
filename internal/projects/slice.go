@@ -606,7 +606,7 @@ func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res
 		summaries[plate] = sum
 		pr := PlateResult{
 			Plate: plate, Revision: startRev, GCodePath: file, UploadName: fmt.Sprintf("%s_plate%d.gcode", uploadBase(projectName, id), plate),
-			TimeSeconds: sum.TimeSeconds, TimeText: sum.TimeText, Layers: firstPositive(sum.TotalLayerNumber, sum.LayerCount),
+			TimeSeconds: sum.TimeSeconds, TimeText: sum.TimeText, Layers: firstPositive(sum.TotalLayersCount, sum.TotalLayerNumber, sum.LayerCount),
 			FilamentG: sum.FilamentUsedG, TotalG: sum.TotalFilamentG, Multicolour: sum.M8200 || len(sum.Tools) > 1,
 		}
 		if st, err := os.Stat(file); err == nil {
@@ -634,6 +634,15 @@ func (s *Store) postProcess(id, projectName string, req slicer.SliceRequest, res
 				case a.Kind == ActionToolChange && a.Found && strings.TrimSpace(sp.Settings.String("change_filament_gcode")) == "":
 					a.Empty, a.Found = "change_filament_gcode", false
 				}
+			}
+		}
+		// Printing by object writes none of the plate's layer actions (GCode.cpp
+		// emits them only in the by layer branch).
+		// Only the sequential branch (by object with more than one object instance,
+		// GCode.cpp:5567) skips them; one object takes the normal path.
+		if pl := snap.p.Plate(plate); snap.plateSequence(plate) == "by object" && pl != nil && len(pl.Instances) > 1 {
+			for i := range pr.Actions {
+				pr.Actions[i].Found, pr.Actions[i].Empty, pr.Actions[i].ByObject = false, "", true
 			}
 		}
 		// Evaluated on the sliced project, with the same rule as the warning.

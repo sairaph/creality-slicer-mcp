@@ -528,6 +528,15 @@ func (h *handle) updateProject(req SettingsRequest, res *SettingsResult) error {
 		return v.First(), true
 	}}
 	h.applyForced(cfg, req.Values, env, res)
+	// Every value was already there (an empty string for an empty setting, the
+	// same number again): nothing is written and the revision does not move.
+	changedAny := len(res.Forced) > 0
+	for _, c := range res.Changed {
+		changedAny = changedAny || c.Note != "unchanged"
+	}
+	if !changedAny {
+		return nil
+	}
 	h.gateWarnings(req.Values, env, res)
 	if perr == nil {
 		setDiffs(cfg, in)

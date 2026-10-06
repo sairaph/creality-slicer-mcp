@@ -210,10 +210,12 @@ func (s *Server) analyzeToolpaths(ctx context.Context, _ *mcp.CallToolRequest, i
 	if len(noFind) > 0 {
 		body += "no findings: " + strings.Join(noFind, ", ") + "\n"
 	}
+	// one Next line: the next page when there is one, and how to narrow
+	next := "narrow with objects, layers, z, features or one measure; detail per_layer lists every layer."
 	if pages > page {
-		body += fmt.Sprintf("Next: page=%d of %d.\n", page+1, pages)
+		next = fmt.Sprintf("page=%d of %d for the rest, or %s", page+1, pages, next)
 	}
-	body += "Next: narrow with objects, layers, z, features or one measure; detail per_layer lists every layer."
+	body += "Next: " + next
 	return successResult(front, strings.TrimRight(body, "\n")), nil, nil
 }
 

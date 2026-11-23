@@ -1,3 +1,5 @@
+<img src=".github/icon.svg" alt="" width="96" height="96">
+
 # Creality Slicer MCP
 
 Slice for your Creality K2 or K2 Combo from Claude Desktop and other MCP
